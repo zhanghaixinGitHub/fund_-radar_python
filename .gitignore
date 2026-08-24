@@ -1,0 +1,10 @@
+.venv/
+.env
+.env.local
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+fund_ai.db
+.idea/
+*.iml
