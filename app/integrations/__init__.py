@@ -1,1 +1,1 @@
-"""External market data clients are introduced only after M1 source approval."""
+"""外部行情数据客户端只能在 M1 数据源获批后引入。"""

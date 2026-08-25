@@ -1,1 +1,1 @@
-"""FastAPI routing and dependencies."""
+"""FastAPI 路由及其依赖项。"""

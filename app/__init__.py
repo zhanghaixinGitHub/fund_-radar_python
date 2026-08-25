@@ -1,1 +1,1 @@
-"""Fund radar AI service package."""
+"""基金雷达 AI 内部服务包。"""

@@ -1,1 +1,1 @@
-"""AI, event, and backtest services reserved for M1-M3."""
+"""供 M1 至 M3 使用的 AI、事件与回测服务。"""

@@ -1,4 +1,4 @@
-"""Dependencies that protect Java-to-Python internal calls."""
+"""保护 Java 到 Python 内部调用边界的 FastAPI 依赖项。"""
 
 import hmac
 from typing import Annotated
@@ -15,13 +15,14 @@ OriginHeader = Annotated[str | None, Header(alias="Origin")]
 
 
 async def require_service_token(service_token: ServiceTokenHeader = None, origin: OriginHeader = None) -> None:
-    """Reject browser and unauthenticated access to internal API routes.
+    """拒绝浏览器来源和未通过服务身份验证的内部接口请求。
 
     Args:
-        service_token: Service identity token sent by the Java core service.
+        service_token: Java 核心服务通过请求头传入的服务身份令牌。
+        origin: 浏览器跨域请求可能附带的来源地址；内部接口不接受该类请求。
 
     Raises:
-        HTTPException: If the local token is missing or does not match.
+        HTTPException: 未配置令牌、令牌不一致或请求来自浏览器时抛出。
     """
     expected_token = get_settings().ai_service_token.get_secret_value()
     if origin:

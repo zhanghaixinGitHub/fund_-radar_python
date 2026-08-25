@@ -1,4 +1,4 @@
-"""System response schemas."""
+"""系统级响应的数据契约。"""
 
 from datetime import datetime
 
@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict
 
 
 class InternalHealthResponse(BaseModel):
-    """Authenticated internal service health response."""
+    """通过服务身份认证后返回的内部健康检查响应。"""
 
     model_config = ConfigDict(frozen=True)
 

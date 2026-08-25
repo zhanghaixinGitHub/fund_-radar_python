@@ -1,1 +1,1 @@
-"""Celery worker configuration and background tasks."""
+"""Celery Worker 配置与后台任务。"""

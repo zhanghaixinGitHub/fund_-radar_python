@@ -1,1 +1,1 @@
-"""Data access implementations reserved for M1."""
+"""供 M1 及后续里程碑使用的数据访问实现。"""

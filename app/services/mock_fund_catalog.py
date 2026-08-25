@@ -1,4 +1,4 @@
-"""M0 in-memory read model; it must be replaced by an authorized source in M1."""
+"""M0 内存基金读模型；M1 必须以已授权数据源实现替换。"""
 
 from app.schemas.fund import InternalFundDetail, InternalFundPage, InternalFundSummary
 
@@ -34,7 +34,7 @@ _FUND_DETAILS: tuple[InternalFundDetail, ...] = (
 
 
 def list_mock_funds(keyword: str | None, page_size: int, cursor: str | None) -> InternalFundPage:
-    """Return a filtered cursor page without fetching any external data source."""
+    """在内存示例数据中按关键字过滤并返回游标分页，不访问任何外部数据源。"""
     offset = int(cursor) if cursor else 0
     normalized_keyword = keyword.strip().lower() if keyword else ""
     filtered = tuple(
@@ -63,5 +63,5 @@ def list_mock_funds(keyword: str | None, page_size: int, cursor: str | None) -> 
 
 
 def get_mock_fund(fund_code: str) -> InternalFundDetail | None:
-    """Return the requested mock fund or ``None`` when the code is unknown."""
+    """返回指定的 Mock 基金详情；代码不存在时返回 None。"""
     return next((item for item in _FUND_DETAILS if item.fund_code == fund_code), None)

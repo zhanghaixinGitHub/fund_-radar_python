@@ -1,1 +1,1 @@
-"""Application configuration, middleware, and logging."""
+"""应用配置、中间件与日志基础设施。"""

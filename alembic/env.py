@@ -1,7 +1,8 @@
-"""Alembic environment for future fund-ai schema migrations."""
+"""基金 AI 服务数据库结构迁移的 Alembic 运行环境。"""
 
 from logging.config import fileConfig
 
+import app.models  # noqa: F401
 from alembic import context
 from app.core.config import get_settings
 from app.db.base import Base
@@ -15,7 +16,7 @@ target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    """Run migrations without creating an engine."""
+    """以离线 SQL 模式执行迁移，不创建数据库引擎或连接。"""
     context.configure(
         url=config.get_main_option("sqlalchemy.url"),
         target_metadata=target_metadata,
@@ -27,7 +28,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """Run migrations using the configured SQLAlchemy engine."""
+    """使用配置中的 SQLAlchemy 引擎建立连接后执行迁移。"""
     from sqlalchemy import engine_from_config, pool
 
     connectable = engine_from_config(

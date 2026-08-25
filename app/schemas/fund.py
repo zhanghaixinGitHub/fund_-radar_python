@@ -1,4 +1,4 @@
-"""Pydantic contracts for M0 mock fund read models."""
+"""M0 Mock 基金读模型的 Pydantic 内部接口契约。"""
 
 from datetime import date
 
@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class InternalFundSummary(BaseModel):
-    """Minimal public-safe fund data passed to the Java core service."""
+    """传递给 Java 核心服务的最小且可公开展示的基金摘要。"""
 
     model_config = ConfigDict(frozen=True)
 
@@ -18,14 +18,14 @@ class InternalFundSummary(BaseModel):
 
 
 class InternalFundDetail(InternalFundSummary):
-    """Detailed M0 mock fund read model with data freshness metadata."""
+    """带数据状态与来源信息的 M0 Mock 基金详情读模型。"""
 
     nav_status: str
     data_source: str
 
 
 class InternalFundPage(BaseModel):
-    """Cursor-compatible page returned to the Java core service."""
+    """返回给 Java 核心服务的兼容游标分页响应。"""
 
     model_config = ConfigDict(frozen=True)
 

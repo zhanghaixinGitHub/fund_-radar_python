@@ -1,1 +1,1 @@
-"""Pydantic API schemas."""
+"""Pydantic API 数据契约。"""

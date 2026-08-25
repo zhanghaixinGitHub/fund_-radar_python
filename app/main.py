@@ -1,4 +1,4 @@
-"""FastAPI application entry point for the internal AI service."""
+"""基金雷达 AI 内部服务的 FastAPI 应用入口。"""
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -15,14 +15,14 @@ logger = get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Initialize and close process-scoped resources without loading market data."""
+    """管理进程级资源的启停生命周期，不在启动阶段加载任何行情或外部数据。"""
     logger.info("main.lifespan >>> FastAPI AI service started")
     yield
     logger.info("main.lifespan >>> FastAPI AI service stopped")
 
 
 def create_application() -> FastAPI:
-    """Create the internal-only FastAPI application."""
+    """创建仅供 Java 核心服务调用的 FastAPI 应用，并注册日志、中间件和内部路由。"""
     settings = get_settings()
     configure_logging(settings.log_level)
 

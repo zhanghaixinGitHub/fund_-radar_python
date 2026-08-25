@@ -1,1 +1,1 @@
-"""Internal API routes."""
+"""仅供服务间调用的内部 API 路由。"""

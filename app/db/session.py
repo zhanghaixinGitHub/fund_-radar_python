@@ -1,4 +1,4 @@
-"""SQLAlchemy engine factory; no connection is opened during M0 startup."""
+"""SQLAlchemy 引擎工厂；M0 启动阶段不会主动建立数据库连接。"""
 
 from functools import lru_cache
 
@@ -9,5 +9,5 @@ from app.core.config import get_settings
 
 @lru_cache
 def get_engine() -> Engine:
-    """Create a pooled engine on demand for M1 migrations and repositories."""
+    """按需创建并缓存连接池引擎，供 M1 迁移和仓储层使用。"""
     return create_engine(get_settings().ai_database_url, pool_pre_ping=True)

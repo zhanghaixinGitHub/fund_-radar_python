@@ -1,1 +1,1 @@
-"""Database models and connection factories."""
+"""数据库模型与连接工厂。"""

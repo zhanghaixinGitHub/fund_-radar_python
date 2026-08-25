@@ -1,4 +1,4 @@
-"""Health endpoint available only to the Java core service."""
+"""仅允许 Java 核心服务探测的内部健康检查接口。"""
 
 from datetime import UTC, datetime
 
@@ -15,7 +15,7 @@ logger = get_logger(__name__)
 
 @router.get("/health", response_model=InternalHealthResponse, dependencies=[Depends(require_service_token)])
 async def get_internal_health(response: Response) -> InternalHealthResponse:
-    """Return a minimal authenticated health response for Java service probes."""
+    """返回最小化认证健康响应，并回传当前请求的追踪标识供 Java 服务关联日志。"""
     trace_id = get_trace_id()
     response.headers["X-Trace-Id"] = trace_id
     logger.info("health.get_internal_health >>> internal health probe succeeded, trace_id=%s", trace_id)

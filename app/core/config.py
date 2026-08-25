@@ -1,4 +1,4 @@
-"""Typed environment configuration for the FastAPI AI service."""
+"""FastAPI AI 服务的类型化环境配置。"""
 
 from functools import lru_cache
 
@@ -7,7 +7,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Runtime settings loaded from environment variables or a local .env file."""
+    """从环境变量或本地 `.env` 读取的运行时配置。
+
+    服务令牌使用 SecretStr 保存，日志或接口中不得输出其实际值。
+    """
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -23,5 +26,5 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    """Return a process-wide immutable configuration instance."""
+    """返回进程内缓存的配置实例，避免每次请求重复读取环境变量。"""
     return Settings()
