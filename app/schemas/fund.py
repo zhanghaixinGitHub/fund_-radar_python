@@ -1,6 +1,7 @@
 """M0 Mock 基金读模型的 Pydantic 内部接口契约。"""
 
 from datetime import date
+from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -20,10 +21,13 @@ class InternalFundSummary(BaseModel):
 
 
 class InternalFundDetail(InternalFundSummary):
-    """带数据状态与来源信息的 M0 Mock 基金详情读模型。"""
+    """带最新已落库净值快照、状态与来源信息的内部基金详情读模型。"""
 
     nav_status: str
     data_source: str
+    # 数值为空表示该份额当前尚无已同步净值；调用方不得补零或当作实时行情。
+    unit_nav: Decimal | None = None
+    accumulated_nav: Decimal | None = None
 
 
 class InternalFundPage(BaseModel):

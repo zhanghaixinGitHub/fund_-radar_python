@@ -102,10 +102,11 @@ def bootstrap_verified_fund_catalog() -> tuple[int, int]:
                         fund_code=verified.fund_code,
                         fund_master_id=master.fund_master_id,
                         share_class=verified.share_class,
-                        fund_name=verified.fund_name,
-                        fund_type=verified.fund_type,
-                        status="ACTIVE",
-                    )
+                fund_name=verified.fund_name,
+                fund_type=verified.fund_type,
+                status="ACTIVE",
+                source_code=SOURCE_CODE,
+            )
                 )
                 created_shares += 1
     return created_masters, created_shares

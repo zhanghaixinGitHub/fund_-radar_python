@@ -80,7 +80,7 @@ def test_internal_fund_list_and_detail_accept_service_token(monkeypatch) -> None
         fund_name="安信医药健康主题股票C",
         fund_type="STOCK",
         status="ACTIVE",
-        as_of_date=None,
+        as_of_date=datetime(2026, 8, 25, tzinfo=UTC).date(),
     )
     monkeypatch.setattr(
         funds,
@@ -92,8 +92,10 @@ def test_internal_fund_list_and_detail_accept_service_token(monkeypatch) -> None
         "get_fund",
         lambda _fund_code: InternalFundDetail(
             **summary.model_dump(),
-            nav_status="NOT_SYNCED",
-            data_source="MANUAL_PUBLISHER_VERIFIED_SAMPLE",
+            nav_status="SYNCED",
+            data_source="TUSHARE_PRO_FUND",
+            unit_nav=Decimal("1.3756"),
+            accumulated_nav=Decimal("1.3756"),
         ),
     )
 
@@ -109,12 +111,14 @@ def test_internal_fund_list_and_detail_accept_service_token(monkeypatch) -> None
             "fund_name": "安信医药健康主题股票C",
             "fund_type": "STOCK",
             "status": "ACTIVE",
-            "as_of_date": None,
+            "as_of_date": "2026-08-25",
         }
     ]
     assert list_response.headers["X-Trace-Id"] == "m0-contract-test"
     assert detail_response.status_code == 200
-    assert detail_response.json()["data_source"] == "MANUAL_PUBLISHER_VERIFIED_SAMPLE"
+    assert detail_response.json()["data_source"] == "TUSHARE_PRO_FUND"
+    assert detail_response.json()["unit_nav"] == "1.3756"
+    assert detail_response.json()["accumulated_nav"] == "1.3756"
     get_settings.cache_clear()
 
 

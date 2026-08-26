@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     celery_result_backend: str = "redis://localhost:6379/2"
     log_level: str = "INFO"
     tushare_token: SecretStr = SecretStr("")
+    tushare_api_url: str = "https://api.tushare.pro"
+    tushare_connect_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+    tushare_read_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
+    tushare_max_retries: int = Field(default=2, ge=0, le=5)
+    tushare_sync_batch_size: int = Field(default=500, ge=1, le=2_000)
+    tushare_catalog_max_rows_per_query: int = Field(default=15_000, ge=1, le=100_000)
 
 
 @lru_cache

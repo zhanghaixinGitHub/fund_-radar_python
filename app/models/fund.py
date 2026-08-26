@@ -82,6 +82,7 @@ class FundShareClass(Base):
     fund_name: Mapped[str] = mapped_column(String(256), nullable=False)
     fund_type: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_code: Mapped[str] = mapped_column(String(64), nullable=False)
     benchmark_code: Mapped[str | None] = mapped_column(String(64))
     risk_level: Mapped[str | None] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -115,3 +116,30 @@ class NavDaily(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+
+class SourceSyncRun(Base):
+    """外部数据源的一次受控同步运行记录，不保存凭据或原始响应。"""
+
+    __tablename__ = "source_sync_run"
+    __table_args__ = (
+        CheckConstraint("fetched_count >= 0", name="ck_source_sync_run_fetched_nonnegative"),
+        CheckConstraint("created_count >= 0", name="ck_source_sync_run_created_nonnegative"),
+        CheckConstraint("updated_count >= 0", name="ck_source_sync_run_updated_nonnegative"),
+        CheckConstraint("skipped_count >= 0", name="ck_source_sync_run_skipped_nonnegative"),
+    )
+
+    sync_run_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4)
+    source_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("source_registry.source_id"), nullable=False
+    )
+    sync_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    requested_nav_date: Mapped[date | None] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    fetched_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    updated_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    skipped_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    error_summary: Mapped[str | None] = mapped_column(String(512))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

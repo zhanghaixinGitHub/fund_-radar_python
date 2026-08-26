@@ -9,8 +9,6 @@ from app.models.fund import FundShareClass
 from app.repositories.fund_read import get_fund_summary, list_fund_summaries
 from app.schemas.fund import InternalFundDetail, InternalFundPage, InternalFundSummary
 
-_MANUAL_CATALOG_SOURCE = "MANUAL_PUBLISHER_VERIFIED_SAMPLE"
-
 
 def list_funds(keyword: str | None, page_size: int, cursor: str | None) -> InternalFundPage:
     """分页读取真实目录样本，不调用外部数据源或在读取时执行同步。"""
@@ -29,11 +27,13 @@ def get_fund(fund_code: str) -> InternalFundDetail | None:
         row = get_fund_summary(session, fund_code)
     if row is None:
         return None
-    fund, nav_date = row
+    fund = row.fund
     return InternalFundDetail(
-        **_to_summary(fund, nav_date).model_dump(),
-        nav_status="SYNCED" if nav_date else "NOT_SYNCED",
-        data_source=_MANUAL_CATALOG_SOURCE,
+        **_to_summary(fund, row.nav_date).model_dump(),
+        nav_status="SYNCED" if row.nav_date else "NOT_SYNCED",
+        data_source=row.source_code or fund.source_code,
+        unit_nav=row.unit_nav,
+        accumulated_nav=row.accumulated_nav,
     )
 
 

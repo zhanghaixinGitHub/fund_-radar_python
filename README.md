@@ -27,7 +27,16 @@ Linux 部署的并发池应按任务类型和容量另行评估；不要直接�
 .\.venv\Scripts\pytest.exe
 ```
 
-内部接口不暴露 Swagger/OpenAPI 页面，所有接口均须携带 `X-Service-Token`，并会拒绝含浏览器 `Origin` 的请求。`/internal/v1/funds` 和 `/internal/v1/funds/{fund_code}` 当前读取本机持久化的 6 条手工核验目录样本；无合规日净值时返回 `as_of_date=null` / `nav_status=NOT_SYNCED`，不能被解释为实时行情。`GET /internal/v1/sources` 仅返回无凭证的来源开关、限频、保留期和最近状态；样本来源默认禁用自动同步，不访问第三方。
+内部接口不暴露 Swagger/OpenAPI 页面，所有接口均须携带 `X-Service-Token`，并会拒绝含浏览器 `Origin` 的请求。`/internal/v1/funds` 和 `/internal/v1/funds/{fund_code}` 读取本机持久化目录；有已同步净值时详情会返回净值来源和截至日期，无净值时明确返回 `as_of_date=null` / `nav_status=NOT_SYNCED`，不能被解释为实时行情。`GET /internal/v1/sources` 仅返回无凭证的来源开关、限频、保留期和最近状态。
+
+获授权后，维护人员可显式执行：
+
+```powershell
+.\.venv\Scripts\python.exe -m app.commands.sync_tushare_funds catalog
+.\.venv\Scripts\python.exe -m app.commands.sync_tushare_funds nav --nav-date 2026-08-25
+```
+
+目录同步按市场和存续状态分片；任何分片达到配置行数上限都会失败关闭，绝不将部分结果标为全市场目录。净值同步按指定日期批量拉取，只为已存在的目录记录落库；原始响应和 Token 不写入数据库、日志或命令输出。
 
 关联文档：
 

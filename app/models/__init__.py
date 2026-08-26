@@ -2,7 +2,7 @@
 
 from app.models.analysis import BacktestRun, FeatureSnapshot, ForecastResult
 from app.models.event import EventRelation, MarketEvent, NewsItem, NewsSourceReference
-from app.models.fund import FundMaster, FundShareClass, NavDaily, SourceRegistry
+from app.models.fund import FundMaster, FundShareClass, NavDaily, SourceRegistry, SourceSyncRun
 
 __all__ = [
     "BacktestRun",
@@ -16,4 +16,5 @@ __all__ = [
     "NewsItem",
     "NewsSourceReference",
     "SourceRegistry",
+    "SourceSyncRun",
 ]

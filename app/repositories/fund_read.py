@@ -1,11 +1,24 @@
 """基金目录与最新有效净值的只读仓储。"""
 
+from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, select, true
 from sqlalchemy.orm import Session
 
-from app.models.fund import FundShareClass, NavDaily
+from app.models.fund import FundShareClass, NavDaily, SourceRegistry
+
+
+@dataclass(frozen=True)
+class FundDetailSnapshot:
+    """同一条最新净值记录的详情投影，避免净值数值与来源错配。"""
+
+    fund: FundShareClass
+    nav_date: date | None
+    unit_nav: Decimal | None
+    accumulated_nav: Decimal | None
+    source_code: str | None
 
 
 def list_fund_summaries(
@@ -37,13 +50,44 @@ def list_fund_summaries(
     return tuple(session.execute(statement.limit(page_size + 1)).all())
 
 
-def get_fund_summary(session: Session, fund_code: str) -> tuple[FundShareClass, date | None] | None:
-    """返回单只基金份额及其最新净值日期；目录不存在时返回 ``None``。"""
+def get_fund_summary(session: Session, fund_code: str) -> FundDetailSnapshot | None:
+    """返回最新净值快照；目录不存在时返回 ``None``。
+
+    同一日期可能存在多个已登记来源，按最新净值日期倒序、来源代码正序确定展示记录，
+    并从该同一行读取数值与来源，避免跨行拼接出错误的详情。
+    """
     latest_nav = (
-        select(func.max(NavDaily.nav_date))
+        select(
+            NavDaily.nav_date.label("nav_date"),
+            NavDaily.unit_nav.label("unit_nav"),
+            NavDaily.accumulated_nav.label("accumulated_nav"),
+            SourceRegistry.source_code.label("source_code"),
+        )
+        .select_from(NavDaily)
+        .join(SourceRegistry, SourceRegistry.source_id == NavDaily.source_id)
         .where(NavDaily.fund_code == fund_code)
-        .scalar_subquery()
+        .order_by(NavDaily.nav_date.desc(), SourceRegistry.source_code.asc())
+        .limit(1)
+        .subquery()
     )
-    return session.execute(
-        select(FundShareClass, latest_nav).where(FundShareClass.fund_code == fund_code)
+    row = session.execute(
+        select(
+            FundShareClass,
+            latest_nav.c.nav_date,
+            latest_nav.c.unit_nav,
+            latest_nav.c.accumulated_nav,
+            latest_nav.c.source_code,
+        )
+        .outerjoin(latest_nav, true())
+        .where(FundShareClass.fund_code == fund_code)
     ).one_or_none()
+    if row is None:
+        return None
+    fund, nav_date, unit_nav, accumulated_nav, source_code = row
+    return FundDetailSnapshot(
+        fund=fund,
+        nav_date=nav_date,
+        unit_nav=unit_nav,
+        accumulated_nav=accumulated_nav,
+        source_code=source_code,
+    )
