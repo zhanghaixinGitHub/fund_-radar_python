@@ -8,6 +8,17 @@ from app.core.config import get_settings
 from fastapi.testclient import TestClient
 
 
+def test_tushare_token_is_loaded_as_a_secret(monkeypatch) -> None:
+    """外部数据源凭据必须从环境变量读取，且在设置对象中保留为 SecretStr。"""
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-tushare-token")
+    get_settings.cache_clear()
+
+    settings = get_settings()
+
+    assert settings.tushare_token.get_secret_value() == "test-tushare-token"
+    get_settings.cache_clear()
+
+
 def test_internal_health_rejects_missing_service_token(monkeypatch) -> None:
     """未携带服务令牌的浏览器式请求不得访问内部健康检查接口。"""
     monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
@@ -56,22 +67,54 @@ def test_internal_fund_list_rejects_browser_origin(monkeypatch) -> None:
 
 
 def test_internal_fund_list_and_detail_accept_service_token(monkeypatch) -> None:
-    """Java 可通过受保护契约获取 M0 Mock 基金列表与详情。"""
+    """Java 可通过受保护契约读取已持久化目录的标准字段。"""
     monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
     get_settings.cache_clear()
 
+    from app.api.routes import funds
     from app.main import create_application
+    from app.schemas.fund import InternalFundDetail, InternalFundPage, InternalFundSummary
+
+    summary = InternalFundSummary(
+        fund_code="010710",
+        fund_name="安信医药健康主题股票C",
+        fund_type="STOCK",
+        status="ACTIVE",
+        as_of_date=None,
+    )
+    monkeypatch.setattr(
+        funds,
+        "list_funds",
+        lambda _keyword, _page_size, _cursor: InternalFundPage(items=(summary,), next_cursor=None),
+    )
+    monkeypatch.setattr(
+        funds,
+        "get_fund",
+        lambda _fund_code: InternalFundDetail(
+            **summary.model_dump(),
+            nav_status="NOT_SYNCED",
+            data_source="MANUAL_PUBLISHER_VERIFIED_SAMPLE",
+        ),
+    )
 
     with TestClient(create_application()) as client:
         headers = {"X-Service-Token": "test-service-token", "X-Trace-Id": "m0-contract-test"}
         list_response = client.get("/internal/v1/funds?pageSize=2", headers=headers)
-        detail_response = client.get("/internal/v1/funds/000001", headers=headers)
+        detail_response = client.get("/internal/v1/funds/010710", headers=headers)
 
     assert list_response.status_code == 200
-    assert len(list_response.json()["items"]) == 2
+    assert list_response.json()["items"] == [
+        {
+            "fund_code": "010710",
+            "fund_name": "安信医药健康主题股票C",
+            "fund_type": "STOCK",
+            "status": "ACTIVE",
+            "as_of_date": None,
+        }
+    ]
     assert list_response.headers["X-Trace-Id"] == "m0-contract-test"
     assert detail_response.status_code == 200
-    assert detail_response.json()["data_source"] == "M0_MOCK"
+    assert detail_response.json()["data_source"] == "MANUAL_PUBLISHER_VERIFIED_SAMPLE"
     get_settings.cache_clear()
 
 

@@ -14,7 +14,9 @@ class InternalFundSummary(BaseModel):
     fund_name: str
     fund_type: str
     status: str
-    as_of_date: date
+    # 目录可以先于首个合规净值同步落库，因此此字段允许为空。
+    # 空值只能表示“尚无同步净值”，不能由调用方补成当前日期。
+    as_of_date: date | None
 
 
 class InternalFundDetail(InternalFundSummary):

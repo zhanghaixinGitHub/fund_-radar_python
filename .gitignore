@@ -5,3 +5,4 @@ __pycache__/
 fund_ai.db
 .idea/
 *.iml
+.env

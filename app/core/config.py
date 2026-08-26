@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """从环境变量或本地 `.env` 读取的运行时配置。
 
-    服务令牌使用 SecretStr 保存，日志或接口中不得输出其实际值。
+    服务令牌和外部数据源凭据使用 SecretStr 保存，日志或接口中不得输出其实际值。
     """
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     celery_broker_url: str = "redis://localhost:6379/1"
     celery_result_backend: str = "redis://localhost:6379/2"
     log_level: str = "INFO"
+    tushare_token: SecretStr = SecretStr("")
 
 
 @lru_cache
