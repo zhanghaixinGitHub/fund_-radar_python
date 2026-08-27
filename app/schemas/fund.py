@@ -2,6 +2,7 @@
 
 from datetime import date
 from decimal import Decimal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -47,6 +48,20 @@ class InternalFundNavHistory(BaseModel):
 
     fund_code: str
     items: tuple[InternalFundNavPoint, ...]
+
+
+class InternalFocusedNavSyncResult(BaseModel):
+    """重点基金手动增量同步的安全摘要，不返回 Token 或外部原始响应。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    sync_run_id: UUID
+    requested_nav_date: date
+    fund_codes: tuple[str, ...]
+    fetched_count: int
+    created_count: int
+    updated_count: int
+    skipped_count: int
 
 
 class InternalFundPage(BaseModel):

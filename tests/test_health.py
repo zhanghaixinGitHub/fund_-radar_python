@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from uuid import UUID
 
 from app.core.config import get_settings
@@ -125,6 +126,96 @@ def test_internal_fund_list_and_detail_accept_service_token(monkeypatch) -> None
 def test_internal_fund_nav_history_requires_service_token_and_returns_snapshot(monkeypatch) -> None:
     """历史净值同样只能由 Java 服务身份读取，且返回明确的日期和值。"""
     monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
+    get_settings.cache_clear()
+
+
+def test_internal_manual_focused_nav_sync_requires_service_token_and_returns_safe_counts(monkeypatch) -> None:
+    """页面只能经 Java 触发手动同步，且响应只返回受控运行统计。"""
+    monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
+    get_settings.cache_clear()
+
+    from app.api.routes import funds
+    from app.main import create_application
+    from app.services.tushare_fund_sync import SyncOutcome
+
+    received: dict[str, object] = {}
+
+    class StubService:
+        def sync_focused_nav_incremental(self, ts_codes: tuple[str, ...]) -> SyncOutcome:
+            received["ts_codes"] = ts_codes
+            return SyncOutcome(
+                sync_run_id=UUID("00000000-0000-0000-0000-000000000301"),
+                sync_type="FOCUSED_NAV_INCREMENTAL",
+                requested_nav_date=datetime(2026, 8, 27, tzinfo=UTC).date(),
+                fetched_count=3,
+                created_count=2,
+                updated_count=0,
+                skipped_count=1,
+            )
+
+        def close(self) -> None:
+            received["closed"] = True
+
+    monkeypatch.setattr(funds, "TushareFundSyncService", StubService)
+    monkeypatch.setattr(
+        funds,
+        "get_settings",
+        lambda: SimpleNamespace(focused_fund_ts_codes=("002112.OF", "010710.OF")),
+    )
+
+    with TestClient(create_application()) as client:
+        browser_response = client.post(
+            "/internal/v1/funds/sync/focused-nav-incremental",
+            headers={"X-Service-Token": "test-service-token", "Origin": "http://localhost:5173"},
+        )
+        response = client.post(
+            "/internal/v1/funds/sync/focused-nav-incremental",
+            headers={"X-Service-Token": "test-service-token", "X-Trace-Id": "manual-sync-test"},
+        )
+
+    assert browser_response.status_code == 403
+    assert response.status_code == 200
+    assert response.headers["X-Trace-Id"] == "manual-sync-test"
+    assert response.json() == {
+        "sync_run_id": "00000000-0000-0000-0000-000000000301",
+        "requested_nav_date": "2026-08-27",
+        "fund_codes": ["002112.OF", "010710.OF"],
+        "fetched_count": 3,
+        "created_count": 2,
+        "updated_count": 0,
+        "skipped_count": 1,
+    }
+    assert received == {"ts_codes": ("002112.OF", "010710.OF"), "closed": True}
+    get_settings.cache_clear()
+
+
+def test_internal_manual_focused_nav_sync_returns_actionable_baseline_error(monkeypatch) -> None:
+    """重点基金尚无完整历史基线时，页面应获得可操作的 422 错误码。"""
+    monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
+    get_settings.cache_clear()
+
+    from app.api.routes import funds
+    from app.main import create_application
+    from app.services.tushare_fund_sync import FocusedNavIncrementalPreconditionError
+
+    class StubService:
+        def sync_focused_nav_incremental(self, _ts_codes: tuple[str, ...]) -> None:
+            raise FocusedNavIncrementalPreconditionError("focused NAV baseline is missing")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(funds, "TushareFundSyncService", StubService)
+    monkeypatch.setattr(funds, "get_settings", lambda: SimpleNamespace(focused_fund_ts_codes=("002112.OF",)))
+
+    with TestClient(create_application()) as client:
+        response = client.post(
+            "/internal/v1/funds/sync/focused-nav-incremental",
+            headers={"X-Service-Token": "test-service-token"},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "FOCUSED_SYNC_BASELINE_MISSING"
     get_settings.cache_clear()
 
     from app.api.routes import funds

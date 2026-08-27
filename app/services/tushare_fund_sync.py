@@ -5,12 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Protocol
 from uuid import UUID
 
-from sqlalchemy import Engine
+from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -38,6 +39,8 @@ from app.repositories.fund_sync import (
 )
 
 logger = get_logger(__name__)
+
+_FOCUSED_NAV_INCREMENTAL_LOCK_KEY = 7_089_123_006
 
 
 class TushareFundProvider(Protocol):
@@ -88,6 +91,10 @@ class SyncOutcome:
 
 class FocusedNavIncrementalPreconditionError(ValueError):
     """重点基金未完成历史基线时拒绝启动日常增量同步。"""
+
+
+class FocusedNavIncrementalInProgressError(RuntimeError):
+    """同一环境已有重点基金增量同步运行时拒绝重复启动。"""
 
 
 @dataclass(frozen=True)
@@ -339,6 +346,11 @@ class TushareFundSyncService:
         新净值或遇非交易日时，以零变更成功结束，不将其记录为外部失败。
         """
         target_date = as_of_date or date.today()
+        with _focused_nav_incremental_lock(self._engine):
+            return self._run_focused_nav_incremental(ts_codes, target_date=target_date)
+
+    def _run_focused_nav_incremental(self, ts_codes: tuple[str, ...], *, target_date: date) -> SyncOutcome:
+        """在已取得跨进程互斥锁后执行重点基金的实际增量同步。"""
         source_id, sync_run_id = self._start_run(
             sync_type="FOCUSED_NAV_INCREMENTAL", requested_nav_date=target_date
         )
@@ -432,6 +444,21 @@ class TushareFundSyncService:
                 )
         except Exception:
             logger.exception("tushare_fund_sync._record_failure >>> unable to persist failed run_id=%s", sync_run_id)
+
+
+@contextmanager
+def _focused_nav_incremental_lock(engine: Engine) -> Iterator[None]:
+    """使用 PostgreSQL 会话级咨询锁串行化手动和 Celery 增量同步。"""
+    with engine.connect() as connection:
+        acquired = bool(connection.scalar(select(func.pg_try_advisory_lock(_FOCUSED_NAV_INCREMENTAL_LOCK_KEY))))
+        if not acquired:
+            raise FocusedNavIncrementalInProgressError("focused NAV incremental sync is already running")
+        try:
+            yield
+        finally:
+            released = bool(connection.scalar(select(func.pg_advisory_unlock(_FOCUSED_NAV_INCREMENTAL_LOCK_KEY))))
+            if not released:
+                logger.error("tushare_fund_sync._focused_nav_incremental_lock >>> advisory lock release failed")
 
 
 def _normalize_catalog_records(

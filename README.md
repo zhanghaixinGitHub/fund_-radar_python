@@ -24,6 +24,8 @@ Windows 本地验证 Celery 时，另开终端使用单进程池：
 
 默认在 `Asia/Shanghai` 工作日 20:00 触发，仅补六只配置基金在 Tushare 来源中缺失的日期。可通过 `.env` 中的 `TUSHARE_FOCUSED_INCREMENTAL_ENABLED`、`TUSHARE_FOCUSED_INCREMENTAL_HOUR`、`TUSHARE_FOCUSED_INCREMENTAL_MINUTE` 调整；中国节假日或当晚尚未发布数据时任务以零变更成功结束。不要同时启动多个 Beat。
 
+基金详情页的“同步六只重点基金净值”按钮经 Java 调用受保护的 `POST /internal/v1/funds/sync/focused-nav-incremental`，由当前 FastAPI 进程直接执行同步，因此不依赖 Beat 或 Worker。手动和定时任务共享 PostgreSQL 咨询锁；已有同步运行时接口返回冲突，绝不重复调用 Tushare。该接口只返回运行编号与新增/更新/跳过统计，不返回 Token 或原始响应。
+
 Linux 部署的并发池应按任务类型和容量另行评估；不要直接沿用 Windows 的 `solo` 结论。
 
 本机只使用 `.env` 管理基础配置和私有凭据，并与 Java 的 `AI_SERVICE_TOKEN` 对齐。`.env` 已被 Git 忽略；凭据不得写入源码、测试断言、日志或文档。
@@ -35,7 +37,7 @@ Linux 部署的并发池应按任务类型和容量另行评估；不要直接�
 .\.venv\Scripts\pytest.exe
 ```
 
-内部接口不暴露 Swagger/OpenAPI 页面，所有接口均须携带 `X-Service-Token`，并会拒绝含浏览器 `Origin` 的请求。`/internal/v1/funds` 和 `/internal/v1/funds/{fund_code}` 读取本机持久化目录；有已同步净值时详情会返回净值来源和截至日期，无净值时明确返回 `as_of_date=null` / `nav_status=NOT_SYNCED`，不能被解释为实时行情。`GET /internal/v1/sources` 仅返回无凭证的来源开关、限频、保留期和最近状态。
+内部接口不暴露 Swagger/OpenAPI 页面，所有接口均须携带 `X-Service-Token`，并会拒绝含浏览器 `Origin` 的请求。`/internal/v1/funds` 和 `/internal/v1/funds/{fund_code}` 读取本机持久化目录；有已同步净值时详情会返回净值来源和截至日期，无净值时明确返回 `as_of_date=null` / `nav_status=NOT_SYNCED`，不能被解释为实时行情。`POST /internal/v1/funds/sync/focused-nav-incremental` 仅供 Java 触发六只重点基金同步。`GET /internal/v1/sources` 仅返回无凭证的来源开关、限频、保留期和最近状态。
 
 获授权后，维护人员可显式执行：
 
