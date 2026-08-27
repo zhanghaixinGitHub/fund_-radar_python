@@ -76,9 +76,13 @@ class InternalSyncJobStatus(BaseModel):
 
 
 class InternalFundPage(BaseModel):
-    """返回给 Java 核心服务的兼容游标分页响应。"""
+    """返回给 Java 核心服务的兼容游标/页码分页响应。"""
 
     model_config = ConfigDict(frozen=True)
 
     items: tuple[InternalFundSummary, ...]
     next_cursor: str | None = Field(default=None, serialization_alias="next_cursor")
+    page: int | None = None
+    page_size: int = Field(default=20, serialization_alias="page_size")
+    total_count: int = Field(default=0, ge=0, serialization_alias="total_count")
+    total_pages: int = Field(default=0, ge=0, serialization_alias="total_pages")

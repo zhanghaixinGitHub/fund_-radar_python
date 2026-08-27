@@ -86,7 +86,9 @@ def test_internal_fund_list_and_detail_accept_service_token(monkeypatch) -> None
     monkeypatch.setattr(
         funds,
         "list_funds",
-        lambda _keyword, _page_size, _cursor: InternalFundPage(items=(summary,), next_cursor=None),
+        lambda _keyword, _page_size, _cursor, _page: InternalFundPage(
+            items=(summary,), next_cursor=None, page=None, page_size=2, total_count=1, total_pages=1
+        ),
     )
     monkeypatch.setattr(
         funds,
@@ -115,11 +117,50 @@ def test_internal_fund_list_and_detail_accept_service_token(monkeypatch) -> None
             "as_of_date": "2026-08-25",
         }
     ]
+    assert list_response.json()["page"] is None
+    assert list_response.json()["page_size"] == 2
+    assert list_response.json()["total_count"] == 1
+    assert list_response.json()["total_pages"] == 1
     assert list_response.headers["X-Trace-Id"] == "m0-contract-test"
     assert detail_response.status_code == 200
     assert detail_response.json()["data_source"] == "TUSHARE_PRO_FUND"
     assert detail_response.json()["unit_nav"] == "1.3756"
     assert detail_response.json()["accumulated_nav"] == "1.3756"
+    get_settings.cache_clear()
+
+
+def test_internal_fund_list_uses_page_mode_and_rejects_cursor_conflict(monkeypatch) -> None:
+    """页码模式将总数传给 Java，且不允许与旧游标模式混用。"""
+    monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
+    get_settings.cache_clear()
+
+    from app.api.routes import funds
+    from app.main import create_application
+    from app.schemas.fund import InternalFundPage
+
+    received: dict[str, object] = {}
+    monkeypatch.setattr(
+        funds,
+        "list_funds",
+        lambda keyword, page_size, cursor, page: received.update(
+            keyword=keyword, page_size=page_size, cursor=cursor, page=page
+        )
+        or InternalFundPage(items=(), page=3, page_size=10, total_count=43, total_pages=5),
+    )
+
+    with TestClient(create_application()) as client:
+        headers = {"X-Service-Token": "test-service-token"}
+        page_response = client.get("/internal/v1/funds?pageSize=10&page=3", headers=headers)
+        conflict_response = client.get("/internal/v1/funds?page=2&cursor=010710", headers=headers)
+
+    assert page_response.status_code == 200
+    assert page_response.json()["page"] == 3
+    assert page_response.json()["page_size"] == 10
+    assert page_response.json()["total_count"] == 43
+    assert page_response.json()["total_pages"] == 5
+    assert received == {"keyword": None, "page_size": 10, "cursor": None, "page": 3}
+    assert conflict_response.status_code == 422
+    assert conflict_response.json()["detail"]["code"] == "PAGINATION_MODE_CONFLICT"
     get_settings.cache_clear()
 
 

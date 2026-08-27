@@ -23,18 +23,28 @@ async def list_internal_funds(
     keyword: Annotated[str | None, Query(max_length=50)] = None,
     page_size: Annotated[int, Query(alias="pageSize", ge=1, le=100)] = 20,
     cursor: Annotated[str | None, Query(pattern=r"^\d+$")] = None,
+    page: Annotated[int | None, Query(ge=1, le=10_000)] = None,
 ) -> InternalFundPage:
-    """按兼容游标返回已落库的真实基金目录样本。
+    """按兼容游标或页码返回已落库的真实基金目录样本。
 
     该接口只向通过服务令牌校验的 Java 核心服务开放；目录为一次性手工核验样本，
     ``as_of_date`` 为空时表示尚未获得合规净值同步，不能视为实时行情。
     """
+    if page is not None and cursor is not None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "PAGINATION_MODE_CONFLICT",
+                "message": "page 与 cursor 不能同时使用。",
+            },
+        )
     logger.info(
-        "funds.list_internal_funds >>> persisted fund catalog page requested, trace_id=%s, page_size=%s",
+        "funds.list_internal_funds >>> persisted fund catalog page requested, trace_id=%s, page_size=%s, page=%s",
         get_trace_id(),
         page_size,
+        page,
     )
-    return list_funds(keyword, page_size, cursor)
+    return list_funds(keyword, page_size, cursor, page)
 
 
 @router.post(

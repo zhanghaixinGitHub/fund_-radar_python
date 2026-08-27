@@ -16,14 +16,23 @@ from app.schemas.fund import (
 )
 
 
-def list_funds(keyword: str | None, page_size: int, cursor: str | None) -> InternalFundPage:
-    """分页读取真实目录样本，不调用外部数据源或在读取时执行同步。"""
+def list_funds(keyword: str | None, page_size: int, cursor: str | None, page: int | None) -> InternalFundPage:
+    """分页读取真实目录样本，并返回与当前筛选一致的总记录数。
+
+    ``page`` 存在时使用页码分页，供浏览器显示总页数和跳转；未传入时保持旧版游标
+    语义。两种模式均只查询已落库数据，不调用外部数据源或触发同步。
+    """
     with Session(get_engine()) as session:
-        rows = list_fund_summaries(session, keyword, page_size, cursor)
-    page_rows = rows[:page_size]
+        result = list_fund_summaries(session, keyword, page_size, cursor, page)
+    page_rows = result.rows if page is not None else result.rows[:page_size]
+    total_pages = (result.total_count + page_size - 1) // page_size
     return InternalFundPage(
         items=tuple(_to_summary(fund, nav_date) for fund, nav_date in page_rows),
-        next_cursor=page_rows[-1][0].fund_code if len(rows) > page_size else None,
+        next_cursor=page_rows[-1][0].fund_code if page is None and len(result.rows) > page_size else None,
+        page=page,
+        page_size=page_size,
+        total_count=result.total_count,
+        total_pages=total_pages,
     )
 
 

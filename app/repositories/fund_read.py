@@ -30,9 +30,17 @@ class FundNavHistorySnapshot:
     accumulated_nav: Decimal | None
 
 
+@dataclass(frozen=True)
+class FundSummaryPage:
+    """基金目录分页查询的数据库结果，包含与筛选条件一致的总记录数。"""
+
+    rows: tuple[tuple[FundShareClass, date | None], ...]
+    total_count: int
+
+
 def list_fund_summaries(
-    session: Session, keyword: str | None, page_size: int, cursor: str | None
-) -> tuple[tuple[FundShareClass, date | None], ...]:
+    session: Session, keyword: str | None, page_size: int, cursor: str | None, page: int | None
+) -> FundSummaryPage:
     """按基金代码稳定分页读取已落库目录，并附带每只基金的最新净值日期。
 
     目录与净值同步分开执行。尚无已授权净值来源时，仍返回经过核验的目录，
@@ -43,20 +51,30 @@ def list_fund_summaries(
         .group_by(NavDaily.fund_code)
         .subquery()
     )
+    conditions = ()
+    if keyword:
+        normalized_keyword = f"%{keyword.strip()}%"
+        conditions = (
+            FundShareClass.fund_code.ilike(normalized_keyword)
+            | FundShareClass.fund_name.ilike(normalized_keyword),
+        )
+
+    total_count = session.scalar(
+        select(func.count()).select_from(FundShareClass).where(*conditions)
+    )
     statement: Select[tuple[FundShareClass, date | None]] = (
         select(FundShareClass, latest_nav.c.latest_nav_date)
         .outerjoin(latest_nav, latest_nav.c.fund_code == FundShareClass.fund_code)
+        .where(*conditions)
         .order_by(FundShareClass.fund_code.asc())
     )
-    if keyword:
-        normalized_keyword = f"%{keyword.strip()}%"
-        statement = statement.where(
-            FundShareClass.fund_code.ilike(normalized_keyword)
-            | FundShareClass.fund_name.ilike(normalized_keyword)
-        )
     if cursor:
         statement = statement.where(FundShareClass.fund_code > cursor)
-    return tuple(session.execute(statement.limit(page_size + 1)).all())
+    if page is not None:
+        statement = statement.offset((page - 1) * page_size).limit(page_size)
+    else:
+        statement = statement.limit(page_size + 1)
+    return FundSummaryPage(rows=tuple(session.execute(statement).all()), total_count=int(total_count or 0))
 
 
 def get_fund_summary(session: Session, fund_code: str) -> FundDetailSnapshot | None:
