@@ -76,6 +76,7 @@ class TushareFundClient:
         read_timeout_seconds: 读取超时秒数。
         max_retries: 仅对传输和服务端可恢复错误的额外重试次数。
         catalog_max_rows_per_query: 单个 `fund_basic` 分片的允许最大记录数。
+        nav_max_rows_per_query: 单只重点基金历史净值请求的允许最大记录数。
         transport: 仅用于自动化测试的 HTTPX transport。
 
     Raises:
@@ -91,15 +92,19 @@ class TushareFundClient:
         read_timeout_seconds: float,
         max_retries: int,
         catalog_max_rows_per_query: int,
+        nav_max_rows_per_query: int = 10_000,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         if not token.strip():
             raise ValueError("Tushare Token is not configured.")
         if max_retries < 0:
             raise ValueError("max_retries must not be negative.")
+        if nav_max_rows_per_query < 1:
+            raise ValueError("nav_max_rows_per_query must be positive.")
         self._token = token
         self._max_retries = max_retries
         self._catalog_max_rows_per_query = catalog_max_rows_per_query
+        self._nav_max_rows_per_query = nav_max_rows_per_query
         timeout = httpx.Timeout(
             connect=connect_timeout_seconds,
             read=read_timeout_seconds,
@@ -142,20 +147,38 @@ class TushareFundClient:
                         f"market={market}, status={status} reached configured row limit; refusing partial catalog",
                     )
                 for row in rows:
-                    item = TushareFundBasic(
-                        ts_code=_required_text(row, "ts_code", "fund_basic"),
-                        name=_required_text(row, "name", "fund_basic"),
-                        management=_optional_text(row.get("management")),
-                        fund_type=_optional_text(row.get("fund_type")),
-                        found_date=_optional_date(row.get("found_date"), "found_date", "fund_basic"),
-                        status=_optional_text(row.get("status")),
-                        market=_optional_text(row.get("market")),
-                    )
+                    item = _to_fund_basic(row)
                     existing = by_ts_code.get(item.ts_code)
                     if existing is not None and existing != item:
                         raise TushareIntegrationError("fund_basic", f"conflicting duplicate ts_code={item.ts_code}")
                     by_ts_code[item.ts_code] = item
         return tuple(by_ts_code[ts_code] for ts_code in sorted(by_ts_code))
+
+    def list_fund_basics_by_ts_codes(self, ts_codes: tuple[str, ...]) -> tuple[TushareFundBasic, ...]:
+        """按已知完整 Tushare 代码读取重点基金目录，不触发全市场分片查询。
+
+        每个代码必须恰好返回自身的一条记录；缺失、重复或代码错配都直接失败，
+        防止把部分重点清单误当作完整清单写入。
+        """
+        if not ts_codes:
+            raise ValueError("ts_codes must not be empty.")
+        if len(set(ts_codes)) != len(ts_codes):
+            raise ValueError("ts_codes must not contain duplicates.")
+        fields = "ts_code,name,management,fund_type,found_date,status,market"
+        records: list[TushareFundBasic] = []
+        for ts_code in ts_codes:
+            rows = self._query("fund_basic", params={"ts_code": ts_code}, fields=fields)
+            if len(rows) != 1:
+                raise TushareIntegrationError(
+                    "fund_basic", f"ts_code={ts_code} expected exactly one record but received {len(rows)}"
+                )
+            item = _to_fund_basic(rows[0])
+            if item.ts_code != ts_code:
+                raise TushareIntegrationError(
+                    "fund_basic", f"ts_code={ts_code} returned mismatched code={item.ts_code}"
+                )
+            records.append(item)
+        return tuple(records)
 
     def list_nav_daily(self, nav_date: date) -> tuple[TushareFundNav, ...]:
         """按净值日期批量读取公募基金净值，不逐基金发起远程请求。"""
@@ -164,16 +187,32 @@ class TushareFundClient:
             params={"nav_date": nav_date.strftime("%Y%m%d")},
             fields="ts_code,ann_date,nav_date,unit_nav,accum_nav",
         )
-        return tuple(
-            TushareFundNav(
-                ts_code=_required_text(row, "ts_code", "fund_nav"),
-                ann_date=_optional_date(row.get("ann_date"), "ann_date", "fund_nav"),
-                nav_date=_required_date(row.get("nav_date"), "nav_date", "fund_nav"),
-                unit_nav=_required_decimal(row.get("unit_nav"), "unit_nav", "fund_nav"),
-                accumulated_nav=_optional_decimal(row.get("accum_nav"), "accum_nav", "fund_nav"),
-            )
-            for row in rows
+        return tuple(_to_fund_nav(row) for row in rows)
+
+    def list_nav_history(
+        self, ts_code: str, *, start_date: date | None = None, end_date: date | None = None
+    ) -> tuple[TushareFundNav, ...]:
+        """读取一只重点基金的历史净值，并拒绝达到受控行数上限的可疑响应。"""
+        if start_date and end_date and start_date > end_date:
+            raise ValueError("start_date must not be after end_date.")
+        params = {"ts_code": ts_code}
+        if start_date is not None:
+            params["start_date"] = start_date.strftime("%Y%m%d")
+        if end_date is not None:
+            params["end_date"] = end_date.strftime("%Y%m%d")
+        rows = self._query(
+            "fund_nav",
+            params=params,
+            fields="ts_code,ann_date,nav_date,unit_nav,accum_nav",
         )
+        if len(rows) >= self._nav_max_rows_per_query:
+            raise TushareIntegrationError(
+                "fund_nav", f"ts_code={ts_code} reached configured row limit; refusing partial history"
+            )
+        records = tuple(_to_fund_nav(row) for row in rows)
+        if any(item.ts_code != ts_code for item in records):
+            raise TushareIntegrationError("fund_nav", f"ts_code={ts_code} response contains another fund")
+        return records
 
     def _query(
         self, api_name: str, *, params: Mapping[str, str], fields: str
@@ -223,6 +262,30 @@ def _parse_response(api_name: str, body: object) -> tuple[dict[str, Any], ...]:
             raise TushareIntegrationError(api_name, "response item does not match fields")
         records.append(dict(zip(fields, item, strict=True)))
     return tuple(records)
+
+
+def _to_fund_basic(row: Mapping[str, Any]) -> TushareFundBasic:
+    """将单行基金目录响应转换为强类型记录。"""
+    return TushareFundBasic(
+        ts_code=_required_text(row, "ts_code", "fund_basic"),
+        name=_required_text(row, "name", "fund_basic"),
+        management=_optional_text(row.get("management")),
+        fund_type=_optional_text(row.get("fund_type")),
+        found_date=_optional_date(row.get("found_date"), "found_date", "fund_basic"),
+        status=_optional_text(row.get("status")),
+        market=_optional_text(row.get("market")),
+    )
+
+
+def _to_fund_nav(row: Mapping[str, Any]) -> TushareFundNav:
+    """将单行基金净值响应转换为强类型记录。"""
+    return TushareFundNav(
+        ts_code=_required_text(row, "ts_code", "fund_nav"),
+        ann_date=_optional_date(row.get("ann_date"), "ann_date", "fund_nav"),
+        nav_date=_required_date(row.get("nav_date"), "nav_date", "fund_nav"),
+        unit_nav=_required_decimal(row.get("unit_nav"), "unit_nav", "fund_nav"),
+        accumulated_nav=_optional_decimal(row.get("accum_nav"), "accum_nav", "fund_nav"),
+    )
 
 
 def _required_text(row: Mapping[str, Any], field_name: str, api_name: str) -> str:

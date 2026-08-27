@@ -21,6 +21,15 @@ class FundDetailSnapshot:
     source_code: str | None
 
 
+@dataclass(frozen=True)
+class FundNavHistorySnapshot:
+    """一条按来源稳定去重后的历史净值投影。"""
+
+    nav_date: date
+    unit_nav: Decimal
+    accumulated_nav: Decimal | None
+
+
 def list_fund_summaries(
     session: Session, keyword: str | None, page_size: int, cursor: str | None
 ) -> tuple[tuple[FundShareClass, date | None], ...]:
@@ -90,4 +99,37 @@ def get_fund_summary(session: Session, fund_code: str) -> FundDetailSnapshot | N
         unit_nav=unit_nav,
         accumulated_nav=accumulated_nav,
         source_code=source_code,
+    )
+
+
+def list_fund_nav_history(
+    session: Session, fund_code: str, start_date: date, end_date: date
+) -> tuple[FundNavHistorySnapshot, ...]:
+    """按日期正序读取指定窗口历史净值，同日期多来源时按来源代码稳定选取一条。"""
+    ranked_nav = (
+        select(
+            NavDaily.nav_date.label("nav_date"),
+            NavDaily.unit_nav.label("unit_nav"),
+            NavDaily.accumulated_nav.label("accumulated_nav"),
+            func.row_number()
+            .over(partition_by=NavDaily.nav_date, order_by=SourceRegistry.source_code.asc())
+            .label("source_rank"),
+        )
+        .select_from(NavDaily)
+        .join(SourceRegistry, SourceRegistry.source_id == NavDaily.source_id)
+        .where(
+            NavDaily.fund_code == fund_code,
+            NavDaily.nav_date >= start_date,
+            NavDaily.nav_date <= end_date,
+        )
+        .subquery()
+    )
+    rows = session.execute(
+        select(ranked_nav.c.nav_date, ranked_nav.c.unit_nav, ranked_nav.c.accumulated_nav)
+        .where(ranked_nav.c.source_rank == 1)
+        .order_by(ranked_nav.c.nav_date.asc())
+    ).all()
+    return tuple(
+        FundNavHistorySnapshot(nav_date=nav_date, unit_nav=unit_nav, accumulated_nav=accumulated_nav)
+        for nav_date, unit_nav, accumulated_nav in rows
     )

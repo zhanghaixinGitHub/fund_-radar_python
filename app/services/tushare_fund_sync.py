@@ -48,8 +48,16 @@ class TushareFundProvider(Protocol):
     def list_fund_basics(self) -> tuple[TushareFundBasic, ...]:
         """返回全市场基金目录分片合并后的数据。"""
 
+    def list_fund_basics_by_ts_codes(self, ts_codes: tuple[str, ...]) -> tuple[TushareFundBasic, ...]:
+        """返回指定完整 Tushare 代码的重点基金目录。"""
+
     def list_nav_daily(self, nav_date: date) -> tuple[TushareFundNav, ...]:
         """返回指定净值日期的批量净值。"""
+
+    def list_nav_history(
+        self, ts_code: str, *, start_date: date | None = None, end_date: date | None = None
+    ) -> tuple[TushareFundNav, ...]:
+        """返回指定重点基金的历史净值。"""
 
 
 @dataclass(frozen=True)
@@ -104,6 +112,7 @@ class TushareFundSyncService:
             read_timeout_seconds=settings.tushare_read_timeout_seconds,
             max_retries=settings.tushare_max_retries,
             catalog_max_rows_per_query=settings.tushare_catalog_max_rows_per_query,
+            nav_max_rows_per_query=settings.tushare_focused_nav_max_rows_per_query,
         )
 
     def close(self) -> None:
@@ -209,6 +218,102 @@ class TushareFundSyncService:
             )
             raise
 
+    def sync_focused_catalog(self, ts_codes: tuple[str, ...]) -> SyncOutcome:
+        """同步用户确认重点基金的目录，不读取或写入全市场目录。
+
+        Args:
+            ts_codes: 带交易标识的完整 Tushare 基金代码，必须全部唯一且可查询。
+
+        Raises:
+            TushareIntegrationError: 任一指定基金缺失、错配或目录字段无效时抛出。
+        """
+        source_id, sync_run_id = self._start_run(sync_type="FOCUSED_CATALOG", requested_nav_date=None)
+        try:
+            companies = self._provider.list_fund_companies()
+            basics = self._provider.list_fund_basics_by_ts_codes(ts_codes)
+            _ensure_focused_catalog_complete(ts_codes, basics)
+            records, invalid_count = _normalize_catalog_records(companies, basics)
+            if invalid_count or len(records) != len(ts_codes):
+                raise TushareIntegrationError("fund_basic", "focused catalog contains invalid records")
+            write_stats = WriteStats()
+            for batch in _chunked(records, self._batch_size):
+                with Session(self._engine) as session, session.begin():
+                    write_stats = write_stats.combine(upsert_fund_catalog_batch(session, batch))
+            outcome = SyncOutcome(
+                sync_run_id=sync_run_id,
+                sync_type="FOCUSED_CATALOG",
+                requested_nav_date=None,
+                fetched_count=len(basics),
+                created_count=write_stats.created_count,
+                updated_count=write_stats.updated_count,
+                skipped_count=write_stats.skipped_count,
+            )
+            self._complete_run(source_id, outcome, write_stats)
+            logger.info(
+                "tushare_fund_sync.sync_focused_catalog >>> completed run_id=%s focused_count=%s created=%s updated=%s",
+                sync_run_id,
+                len(ts_codes),
+                outcome.created_count,
+                outcome.updated_count,
+            )
+            return outcome
+        except Exception as error:
+            self._record_failure(source_id, sync_run_id, error)
+            logger.exception("tushare_fund_sync.sync_focused_catalog >>> failed run_id=%s", sync_run_id)
+            raise
+
+    def sync_focused_nav_history(
+        self, ts_codes: tuple[str, ...], *, start_date: date | None = None, end_date: date | None = None
+    ) -> SyncOutcome:
+        """回填重点基金的完整历史净值；所有远程响应校验通过后才开始写库。"""
+        if start_date and end_date and start_date > end_date:
+            raise ValueError("start_date must not be after end_date.")
+        source_id, sync_run_id = self._start_run(sync_type="FOCUSED_NAV_HISTORY", requested_nav_date=None)
+        try:
+            navs = tuple(
+                nav
+                for ts_code in ts_codes
+                for nav in self._provider.list_nav_history(ts_code, start_date=start_date, end_date=end_date)
+            )
+            records, invalid_count = _normalize_focused_nav_history_records(
+                navs,
+                ts_codes=ts_codes,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if invalid_count or not records:
+                raise TushareIntegrationError("fund_nav", "focused NAV history contains invalid or empty records")
+            _ensure_focused_nav_history_complete(ts_codes, records)
+            write_stats = WriteStats()
+            for batch in _chunked(records, self._batch_size):
+                with Session(self._engine) as session, session.begin():
+                    write_stats = write_stats.combine(
+                        upsert_nav_daily_batch(session, source_id=source_id, records=batch)
+                    )
+            outcome = SyncOutcome(
+                sync_run_id=sync_run_id,
+                sync_type="FOCUSED_NAV_HISTORY",
+                requested_nav_date=None,
+                fetched_count=len(navs),
+                created_count=write_stats.created_count,
+                updated_count=write_stats.updated_count,
+                skipped_count=write_stats.skipped_count,
+            )
+            self._complete_run(source_id, outcome, write_stats)
+            logger.info(
+                "tushare_fund_sync.sync_focused_nav_history >>> completed run_id=%s focused_count=%s fetched=%s created=%s updated=%s",
+                sync_run_id,
+                len(ts_codes),
+                outcome.fetched_count,
+                outcome.created_count,
+                outcome.updated_count,
+            )
+            return outcome
+        except Exception as error:
+            self._record_failure(source_id, sync_run_id, error)
+            logger.exception("tushare_fund_sync.sync_focused_nav_history >>> failed run_id=%s", sync_run_id)
+            raise
+
     def _start_run(self, *, sync_type: str, requested_nav_date: date | None) -> tuple[UUID, UUID]:
         with Session(self._engine) as session, session.begin():
             source = ensure_tushare_source(session)
@@ -303,6 +408,61 @@ def _normalize_nav_records(
             raise TushareIntegrationError("fund_nav", f"conflicting duplicate NAV for fund_code={fund_code}")
         by_key[key] = record
     return tuple(by_key[key] for key in sorted(by_key)), invalid_count
+
+
+def _normalize_focused_nav_history_records(
+    navs: tuple[TushareFundNav, ...],
+    *,
+    ts_codes: tuple[str, ...],
+    start_date: date | None,
+    end_date: date | None,
+) -> tuple[tuple[NavDailyUpsert, ...], int]:
+    """规范化指定基金的历史净值，拒绝窗口外记录和互相冲突的重复值。"""
+    expected_fund_codes = {_normalize_fund_code(ts_code) for ts_code in ts_codes}
+    if None in expected_fund_codes:
+        raise ValueError("ts_codes must contain normalizable fund codes.")
+    by_key: dict[tuple[str, date], NavDailyUpsert] = {}
+    invalid_count = 0
+    for nav in navs:
+        fund_code = _normalize_fund_code(nav.ts_code)
+        if (
+            fund_code not in expected_fund_codes
+            or (start_date is not None and nav.nav_date < start_date)
+            or (end_date is not None and nav.nav_date > end_date)
+        ):
+            invalid_count += 1
+            continue
+        record = NavDailyUpsert(
+            fund_code=fund_code,
+            nav_date=nav.nav_date,
+            unit_nav=nav.unit_nav,
+            accumulated_nav=nav.accumulated_nav,
+            content_hash=_nav_content_hash(fund_code, nav),
+        )
+        key = (record.fund_code, record.nav_date)
+        existing = by_key.get(key)
+        if existing is not None and existing.content_hash != record.content_hash:
+            raise TushareIntegrationError("fund_nav", f"conflicting duplicate NAV for fund_code={fund_code}")
+        by_key[key] = record
+    return tuple(by_key[key] for key in sorted(by_key)), invalid_count
+
+
+def _ensure_focused_catalog_complete(
+    requested_ts_codes: tuple[str, ...], basics: tuple[TushareFundBasic, ...]
+) -> None:
+    """确保每个请求的完整 Tushare 代码都恰好对应一条目录记录。"""
+    requested = set(requested_ts_codes)
+    returned = {basic.ts_code for basic in basics}
+    if len(requested) != len(requested_ts_codes) or requested != returned:
+        raise TushareIntegrationError("fund_basic", "focused catalog response does not match requested codes")
+
+
+def _ensure_focused_nav_history_complete(ts_codes: tuple[str, ...], records: tuple[NavDailyUpsert, ...]) -> None:
+    """确保每只重点基金都至少取得一条可写入的历史净值。"""
+    expected = {_normalize_fund_code(ts_code) for ts_code in ts_codes}
+    returned = {record.fund_code for record in records}
+    if expected != returned:
+        raise TushareIntegrationError("fund_nav", "focused NAV history is missing at least one requested fund")
 
 
 def _build_company_name_mapping(companies: tuple[TushareFundCompany, ...]) -> dict[str, str]:

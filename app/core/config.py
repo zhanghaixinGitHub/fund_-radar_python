@@ -1,9 +1,13 @@
 """FastAPI AI 服务的类型化环境配置。"""
 
+import re
 from functools import lru_cache
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+_TUSHARE_FOCUSED_TS_CODE_PATTERN = re.compile(r"^\d{6}\.(?:OF|SZ|SH)$")
 
 
 class Settings(BaseSettings):
@@ -29,6 +33,25 @@ class Settings(BaseSettings):
     tushare_max_retries: int = Field(default=2, ge=0, le=5)
     tushare_sync_batch_size: int = Field(default=500, ge=1, le=2_000)
     tushare_catalog_max_rows_per_query: int = Field(default=15_000, ge=1, le=100_000)
+    tushare_focused_nav_max_rows_per_query: int = Field(default=10_000, ge=1, le=100_000)
+    # 当前用户确认的六只基金。环境变量可用逗号分隔的完整 Tushare 代码覆盖，避免误触全市场目录同步。
+    tushare_focused_fund_ts_codes: str = "010710.OF,160323.SZ,013275.OF,007832.OF,002112.OF,005312.OF"
+
+    @property
+    def focused_fund_ts_codes(self) -> tuple[str, ...]:
+        """返回经过格式校验且去重的重点基金 Tushare 代码。
+
+        Raises:
+            ValueError: 配置为空、重复或不是受支持的基金代码格式时抛出。
+        """
+        codes = tuple(code.strip().upper() for code in self.tushare_focused_fund_ts_codes.split(",") if code.strip())
+        if not codes:
+            raise ValueError("Tushare focused fund code list must not be empty.")
+        if len(set(codes)) != len(codes):
+            raise ValueError("Tushare focused fund code list must not contain duplicates.")
+        if any(_TUSHARE_FOCUSED_TS_CODE_PATTERN.fullmatch(code) is None for code in codes):
+            raise ValueError("Tushare focused fund codes must use six digits plus .OF, .SZ, or .SH.")
+        return codes
 
 
 @lru_cache

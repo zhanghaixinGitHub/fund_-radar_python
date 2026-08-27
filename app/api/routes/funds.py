@@ -1,5 +1,6 @@
 """供 Java 核心服务认证访问的 M0 基金读模型接口。"""
 
+from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
@@ -7,8 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from app.api.dependencies import require_service_token
 from app.core.logging import get_logger
 from app.core.middleware import get_trace_id
-from app.schemas.fund import InternalFundDetail, InternalFundPage
-from app.services.fund_catalog_read import get_fund, list_funds
+from app.schemas.fund import InternalFundDetail, InternalFundNavHistory, InternalFundPage
+from app.services.fund_catalog_read import get_fund, get_fund_nav_history, list_funds
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -31,6 +32,33 @@ async def list_internal_funds(
         page_size,
     )
     return list_funds(keyword, page_size, cursor)
+
+
+@router.get("/{fund_code}/nav-history", response_model=InternalFundNavHistory, dependencies=[Depends(require_service_token)])
+async def get_internal_fund_nav_history(
+    fund_code: Annotated[str, Path(min_length=6, max_length=6, pattern=r"^\d{6}$")],
+    start_date: Annotated[date, Query(alias="startDate")],
+    end_date: Annotated[date, Query(alias="endDate")],
+) -> InternalFundNavHistory:
+    """返回已落库的历史净值；读取过程不调用 Tushare，最长窗口限制为约 13 年。"""
+    if start_date > end_date:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="startDate must not be after endDate")
+    if (end_date - start_date).days > 5_000:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="requested NAV history window is too large")
+    logger.info(
+        "funds.get_internal_fund_nav_history >>> persisted NAV history requested, trace_id=%s, fund_code=%s, start=%s, end=%s",
+        get_trace_id(),
+        fund_code,
+        start_date,
+        end_date,
+    )
+    history = get_fund_nav_history(fund_code, start_date, end_date)
+    if history is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "FUND_NOT_FOUND", "message": "Fund is not available."},
+        )
+    return history
 
 
 @router.get("/{fund_code}", response_model=InternalFundDetail, dependencies=[Depends(require_service_token)])

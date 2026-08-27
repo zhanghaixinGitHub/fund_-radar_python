@@ -6,8 +6,8 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_engine
 from app.models.fund import FundShareClass
-from app.repositories.fund_read import get_fund_summary, list_fund_summaries
-from app.schemas.fund import InternalFundDetail, InternalFundPage, InternalFundSummary
+from app.repositories.fund_read import get_fund_summary, list_fund_nav_history, list_fund_summaries
+from app.schemas.fund import InternalFundDetail, InternalFundNavHistory, InternalFundNavPoint, InternalFundPage, InternalFundSummary
 
 
 def list_funds(keyword: str | None, page_size: int, cursor: str | None) -> InternalFundPage:
@@ -34,6 +34,26 @@ def get_fund(fund_code: str) -> InternalFundDetail | None:
         data_source=row.source_code or fund.source_code,
         unit_nav=row.unit_nav,
         accumulated_nav=row.accumulated_nav,
+    )
+
+
+def get_fund_nav_history(fund_code: str, start_date: date, end_date: date) -> InternalFundNavHistory | None:
+    """读取一只已落库基金在明确日期窗口内的历史净值，不触发外部同步。"""
+    with Session(get_engine()) as session:
+        fund = session.get(FundShareClass, fund_code)
+        if fund is None:
+            return None
+        rows = list_fund_nav_history(session, fund_code, start_date, end_date)
+    return InternalFundNavHistory(
+        fund_code=fund_code,
+        items=tuple(
+            InternalFundNavPoint(
+                nav_date=row.nav_date,
+                unit_nav=row.unit_nav,
+                accumulated_nav=row.accumulated_nav,
+            )
+            for row in rows
+        ),
     )
 
 

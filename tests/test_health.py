@@ -71,6 +71,48 @@ def test_internal_fund_list_and_detail_accept_service_token(monkeypatch) -> None
     monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
     get_settings.cache_clear()
 
+
+def test_internal_fund_nav_history_requires_service_token_and_returns_snapshot(monkeypatch) -> None:
+    """历史净值同样只能由 Java 服务身份读取，且返回明确的日期和值。"""
+    monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
+    get_settings.cache_clear()
+
+    from app.api.routes import funds
+    from app.main import create_application
+    from app.schemas.fund import InternalFundNavHistory, InternalFundNavPoint
+
+    monkeypatch.setattr(
+        funds,
+        "get_fund_nav_history",
+        lambda _fund_code, _start_date, _end_date: InternalFundNavHistory(
+            fund_code="002112",
+            items=(
+                InternalFundNavPoint(
+                    nav_date=datetime(2026, 8, 25, tzinfo=UTC).date(),
+                    unit_nav=Decimal("4.8936"),
+                    accumulated_nav=Decimal("5.0416"),
+                ),
+            ),
+        ),
+    )
+
+    with TestClient(create_application()) as client:
+        unauthenticated = client.get(
+            "/internal/v1/funds/002112/nav-history?startDate=2026-08-01&endDate=2026-08-25"
+        )
+        response = client.get(
+            "/internal/v1/funds/002112/nav-history?startDate=2026-08-01&endDate=2026-08-25",
+            headers={"X-Service-Token": "test-service-token"},
+        )
+
+    assert unauthenticated.status_code == 403
+    assert response.status_code == 200
+    assert response.json() == {
+        "fund_code": "002112",
+        "items": [{"nav_date": "2026-08-25", "unit_nav": "4.8936", "accumulated_nav": "5.0416"}],
+    }
+    get_settings.cache_clear()
+
     from app.api.routes import funds
     from app.main import create_application
     from app.schemas.fund import InternalFundDetail, InternalFundPage, InternalFundSummary

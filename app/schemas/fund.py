@@ -30,6 +30,25 @@ class InternalFundDetail(InternalFundSummary):
     accumulated_nav: Decimal | None = None
 
 
+class InternalFundNavPoint(BaseModel):
+    """一条已落库且可展示的历史日净值，不代表实时估值或交易价格。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    nav_date: date
+    unit_nav: Decimal
+    accumulated_nav: Decimal | None
+
+
+class InternalFundNavHistory(BaseModel):
+    """指定基金、指定日期窗口内的历史净值读模型。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    fund_code: str
+    items: tuple[InternalFundNavPoint, ...]
+
+
 class InternalFundPage(BaseModel):
     """返回给 Java 核心服务的兼容游标分页响应。"""
 

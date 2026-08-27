@@ -13,7 +13,11 @@ from app.integrations.tushare import (
     TushareFundNav,
     TushareIntegrationError,
 )
-from app.services.tushare_fund_sync import _normalize_catalog_records, _normalize_nav_records
+from app.services.tushare_fund_sync import (
+    _normalize_catalog_records,
+    _normalize_focused_nav_history_records,
+    _normalize_nav_records,
+)
 
 
 def test_tushare_client_splits_catalog_by_market_and_status() -> None:
@@ -108,6 +112,69 @@ def test_tushare_api_error_does_not_echo_token() -> None:
     assert "sensitive-test-token" not in str(error.value)
 
 
+def test_tushare_client_reads_exact_focused_catalog_and_history_by_known_code() -> None:
+    """重点模式只请求明确的完整代码和日期窗口，不会回退到全市场目录。"""
+    requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if payload["api_name"] == "fund_basic":
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "fields": ["ts_code", "name", "management", "fund_type", "found_date", "status", "market"],
+                        "items": [["002112.OF", "测试基金C", "测试基金", "混合型", "20150619", "L", "O"]],
+                    },
+                },
+            )
+        if payload["api_name"] == "fund_nav":
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "fields": ["ts_code", "ann_date", "nav_date", "unit_nav", "accum_nav"],
+                        "items": [["002112.OF", "20260826", "20260825", "4.8936", "5.0416"]],
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected API {payload['api_name']}")
+
+    with TushareFundClient(
+        token="test-token",
+        api_url="https://tushare.test",
+        connect_timeout_seconds=1,
+        read_timeout_seconds=1,
+        max_retries=0,
+        catalog_max_rows_per_query=15_000,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        basics = client.list_fund_basics_by_ts_codes(("002112.OF",))
+        history = client.list_nav_history(
+            "002112.OF", start_date=date(2026, 8, 1), end_date=date(2026, 8, 25)
+        )
+
+    assert basics[0].ts_code == "002112.OF"
+    assert history[0].nav_date == date(2026, 8, 25)
+    assert requests == [
+        {
+            "api_name": "fund_basic",
+            "token": "test-token",
+            "params": {"ts_code": "002112.OF"},
+            "fields": "ts_code,name,management,fund_type,found_date,status,market",
+        },
+        {
+            "api_name": "fund_nav",
+            "token": "test-token",
+            "params": {"ts_code": "002112.OF", "start_date": "20260801", "end_date": "20260825"},
+            "fields": "ts_code,ann_date,nav_date,unit_nav,accum_nav",
+        },
+    ]
+
+
 def test_catalog_normalization_uses_company_full_name_and_conservative_share_class() -> None:
     """管理人简称要映射全称，ETF 等非份额字母结尾的简称不得误判份额类别。"""
     records, invalid_count = _normalize_catalog_records(
@@ -152,3 +219,19 @@ def test_nav_normalization_rejects_conflicting_duplicate_values() -> None:
 
     with pytest.raises(TushareIntegrationError, match="conflicting duplicate NAV"):
         _normalize_nav_records(navs, date(2026, 8, 25))
+
+
+def test_focused_nav_history_rejects_records_outside_requested_window() -> None:
+    """重点历史同步不能把请求窗口外的外部记录静默写入。"""
+    records, invalid_count = _normalize_focused_nav_history_records(
+        (
+            TushareFundNav("002112.OF", None, date(2026, 8, 25), Decimal("4.8"), Decimal("5.0")),
+            TushareFundNav("002112.OF", None, date(2026, 7, 31), Decimal("4.7"), Decimal("4.9")),
+        ),
+        ts_codes=("002112.OF",),
+        start_date=date(2026, 8, 1),
+        end_date=date(2026, 8, 25),
+    )
+
+    assert invalid_count == 1
+    assert [(record.fund_code, record.nav_date) for record in records] == [("002112", date(2026, 8, 25))]
