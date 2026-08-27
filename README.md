@@ -22,7 +22,7 @@ Windows 本地验证 Celery 时，另开终端使用单进程池：
 .\.venv\Scripts\celery.exe -A app.workers.celery_app beat --loglevel=INFO
 ```
 
-默认在 `Asia/Shanghai` 工作日 20:30 触发，仅补六只配置基金在 Tushare 来源中缺失的日期。可通过 `.env` 中的 `TUSHARE_FOCUSED_INCREMENTAL_ENABLED`、`TUSHARE_FOCUSED_INCREMENTAL_HOUR`、`TUSHARE_FOCUSED_INCREMENTAL_MINUTE` 调整；中国节假日或当晚尚未发布数据时任务以零变更成功结束。不要同时启动多个 Beat。
+默认在 `Asia/Shanghai` 工作日 20:00 触发，仅补六只配置基金在 Tushare 来源中缺失的日期。可通过 `.env` 中的 `TUSHARE_FOCUSED_INCREMENTAL_ENABLED`、`TUSHARE_FOCUSED_INCREMENTAL_HOUR`、`TUSHARE_FOCUSED_INCREMENTAL_MINUTE` 调整；中国节假日或当晚尚未发布数据时任务以零变更成功结束。不要同时启动多个 Beat。
 
 Linux 部署的并发池应按任务类型和容量另行评估；不要直接沿用 Windows 的 `solo` 结论。
 

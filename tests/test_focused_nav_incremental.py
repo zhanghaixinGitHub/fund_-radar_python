@@ -78,6 +78,14 @@ def test_beat_schedule_is_configurable_and_can_be_disabled() -> None:
     assert build_beat_schedule(Settings(tushare_focused_incremental_enabled=False)) == {}
 
 
+def test_beat_schedule_defaults_to_weekday_2000() -> None:
+    """未配置环境变量时，日常任务默认在工作日 20:00 投递。"""
+    trigger = build_beat_schedule(Settings())["focused-nav-incremental-weekdays"]["schedule"]
+
+    assert trigger.hour == {20}
+    assert trigger.minute == {0}
+
+
 def test_incremental_task_uses_configured_codes_and_optional_as_of_date(monkeypatch) -> None:
     """Celery 任务只将配置的六只基金和解析后的日期交给同步服务。"""
     received: dict[str, object] = {}
