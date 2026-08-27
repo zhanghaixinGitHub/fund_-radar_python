@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -95,6 +95,9 @@ class FocusedNavIncrementalPreconditionError(ValueError):
 
 class FocusedNavIncrementalInProgressError(RuntimeError):
     """同一环境已有重点基金增量同步运行时拒绝重复启动。"""
+
+
+FocusedNavProgressReporter = Callable[[int, int, str | None, str], None]
 
 
 @dataclass(frozen=True)
@@ -338,7 +341,11 @@ class TushareFundSyncService:
             raise
 
     def sync_focused_nav_incremental(
-        self, ts_codes: tuple[str, ...], *, as_of_date: date | None = None
+        self,
+        ts_codes: tuple[str, ...],
+        *,
+        as_of_date: date | None = None,
+        progress_reporter: FocusedNavProgressReporter | None = None,
     ) -> SyncOutcome:
         """只补齐重点基金在 Tushare 来源中的缺失净值日期。
 
@@ -347,15 +354,25 @@ class TushareFundSyncService:
         """
         target_date = as_of_date or date.today()
         with _focused_nav_incremental_lock(self._engine):
-            return self._run_focused_nav_incremental(ts_codes, target_date=target_date)
+            return self._run_focused_nav_incremental(
+                ts_codes, target_date=target_date, progress_reporter=progress_reporter
+            )
 
-    def _run_focused_nav_incremental(self, ts_codes: tuple[str, ...], *, target_date: date) -> SyncOutcome:
+    def _run_focused_nav_incremental(
+        self,
+        ts_codes: tuple[str, ...],
+        *,
+        target_date: date,
+        progress_reporter: FocusedNavProgressReporter | None,
+    ) -> SyncOutcome:
         """在已取得跨进程互斥锁后执行重点基金的实际增量同步。"""
         source_id, sync_run_id = self._start_run(
             sync_type="FOCUSED_NAV_INCREMENTAL", requested_nav_date=target_date
         )
         try:
             focused_fund_codes = tuple(_require_normalized_fund_code(ts_code) for ts_code in ts_codes)
+            total_steps = len(focused_fund_codes) + 1
+            _report_focused_nav_progress(progress_reporter, 0, total_steps, None, "正在读取本地同步水位")
             with Session(self._engine) as session:
                 latest_nav_dates = get_latest_nav_dates(
                     session, source_id=source_id, fund_codes=focused_fund_codes
@@ -365,14 +382,35 @@ class TushareFundSyncService:
                 latest_nav_dates=latest_nav_dates,
                 as_of_date=target_date,
             )
-            navs = tuple(
-                nav
-                for window in windows
-                for nav in self._provider.list_nav_history(
-                    window.ts_code, start_date=window.start_date, end_date=window.end_date
+            windows_by_ts_code = {window.ts_code: window for window in windows}
+            navs: list[TushareFundNav] = []
+            for completed_count, ts_code in enumerate(ts_codes, start=1):
+                window = windows_by_ts_code.get(ts_code)
+                if window is None:
+                    _report_focused_nav_progress(
+                        progress_reporter,
+                        completed_count,
+                        total_steps,
+                        ts_code,
+                        f"{ts_code} 已是最新，无需请求外部数据",
+                    )
+                    continue
+                navs.extend(
+                    self._provider.list_nav_history(
+                        window.ts_code, start_date=window.start_date, end_date=window.end_date
+                    )
                 )
+                _report_focused_nav_progress(
+                    progress_reporter,
+                    completed_count,
+                    total_steps,
+                    ts_code,
+                    f"已读取 {ts_code} 的待补齐净值",
+                )
+            _report_focused_nav_progress(
+                progress_reporter, len(focused_fund_codes), total_steps, None, "正在校验并写入净值数据"
             )
-            records, invalid_count = _normalize_focused_nav_incremental_records(navs, windows=windows)
+            records, invalid_count = _normalize_focused_nav_incremental_records(tuple(navs), windows=windows)
             if invalid_count:
                 raise TushareIntegrationError("fund_nav", "focused incremental NAV contains invalid records")
             write_stats = WriteStats()
@@ -391,6 +429,7 @@ class TushareFundSyncService:
                 skipped_count=write_stats.skipped_count,
             )
             self._complete_run(source_id, outcome, write_stats)
+            _report_focused_nav_progress(progress_reporter, total_steps, total_steps, None, "同步完成")
             logger.info(
                 "tushare_fund_sync.sync_focused_nav_incremental >>> completed run_id=%s target_date=%s "
                 "windows=%s fetched=%s created=%s updated=%s skipped=%s",
@@ -459,6 +498,22 @@ def _focused_nav_incremental_lock(engine: Engine) -> Iterator[None]:
             released = bool(connection.scalar(select(func.pg_advisory_unlock(_FOCUSED_NAV_INCREMENTAL_LOCK_KEY))))
             if not released:
                 logger.error("tushare_fund_sync._focused_nav_incremental_lock >>> advisory lock release failed")
+
+
+def _report_focused_nav_progress(
+    reporter: FocusedNavProgressReporter | None,
+    completed_count: int,
+    total_count: int,
+    current_fund_code: str | None,
+    message: str,
+) -> None:
+    """安全上报同步进度；展示层故障不能影响真实数据写入。"""
+    if reporter is None:
+        return
+    try:
+        reporter(completed_count, total_count, current_fund_code, message)
+    except Exception:
+        logger.warning("tushare_fund_sync._report_focused_nav_progress >>> progress callback failed", exc_info=True)
 
 
 def _normalize_catalog_records(

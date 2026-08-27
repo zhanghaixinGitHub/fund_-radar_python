@@ -1,6 +1,6 @@
 """M0 Mock 基金读模型的 Pydantic 内部接口契约。"""
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -50,18 +50,29 @@ class InternalFundNavHistory(BaseModel):
     items: tuple[InternalFundNavPoint, ...]
 
 
-class InternalFocusedNavSyncResult(BaseModel):
-    """重点基金手动增量同步的安全摘要，不返回 Token 或外部原始响应。"""
+class InternalSyncJobStatus(BaseModel):
+    """同步中心任务的安全状态摘要，不返回 Token 或外部原始响应。"""
 
     model_config = ConfigDict(frozen=True)
 
-    sync_run_id: UUID
+    job_id: UUID
+    job_type: str
+    status: str
     requested_nav_date: date
     fund_codes: tuple[str, ...]
+    progress_current: int
+    progress_total: int
+    current_fund_code: str | None
+    progress_message: str
+    sync_run_id: UUID | None
     fetched_count: int
     created_count: int
     updated_count: int
     skipped_count: int
+    error_code: str | None
+    error_message: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
 
 
 class InternalFundPage(BaseModel):

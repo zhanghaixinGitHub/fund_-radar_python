@@ -129,34 +129,50 @@ def test_internal_fund_nav_history_requires_service_token_and_returns_snapshot(m
     get_settings.cache_clear()
 
 
-def test_internal_manual_focused_nav_sync_requires_service_token_and_returns_safe_counts(monkeypatch) -> None:
-    """页面只能经 Java 触发手动同步，且响应只返回受控运行统计。"""
+def test_internal_focused_nav_sync_job_requires_service_token_and_returns_progress(monkeypatch) -> None:
+    """页面只能经 Java 创建任务，并能轮询安全的进度摘要。"""
     monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
     get_settings.cache_clear()
 
     from app.api.routes import funds
     from app.main import create_application
-    from app.services.tushare_fund_sync import SyncOutcome
+    from app.services.sync_jobs import FOCUSED_NAV_INCREMENTAL_JOB_TYPE, SyncJobSnapshot
 
     received: dict[str, object] = {}
+    job_id = UUID("00000000-0000-0000-0000-000000000301")
+    snapshot = SyncJobSnapshot(
+        job_id=job_id,
+        job_type=FOCUSED_NAV_INCREMENTAL_JOB_TYPE,
+        status="RUNNING",
+        requested_nav_date=datetime(2026, 8, 27, tzinfo=UTC).date(),
+        fund_codes=("002112.OF", "010710.OF"),
+        progress_current=1,
+        progress_total=3,
+        current_fund_code="002112.OF",
+        progress_message="已读取 002112.OF 的待补齐净值",
+        sync_run_id=None,
+        fetched_count=0,
+        created_count=0,
+        updated_count=0,
+        skipped_count=0,
+        error_code=None,
+        error_message=None,
+        started_at=datetime(2026, 8, 27, tzinfo=UTC),
+        finished_at=None,
+    )
 
-    class StubService:
-        def sync_focused_nav_incremental(self, ts_codes: tuple[str, ...]) -> SyncOutcome:
+    class StubManager:
+        def start_focused_nav_incremental(self, ts_codes: tuple[str, ...]) -> SyncJobSnapshot:
             received["ts_codes"] = ts_codes
-            return SyncOutcome(
-                sync_run_id=UUID("00000000-0000-0000-0000-000000000301"),
-                sync_type="FOCUSED_NAV_INCREMENTAL",
-                requested_nav_date=datetime(2026, 8, 27, tzinfo=UTC).date(),
-                fetched_count=3,
-                created_count=2,
-                updated_count=0,
-                skipped_count=1,
-            )
+            return snapshot
 
-        def close(self) -> None:
-            received["closed"] = True
+        def get_job(self, received_job_id: UUID) -> SyncJobSnapshot | None:
+            return snapshot if received_job_id == job_id else None
 
-    monkeypatch.setattr(funds, "TushareFundSyncService", StubService)
+        def get_latest_job(self) -> SyncJobSnapshot:
+            return snapshot
+
+    monkeypatch.setattr(funds, "get_sync_job_manager", lambda: StubManager())
     monkeypatch.setattr(
         funds,
         "get_settings",
@@ -165,57 +181,97 @@ def test_internal_manual_focused_nav_sync_requires_service_token_and_returns_saf
 
     with TestClient(create_application()) as client:
         browser_response = client.post(
-            "/internal/v1/funds/sync/focused-nav-incremental",
+            "/internal/v1/funds/sync-jobs/focused-nav-incremental",
             headers={"X-Service-Token": "test-service-token", "Origin": "http://localhost:5173"},
         )
         response = client.post(
-            "/internal/v1/funds/sync/focused-nav-incremental",
+            "/internal/v1/funds/sync-jobs/focused-nav-incremental",
             headers={"X-Service-Token": "test-service-token", "X-Trace-Id": "manual-sync-test"},
+        )
+        status_response = client.get(
+            f"/internal/v1/funds/sync-jobs/{job_id}", headers={"X-Service-Token": "test-service-token"}
+        )
+        latest_response = client.get(
+            "/internal/v1/funds/sync-jobs/focused-nav-incremental/latest",
+            headers={"X-Service-Token": "test-service-token"},
         )
 
     assert browser_response.status_code == 403
-    assert response.status_code == 200
+    assert response.status_code == 202
     assert response.headers["X-Trace-Id"] == "manual-sync-test"
     assert response.json() == {
-        "sync_run_id": "00000000-0000-0000-0000-000000000301",
+        "job_id": "00000000-0000-0000-0000-000000000301",
+        "job_type": "FOCUSED_NAV_INCREMENTAL",
+        "status": "RUNNING",
         "requested_nav_date": "2026-08-27",
         "fund_codes": ["002112.OF", "010710.OF"],
-        "fetched_count": 3,
-        "created_count": 2,
+        "progress_current": 1,
+        "progress_total": 3,
+        "current_fund_code": "002112.OF",
+        "progress_message": "已读取 002112.OF 的待补齐净值",
+        "sync_run_id": None,
+        "fetched_count": 0,
+        "created_count": 0,
         "updated_count": 0,
-        "skipped_count": 1,
+        "skipped_count": 0,
+        "error_code": None,
+        "error_message": None,
+        "started_at": "2026-08-27T00:00:00Z",
+        "finished_at": None,
     }
-    assert received == {"ts_codes": ("002112.OF", "010710.OF"), "closed": True}
+    assert status_response.status_code == 200
+    assert latest_response.status_code == 200
+    assert status_response.json()["progress_current"] == 1
+    assert latest_response.json()["job_id"] == str(job_id)
+    assert received == {"ts_codes": ("002112.OF", "010710.OF")}
     get_settings.cache_clear()
 
 
-def test_internal_manual_focused_nav_sync_returns_actionable_baseline_error(monkeypatch) -> None:
-    """重点基金尚无完整历史基线时，页面应获得可操作的 422 错误码。"""
+def test_internal_focused_nav_sync_job_returns_latest_failed_state(monkeypatch) -> None:
+    """后台发现历史基线缺失时，页面从任务状态获得可操作错误。"""
     monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
     get_settings.cache_clear()
 
     from app.api.routes import funds
     from app.main import create_application
-    from app.services.tushare_fund_sync import FocusedNavIncrementalPreconditionError
+    from app.services.sync_jobs import FOCUSED_NAV_INCREMENTAL_JOB_TYPE, SyncJobSnapshot
 
-    class StubService:
-        def sync_focused_nav_incremental(self, _ts_codes: tuple[str, ...]) -> None:
-            raise FocusedNavIncrementalPreconditionError("focused NAV baseline is missing")
+    snapshot = SyncJobSnapshot(
+        job_id=UUID("00000000-0000-0000-0000-000000000302"),
+        job_type=FOCUSED_NAV_INCREMENTAL_JOB_TYPE,
+        status="FAILED",
+        requested_nav_date=datetime(2026, 8, 27, tzinfo=UTC).date(),
+        fund_codes=("002112.OF",),
+        progress_current=0,
+        progress_total=2,
+        current_fund_code=None,
+        progress_message="同步未完成",
+        sync_run_id=None,
+        fetched_count=0,
+        created_count=0,
+        updated_count=0,
+        skipped_count=0,
+        error_code="FOCUSED_SYNC_BASELINE_MISSING",
+        error_message="请先完成重点基金历史净值回填。",
+        started_at=datetime(2026, 8, 27, tzinfo=UTC),
+        finished_at=datetime(2026, 8, 27, tzinfo=UTC),
+    )
 
-        def close(self) -> None:
-            return None
+    class StubManager:
+        def get_latest_job(self) -> SyncJobSnapshot:
+            return snapshot
 
-    monkeypatch.setattr(funds, "TushareFundSyncService", StubService)
-    monkeypatch.setattr(funds, "get_settings", lambda: SimpleNamespace(focused_fund_ts_codes=("002112.OF",)))
+    monkeypatch.setattr(funds, "get_sync_job_manager", lambda: StubManager())
 
     with TestClient(create_application()) as client:
-        response = client.post(
-            "/internal/v1/funds/sync/focused-nav-incremental",
+        response = client.get(
+            "/internal/v1/funds/sync-jobs/focused-nav-incremental/latest",
             headers={"X-Service-Token": "test-service-token"},
         )
 
-    assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "FOCUSED_SYNC_BASELINE_MISSING"
+    assert response.status_code == 200
+    assert response.json()["status"] == "FAILED"
+    assert response.json()["error_code"] == "FOCUSED_SYNC_BASELINE_MISSING"
     get_settings.cache_clear()
 
     from app.api.routes import funds

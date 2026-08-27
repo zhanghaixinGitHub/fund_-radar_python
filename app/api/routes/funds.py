@@ -2,6 +2,7 @@
 
 from datetime import date
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 
@@ -9,14 +10,9 @@ from app.api.dependencies import require_service_token
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.middleware import get_trace_id
-from app.integrations.tushare import TushareIntegrationError
-from app.schemas.fund import InternalFocusedNavSyncResult, InternalFundDetail, InternalFundNavHistory, InternalFundPage
+from app.schemas.fund import InternalFundDetail, InternalFundNavHistory, InternalFundPage, InternalSyncJobStatus
 from app.services.fund_catalog_read import get_fund, get_fund_nav_history, list_funds
-from app.services.tushare_fund_sync import (
-    FocusedNavIncrementalInProgressError,
-    FocusedNavIncrementalPreconditionError,
-    TushareFundSyncService,
-)
+from app.services.sync_jobs import SyncJobInProgressError, SyncJobSnapshot, get_sync_job_manager
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -42,72 +38,92 @@ async def list_internal_funds(
 
 
 @router.post(
-    "/sync/focused-nav-incremental",
-    response_model=InternalFocusedNavSyncResult,
+    "/sync-jobs/focused-nav-incremental",
+    response_model=InternalSyncJobStatus,
+    status_code=status.HTTP_202_ACCEPTED,
     dependencies=[Depends(require_service_token)],
 )
-def sync_internal_focused_nav_incremental() -> InternalFocusedNavSyncResult:
-    """手动补齐六只重点基金净值；同步执行，不依赖本机 Celery Beat 或 Worker。"""
-    service: TushareFundSyncService | None = None
+def start_internal_focused_nav_incremental_job() -> InternalSyncJobStatus:
+    """创建重点基金手动同步任务；执行由本机后台线程承担，不依赖 Celery Worker。"""
     try:
         settings = get_settings()
         ts_codes = settings.focused_fund_ts_codes
         logger.info(
-            "funds.sync_internal_focused_nav_incremental >>> manual focused NAV sync requested, "
+            "funds.start_internal_focused_nav_incremental_job >>> manual focused NAV sync requested, "
             "trace_id=%s, fund_count=%s",
             get_trace_id(),
             len(ts_codes),
         )
-        service = TushareFundSyncService()
-        outcome = service.sync_focused_nav_incremental(ts_codes)
-    except FocusedNavIncrementalInProgressError as error:
+        snapshot = get_sync_job_manager().start_focused_nav_incremental(ts_codes)
+    except SyncJobInProgressError as error:
         logger.warning(
-            "funds.sync_internal_focused_nav_incremental >>> duplicate sync rejected, trace_id=%s",
+            "funds.start_internal_focused_nav_incremental_job >>> duplicate sync rejected, trace_id=%s",
             get_trace_id(),
         )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "FOCUSED_SYNC_IN_PROGRESS", "message": "已有重点基金同步正在执行，请稍后重试。"},
         ) from error
-    except FocusedNavIncrementalPreconditionError as error:
-        logger.warning(
-            "funds.sync_internal_focused_nav_incremental >>> missing baseline rejected, trace_id=%s",
-            get_trace_id(),
-        )
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"code": "FOCUSED_SYNC_BASELINE_MISSING", "message": "请先完成重点基金历史净值回填。"},
-        ) from error
-    except TushareIntegrationError as error:
-        logger.warning(
-            "funds.sync_internal_focused_nav_incremental >>> Tushare sync failed, trace_id=%s, api=%s",
-            get_trace_id(),
-            error.api_name,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={"code": "FOCUSED_SYNC_FAILED", "message": "净值同步未完成，请稍后重试。"},
-        ) from error
     except ValueError as error:
         logger.error(
-            "funds.sync_internal_focused_nav_incremental >>> manual sync configuration is invalid, trace_id=%s",
+            "funds.start_internal_focused_nav_incremental_job >>> invalid sync configuration, trace_id=%s",
             get_trace_id(),
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"code": "FOCUSED_SYNC_UNAVAILABLE", "message": "净值同步服务尚未完成配置。"},
         ) from error
-    finally:
-        if service is not None:
-            service.close()
-    return InternalFocusedNavSyncResult(
-        sync_run_id=outcome.sync_run_id,
-        requested_nav_date=outcome.requested_nav_date,
-        fund_codes=ts_codes,
-        fetched_count=outcome.fetched_count,
-        created_count=outcome.created_count,
-        updated_count=outcome.updated_count,
-        skipped_count=outcome.skipped_count,
+    return _to_internal_sync_job_status(snapshot)
+
+
+@router.get(
+    "/sync-jobs/focused-nav-incremental/latest",
+    response_model=InternalSyncJobStatus | None,
+    dependencies=[Depends(require_service_token)],
+)
+def get_latest_internal_focused_nav_incremental_job() -> InternalSyncJobStatus | None:
+    """读取当前 FastAPI 进程最近一次重点基金同步任务，页面刷新后可继续观察进度。"""
+    snapshot = get_sync_job_manager().get_latest_job()
+    return _to_internal_sync_job_status(snapshot) if snapshot else None
+
+
+@router.get(
+    "/sync-jobs/{job_id}",
+    response_model=InternalSyncJobStatus,
+    dependencies=[Depends(require_service_token)],
+)
+def get_internal_sync_job(job_id: UUID) -> InternalSyncJobStatus:
+    """按任务标识返回安全进度摘要；本接口不触发同步。"""
+    snapshot = get_sync_job_manager().get_job(job_id)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "SYNC_JOB_NOT_FOUND", "message": "未找到同步任务。"},
+        )
+    return _to_internal_sync_job_status(snapshot)
+
+
+def _to_internal_sync_job_status(snapshot: SyncJobSnapshot) -> InternalSyncJobStatus:
+    """将进程内任务快照转换为明确的 Python 内部 HTTP 契约。"""
+    return InternalSyncJobStatus(
+        job_id=snapshot.job_id,
+        job_type=snapshot.job_type,
+        status=snapshot.status,
+        requested_nav_date=snapshot.requested_nav_date,
+        fund_codes=snapshot.fund_codes,
+        progress_current=snapshot.progress_current,
+        progress_total=snapshot.progress_total,
+        current_fund_code=snapshot.current_fund_code,
+        progress_message=snapshot.progress_message,
+        sync_run_id=snapshot.sync_run_id,
+        fetched_count=snapshot.fetched_count,
+        created_count=snapshot.created_count,
+        updated_count=snapshot.updated_count,
+        skipped_count=snapshot.skipped_count,
+        error_code=snapshot.error_code,
+        error_message=snapshot.error_message,
+        started_at=snapshot.started_at,
+        finished_at=snapshot.finished_at,
     )
 
 
