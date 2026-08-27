@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Protocol
 from uuid import UUID
 
@@ -32,6 +32,7 @@ from app.repositories.fund_sync import (
     create_sync_run,
     ensure_tushare_source,
     fail_sync_run,
+    get_latest_nav_dates,
     upsert_fund_catalog_batch,
     upsert_nav_daily_batch,
 )
@@ -83,6 +84,20 @@ class SyncOutcome:
             "updated_count": self.updated_count,
             "skipped_count": self.skipped_count,
         }
+
+
+class FocusedNavIncrementalPreconditionError(ValueError):
+    """重点基金未完成历史基线时拒绝启动日常增量同步。"""
+
+
+@dataclass(frozen=True)
+class FocusedNavIncrementalWindow:
+    """一只重点基金本轮需从本地水位后补齐的净值日期窗口。"""
+
+    ts_code: str
+    fund_code: str
+    start_date: date
+    end_date: date
 
 
 class TushareFundSyncService:
@@ -301,7 +316,8 @@ class TushareFundSyncService:
             )
             self._complete_run(source_id, outcome, write_stats)
             logger.info(
-                "tushare_fund_sync.sync_focused_nav_history >>> completed run_id=%s focused_count=%s fetched=%s created=%s updated=%s",
+                "tushare_fund_sync.sync_focused_nav_history >>> completed run_id=%s "
+                "focused_count=%s fetched=%s created=%s updated=%s",
                 sync_run_id,
                 len(ts_codes),
                 outcome.fetched_count,
@@ -312,6 +328,76 @@ class TushareFundSyncService:
         except Exception as error:
             self._record_failure(source_id, sync_run_id, error)
             logger.exception("tushare_fund_sync.sync_focused_nav_history >>> failed run_id=%s", sync_run_id)
+            raise
+
+    def sync_focused_nav_incremental(
+        self, ts_codes: tuple[str, ...], *, as_of_date: date | None = None
+    ) -> SyncOutcome:
+        """只补齐重点基金在 Tushare 来源中的缺失净值日期。
+
+        所有重点基金必须已由完整历史回填建立同源基线；交易日尚未发布
+        新净值或遇非交易日时，以零变更成功结束，不将其记录为外部失败。
+        """
+        target_date = as_of_date or date.today()
+        source_id, sync_run_id = self._start_run(
+            sync_type="FOCUSED_NAV_INCREMENTAL", requested_nav_date=target_date
+        )
+        try:
+            focused_fund_codes = tuple(_require_normalized_fund_code(ts_code) for ts_code in ts_codes)
+            with Session(self._engine) as session:
+                latest_nav_dates = get_latest_nav_dates(
+                    session, source_id=source_id, fund_codes=focused_fund_codes
+                )
+            windows = _build_focused_nav_incremental_windows(
+                ts_codes=ts_codes,
+                latest_nav_dates=latest_nav_dates,
+                as_of_date=target_date,
+            )
+            navs = tuple(
+                nav
+                for window in windows
+                for nav in self._provider.list_nav_history(
+                    window.ts_code, start_date=window.start_date, end_date=window.end_date
+                )
+            )
+            records, invalid_count = _normalize_focused_nav_incremental_records(navs, windows=windows)
+            if invalid_count:
+                raise TushareIntegrationError("fund_nav", "focused incremental NAV contains invalid records")
+            write_stats = WriteStats()
+            for batch in _chunked(records, self._batch_size):
+                with Session(self._engine) as session, session.begin():
+                    write_stats = write_stats.combine(
+                        upsert_nav_daily_batch(session, source_id=source_id, records=batch)
+                    )
+            outcome = SyncOutcome(
+                sync_run_id=sync_run_id,
+                sync_type="FOCUSED_NAV_INCREMENTAL",
+                requested_nav_date=target_date,
+                fetched_count=len(navs),
+                created_count=write_stats.created_count,
+                updated_count=write_stats.updated_count,
+                skipped_count=write_stats.skipped_count,
+            )
+            self._complete_run(source_id, outcome, write_stats)
+            logger.info(
+                "tushare_fund_sync.sync_focused_nav_incremental >>> completed run_id=%s target_date=%s "
+                "windows=%s fetched=%s created=%s updated=%s skipped=%s",
+                sync_run_id,
+                target_date,
+                len(windows),
+                outcome.fetched_count,
+                outcome.created_count,
+                outcome.updated_count,
+                outcome.skipped_count,
+            )
+            return outcome
+        except Exception as error:
+            self._record_failure(source_id, sync_run_id, error)
+            logger.exception(
+                "tushare_fund_sync.sync_focused_nav_incremental >>> failed run_id=%s target_date=%s",
+                sync_run_id,
+                target_date,
+            )
             raise
 
     def _start_run(self, *, sync_type: str, requested_nav_date: date | None) -> tuple[UUID, UUID]:
@@ -447,6 +533,69 @@ def _normalize_focused_nav_history_records(
     return tuple(by_key[key] for key in sorted(by_key)), invalid_count
 
 
+def _build_focused_nav_incremental_windows(
+    *,
+    ts_codes: tuple[str, ...],
+    latest_nav_dates: Mapping[str, date],
+    as_of_date: date,
+) -> tuple[FocusedNavIncrementalWindow, ...]:
+    """根据同源水位生成每只重点基金的最小补数窗口。
+
+    Raises:
+        FocusedNavIncrementalPreconditionError: 任一重点基金没有完整历史基线时抛出。
+    """
+    if not ts_codes or len(set(ts_codes)) != len(ts_codes):
+        raise FocusedNavIncrementalPreconditionError("focused fund code list must be non-empty and unique")
+    fund_code_by_ts_code = {ts_code: _require_normalized_fund_code(ts_code) for ts_code in ts_codes}
+    if len(set(fund_code_by_ts_code.values())) != len(fund_code_by_ts_code):
+        raise FocusedNavIncrementalPreconditionError("focused fund code list must normalize to unique fund codes")
+    missing_fund_codes = sorted(
+        fund_code for fund_code in fund_code_by_ts_code.values() if fund_code not in latest_nav_dates
+    )
+    if missing_fund_codes:
+        raise FocusedNavIncrementalPreconditionError(
+            "focused NAV baseline is missing for fund_code=" + ",".join(missing_fund_codes)
+        )
+    return tuple(
+        FocusedNavIncrementalWindow(
+            ts_code=ts_code,
+            fund_code=fund_code,
+            start_date=latest_nav_dates[fund_code] + timedelta(days=1),
+            end_date=as_of_date,
+        )
+        for ts_code, fund_code in fund_code_by_ts_code.items()
+        if latest_nav_dates[fund_code] < as_of_date
+    )
+
+
+def _normalize_focused_nav_incremental_records(
+    navs: tuple[TushareFundNav, ...], *, windows: tuple[FocusedNavIncrementalWindow, ...]
+) -> tuple[tuple[NavDailyUpsert, ...], int]:
+    """只接受每只基金自身增量窗口内的净值，冲突重复值拒绝写入。"""
+    window_by_fund_code = {window.fund_code: window for window in windows}
+    by_key: dict[tuple[str, date], NavDailyUpsert] = {}
+    invalid_count = 0
+    for nav in navs:
+        fund_code = _normalize_fund_code(nav.ts_code)
+        window = window_by_fund_code.get(fund_code) if fund_code is not None else None
+        if window is None or nav.nav_date < window.start_date or nav.nav_date > window.end_date:
+            invalid_count += 1
+            continue
+        record = NavDailyUpsert(
+            fund_code=fund_code,
+            nav_date=nav.nav_date,
+            unit_nav=nav.unit_nav,
+            accumulated_nav=nav.accumulated_nav,
+            content_hash=_nav_content_hash(fund_code, nav),
+        )
+        key = (record.fund_code, record.nav_date)
+        existing = by_key.get(key)
+        if existing is not None and existing.content_hash != record.content_hash:
+            raise TushareIntegrationError("fund_nav", f"conflicting duplicate NAV for fund_code={fund_code}")
+        by_key[key] = record
+    return tuple(by_key[key] for key in sorted(by_key)), invalid_count
+
+
 def _ensure_focused_catalog_complete(
     requested_ts_codes: tuple[str, ...], basics: tuple[TushareFundBasic, ...]
 ) -> None:
@@ -499,6 +648,14 @@ def _normalize_fund_code(ts_code: str) -> str | None:
     fund_code = ts_code.split(".", maxsplit=1)[0].strip()
     if not fund_code or len(fund_code) > 32:
         return None
+    return fund_code
+
+
+def _require_normalized_fund_code(ts_code: str) -> str:
+    """返回可写入的基金代码；配置代码无法规范化时失败关闭。"""
+    fund_code = _normalize_fund_code(ts_code)
+    if fund_code is None:
+        raise FocusedNavIncrementalPreconditionError(f"invalid focused ts_code={ts_code}")
     return fund_code
 
 

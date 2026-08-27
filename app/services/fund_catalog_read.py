@@ -7,7 +7,13 @@ from sqlalchemy.orm import Session
 from app.db.session import get_engine
 from app.models.fund import FundShareClass
 from app.repositories.fund_read import get_fund_summary, list_fund_nav_history, list_fund_summaries
-from app.schemas.fund import InternalFundDetail, InternalFundNavHistory, InternalFundNavPoint, InternalFundPage, InternalFundSummary
+from app.schemas.fund import (
+    InternalFundDetail,
+    InternalFundNavHistory,
+    InternalFundNavPoint,
+    InternalFundPage,
+    InternalFundSummary,
+)
 
 
 def list_funds(keyword: str | None, page_size: int, cursor: str | None) -> InternalFundPage:

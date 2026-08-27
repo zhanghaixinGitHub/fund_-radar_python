@@ -6,7 +6,6 @@ from functools import lru_cache
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 _TUSHARE_FOCUSED_TS_CODE_PATTERN = re.compile(r"^\d{6}\.(?:OF|SZ|SH)$")
 
 
@@ -34,6 +33,9 @@ class Settings(BaseSettings):
     tushare_sync_batch_size: int = Field(default=500, ge=1, le=2_000)
     tushare_catalog_max_rows_per_query: int = Field(default=15_000, ge=1, le=100_000)
     tushare_focused_nav_max_rows_per_query: int = Field(default=10_000, ge=1, le=100_000)
+    tushare_focused_incremental_enabled: bool = True
+    tushare_focused_incremental_hour: int = Field(default=20, ge=0, le=23)
+    tushare_focused_incremental_minute: int = Field(default=30, ge=0, le=59)
     # 当前用户确认的六只基金。环境变量可用逗号分隔的完整 Tushare 代码覆盖，避免误触全市场目录同步。
     tushare_focused_fund_ts_codes: str = "010710.OF,160323.SZ,013275.OF,007832.OF,002112.OF,005312.OF"
 

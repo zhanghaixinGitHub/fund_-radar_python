@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.orm import Session
 
 from app.models.fund import FundMaster, FundShareClass, NavDaily, SourceRegistry, SourceSyncRun
@@ -266,6 +266,24 @@ def upsert_nav_daily_batch(
             existing.content_hash = record.content_hash
             updated_count += 1
     return WriteStats(created_count=created_count, updated_count=updated_count, skipped_count=skipped_count)
+
+
+def get_latest_nav_dates(
+    session: Session, *, source_id: UUID, fund_codes: tuple[str, ...]
+) -> dict[str, date]:
+    """按数据源返回指定基金已持久化的最新净值日期。
+
+    增量同步只能以同一来源的数据推进水位，不能让其他来源的记录掩盖
+    Tushare 数据缺口。
+    """
+    if not fund_codes:
+        return {}
+    rows = session.execute(
+        select(NavDaily.fund_code, func.max(NavDaily.nav_date))
+        .where(NavDaily.source_id == source_id, NavDaily.fund_code.in_(fund_codes))
+        .group_by(NavDaily.fund_code)
+    ).all()
+    return {fund_code: nav_date for fund_code, nav_date in rows}
 
 
 def _get_sync_run(session: Session, sync_run_id: UUID) -> SourceSyncRun:

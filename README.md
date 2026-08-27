@@ -16,6 +16,14 @@ Windows 本地验证 Celery 时，另开终端使用单进程池：
 .\.venv\Scripts\celery.exe -A app.workers.celery_app worker --pool=solo --loglevel=INFO
 ```
 
+重点基金的日常净值补数由独立的 Celery Beat 调度器执行；同一环境只能启动一个 Beat，Windows 本机另开终端运行：
+
+```powershell
+.\.venv\Scripts\celery.exe -A app.workers.celery_app beat --loglevel=INFO
+```
+
+默认在 `Asia/Shanghai` 工作日 20:30 触发，仅补六只配置基金在 Tushare 来源中缺失的日期。可通过 `.env` 中的 `TUSHARE_FOCUSED_INCREMENTAL_ENABLED`、`TUSHARE_FOCUSED_INCREMENTAL_HOUR`、`TUSHARE_FOCUSED_INCREMENTAL_MINUTE` 调整；中国节假日或当晚尚未发布数据时任务以零变更成功结束。不要同时启动多个 Beat。
+
 Linux 部署的并发池应按任务类型和容量另行评估；不要直接沿用 Windows 的 `solo` 结论。
 
 本机只使用 `.env` 管理基础配置和私有凭据，并与 Java 的 `AI_SERVICE_TOKEN` 对齐。`.env` 已被 Git 忽略；凭据不得写入源码、测试断言、日志或文档。
@@ -34,9 +42,10 @@ Linux 部署的并发池应按任务类型和容量另行评估；不要直接�
 ```powershell
 .\.venv\Scripts\python.exe -m app.commands.sync_tushare_funds catalog
 .\.venv\Scripts\python.exe -m app.commands.sync_tushare_funds nav --nav-date 2026-08-25
+.\.venv\Scripts\python.exe -m app.commands.sync_tushare_funds focused-incremental --as-of-date 2026-08-27
 ```
 
-目录同步按市场和存续状态分片；任何分片达到配置行数上限都会失败关闭，绝不将部分结果标为全市场目录。净值同步按指定日期批量拉取，只为已存在的目录记录落库；原始响应和 Token 不写入数据库、日志或命令输出。
+目录同步按市场和存续状态分片；任何分片达到配置行数上限都会失败关闭，绝不将部分结果标为全市场目录。`focused` 用于首次完整回填六只重点基金；日常运行使用 `focused-incremental`，按同一 Tushare 来源中每只基金的最后净值日向后补齐。日常任务不会重新拉取完整历史；任一基金缺少历史基线时失败关闭并要求先执行完整回填。原始响应和 Token 不写入数据库、日志或命令输出。
 
 关联文档：
 

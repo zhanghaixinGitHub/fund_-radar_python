@@ -34,7 +34,11 @@ async def list_internal_funds(
     return list_funds(keyword, page_size, cursor)
 
 
-@router.get("/{fund_code}/nav-history", response_model=InternalFundNavHistory, dependencies=[Depends(require_service_token)])
+@router.get(
+    "/{fund_code}/nav-history",
+    response_model=InternalFundNavHistory,
+    dependencies=[Depends(require_service_token)],
+)
 async def get_internal_fund_nav_history(
     fund_code: Annotated[str, Path(min_length=6, max_length=6, pattern=r"^\d{6}$")],
     start_date: Annotated[date, Query(alias="startDate")],
@@ -42,11 +46,18 @@ async def get_internal_fund_nav_history(
 ) -> InternalFundNavHistory:
     """返回已落库的历史净值；读取过程不调用 Tushare，最长窗口限制为约 13 年。"""
     if start_date > end_date:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="startDate must not be after endDate")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="startDate must not be after endDate",
+        )
     if (end_date - start_date).days > 5_000:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="requested NAV history window is too large")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="requested NAV history window is too large",
+        )
     logger.info(
-        "funds.get_internal_fund_nav_history >>> persisted NAV history requested, trace_id=%s, fund_code=%s, start=%s, end=%s",
+        "funds.get_internal_fund_nav_history >>> persisted NAV history requested, "
+        "trace_id=%s, fund_code=%s, start=%s, end=%s",
         get_trace_id(),
         fund_code,
         start_date,
