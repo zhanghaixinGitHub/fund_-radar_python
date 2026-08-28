@@ -85,7 +85,7 @@ def test_internal_fund_list_and_detail_accept_service_token(monkeypatch) -> None
     monkeypatch.setattr(
         funds,
         "list_funds",
-        lambda _keyword, _page_size, _cursor, _page: InternalFundPage(
+        lambda _keyword, _fund_type, _page_size, _cursor, _page: InternalFundPage(
             items=(summary,), next_cursor=None, page=None, page_size=2, total_count=1, total_pages=1
         ),
     )
@@ -114,6 +114,9 @@ def test_internal_fund_list_and_detail_accept_service_token(monkeypatch) -> None
             "fund_type": "STOCK",
             "status": "ACTIVE",
             "as_of_date": "2026-08-25",
+            "day_change_rate": None,
+            "week_change_rate": None,
+            "month_change_rate": None,
         }
     ]
     assert list_response.json()["page"] is None
@@ -141,8 +144,14 @@ def test_internal_fund_list_uses_page_mode_and_rejects_cursor_conflict(monkeypat
     monkeypatch.setattr(
         funds,
         "list_funds",
-        lambda keyword, page_size, cursor, page: received.append(
-            {"keyword": keyword, "page_size": page_size, "cursor": cursor, "page": page}
+        lambda keyword, fund_type, page_size, cursor, page: received.append(
+            {
+                "keyword": keyword,
+                "fund_type": fund_type,
+                "page_size": page_size,
+                "cursor": cursor,
+                "page": page,
+            }
         )
         or InternalFundPage(items=(), page=3, page_size=10, total_count=43, total_pages=5),
     )
@@ -150,7 +159,7 @@ def test_internal_fund_list_uses_page_mode_and_rejects_cursor_conflict(monkeypat
     with TestClient(create_application()) as client:
         headers = {"X-Service-Token": "test-service-token"}
         default_response = client.get("/internal/v1/funds", headers=headers)
-        page_response = client.get("/internal/v1/funds?pageSize=10&page=3", headers=headers)
+        page_response = client.get("/internal/v1/funds?fundType=BOND&pageSize=10&page=3", headers=headers)
         conflict_response = client.get("/internal/v1/funds?page=2&cursor=010710", headers=headers)
 
     assert default_response.status_code == 200
@@ -160,11 +169,53 @@ def test_internal_fund_list_uses_page_mode_and_rejects_cursor_conflict(monkeypat
     assert page_response.json()["total_count"] == 43
     assert page_response.json()["total_pages"] == 5
     assert received == [
-        {"keyword": None, "page_size": 10, "cursor": None, "page": None},
-        {"keyword": None, "page_size": 10, "cursor": None, "page": 3},
+        {"keyword": None, "fund_type": None, "page_size": 10, "cursor": None, "page": None},
+        {"keyword": None, "fund_type": "BOND", "page_size": 10, "cursor": None, "page": 3},
     ]
     assert conflict_response.status_code == 422
     assert conflict_response.json()["detail"]["code"] == "PAGINATION_MODE_CONFLICT"
+    get_settings.cache_clear()
+
+
+def test_internal_fund_batch_returns_summaries_and_rejects_invalid_codes(monkeypatch) -> None:
+    """关注页仅能通过服务身份批量读取基金摘要，不能携带重复或非法代码。"""
+    monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
+    get_settings.cache_clear()
+
+    from app.api.routes import funds
+    from app.main import create_application
+    from app.schemas.fund import InternalFundSummary
+
+    received: list[tuple[str, ...]] = []
+    summary = InternalFundSummary(
+        fund_code="002112",
+        fund_name="德邦鑫星价值灵活配置混合-C",
+        fund_type="MIXED",
+        status="ACTIVE",
+        as_of_date=datetime(2026, 8, 26, tzinfo=UTC).date(),
+        day_change_rate=Decimal("0.0123"),
+        week_change_rate=Decimal("-0.0456"),
+        month_change_rate=Decimal("0.0789"),
+    )
+    monkeypatch.setattr(
+        funds,
+        "get_funds_by_codes",
+        lambda fund_codes: received.append(fund_codes) or (summary,),
+    )
+
+    with TestClient(create_application()) as client:
+        headers = {"X-Service-Token": "test-service-token"}
+        response = client.get("/internal/v1/funds/batch?fundCode=002112", headers=headers)
+        invalid_response = client.get(
+            "/internal/v1/funds/batch?fundCode=002112&fundCode=002112", headers=headers
+        )
+
+    assert response.status_code == 200
+    assert response.json()[0]["fund_code"] == "002112"
+    assert response.json()[0]["day_change_rate"] == "0.0123"
+    assert received == [("002112",)]
+    assert invalid_response.status_code == 422
+    assert invalid_response.json()["detail"]["code"] == "INVALID_FUND_CODE_BATCH"
     get_settings.cache_clear()
 
 

@@ -1,5 +1,6 @@
 """供 Java 核心服务认证访问的 M0 基金读模型接口。"""
 
+import re
 from datetime import date
 from typing import Annotated
 from uuid import UUID
@@ -9,17 +10,27 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from app.api.dependencies import require_service_token
 from app.core.logging import get_logger
 from app.core.middleware import get_trace_id
-from app.schemas.fund import InternalFundDetail, InternalFundNavHistory, InternalFundPage, InternalSyncJobStatus
-from app.services.fund_catalog_read import get_fund, get_fund_nav_history, list_funds
+from app.schemas.fund import (
+    InternalFundDetail,
+    InternalFundNavHistory,
+    InternalFundPage,
+    InternalFundSummary,
+    InternalSyncJobStatus,
+)
+from app.services.fund_catalog_read import get_fund, get_fund_nav_history, get_funds_by_codes, list_funds
 from app.services.sync_jobs import SyncJobInProgressError, SyncJobSnapshot, get_sync_job_manager
 
 router = APIRouter()
 logger = get_logger(__name__)
+_FUND_TYPES = "BOND|STOCK|MIXED|INDEX|MONEY|QDII|FOF|OTHER"
+_FUND_CODE_PATTERN = re.compile(r"^\d{6}$")
+_MAX_BATCH_FUND_CODES = 50
 
 
 @router.get("", response_model=InternalFundPage, dependencies=[Depends(require_service_token)])
 async def list_internal_funds(
     keyword: Annotated[str | None, Query(max_length=50)] = None,
+    fund_type: Annotated[str | None, Query(alias="fundType", pattern=rf"^({_FUND_TYPES})$")] = None,
     page_size: Annotated[int, Query(alias="pageSize", ge=1, le=100)] = 10,
     cursor: Annotated[str | None, Query(pattern=r"^\d+$")] = None,
     page: Annotated[int | None, Query(ge=1, le=10_000)] = None,
@@ -43,7 +54,31 @@ async def list_internal_funds(
         page_size,
         page,
     )
-    return list_funds(keyword, page_size, cursor, page)
+    return list_funds(keyword, fund_type, page_size, cursor, page)
+
+
+@router.get("/batch", response_model=tuple[InternalFundSummary, ...], dependencies=[Depends(require_service_token)])
+async def list_internal_fund_summaries_by_codes(
+    fund_codes: Annotated[list[str], Query(alias="fundCode")],
+) -> tuple[InternalFundSummary, ...]:
+    """批量返回指定基金的摘要，供 Java 丰富当前用户关注页而不形成逐行请求。"""
+    if (
+        not fund_codes
+        or len(fund_codes) > _MAX_BATCH_FUND_CODES
+        or len(set(fund_codes)) != len(fund_codes)
+        or any(_FUND_CODE_PATTERN.fullmatch(fund_code) is None for fund_code in fund_codes)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "INVALID_FUND_CODE_BATCH", "message": "基金代码批量参数无效。"},
+        )
+    logger.info(
+        "funds.list_internal_fund_summaries_by_codes >>> persisted fund summaries requested, "
+        "trace_id=%s, fund_count=%s",
+        get_trace_id(),
+        len(fund_codes),
+    )
+    return get_funds_by_codes(tuple(fund_codes))
 
 
 @router.post(
