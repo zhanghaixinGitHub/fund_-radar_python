@@ -1,6 +1,6 @@
 """Java 到 FastAPI 内部调用边界的集成测试。"""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -128,6 +128,60 @@ def test_internal_fund_list_and_detail_accept_service_token(monkeypatch) -> None
     assert detail_response.json()["data_source"] == "TUSHARE_PRO_FUND"
     assert detail_response.json()["unit_nav"] == "1.3756"
     assert detail_response.json()["accumulated_nav"] == "1.3756"
+    get_settings.cache_clear()
+
+
+def test_internal_watchlist_detail_requires_service_token_and_has_no_user_state(monkeypatch) -> None:
+    """完整详情只向 Java 服务身份开放，Python 响应不得包含关注关系或用户标识。"""
+    monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
+    get_settings.cache_clear()
+
+    from app.api.routes import funds
+    from app.main import create_application
+    from app.schemas.fund import InternalFundDetail, InternalFundWatchlistDetail
+
+    basic = InternalFundDetail(
+        fund_code="010710",
+        fund_name="安信医药健康主题股票C",
+        fund_type="STOCK",
+        status="ACTIVE",
+        as_of_date=date(2026, 8, 25),
+        nav_status="SYNCED",
+        data_source="TUSHARE_PRO_FUND",
+    )
+    monkeypatch.setattr(
+        funds,
+        "get_fund_watchlist_detail",
+        lambda fund_code: InternalFundWatchlistDetail(
+            basic=basic,
+            managers_status="SYNCED",
+            managers=(),
+            latest_share_status="SYNCED",
+            latest_share=None,
+            dividends_status="SYNCED",
+            dividends=(),
+        )
+        if fund_code == "010710"
+        else None,
+    )
+
+    with TestClient(create_application()) as client:
+        unauthorized_response = client.get("/internal/v1/funds/010710/watchlist-detail")
+        detail_response = client.get(
+            "/internal/v1/funds/010710/watchlist-detail",
+            headers={"X-Service-Token": "test-service-token"},
+        )
+        missing_response = client.get(
+            "/internal/v1/funds/999999/watchlist-detail",
+            headers={"X-Service-Token": "test-service-token"},
+        )
+
+    assert unauthorized_response.status_code == 403
+    assert detail_response.status_code == 200
+    assert detail_response.json()["basic"]["fund_code"] == "010710"
+    assert "is_watched" not in detail_response.json()
+    assert missing_response.status_code == 404
+    assert missing_response.json()["detail"]["code"] == "FUND_NOT_FOUND"
     get_settings.cache_clear()
 
 
@@ -362,6 +416,79 @@ def test_internal_market_nav_sync_job_returns_latest_failed_state(monkeypatch) -
     assert response.status_code == 200
     assert response.json()["status"] == "FAILED"
     assert response.json()["error_code"] == "MARKET_SYNC_BASELINE_MISSING"
+    get_settings.cache_clear()
+
+
+def test_internal_market_detail_sync_job_returns_progress_and_last_success(monkeypatch) -> None:
+    """完整资料任务只接受 Java 服务令牌，并返回阶段进度和持久化成功时间。"""
+    monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
+    get_settings.cache_clear()
+
+    from app.api.routes import funds
+    from app.main import create_application
+    from app.services.sync_jobs import MARKET_DETAIL_JOB_TYPE, SyncJobSnapshot
+
+    job_id = UUID("00000000-0000-0000-0000-000000000305")
+    snapshot = SyncJobSnapshot(
+        job_id=job_id,
+        job_type=MARKET_DETAIL_JOB_TYPE,
+        status="RUNNING",
+        requested_nav_date=datetime(2026, 8, 28, tzinfo=UTC).date(),
+        fund_codes=(),
+        progress_current=5,
+        progress_total=12,
+        current_fund_code="010710.OF",
+        progress_message="已读取 010710.OF 的基金经理资料",
+        sync_run_id=None,
+        fetched_count=0,
+        created_count=0,
+        updated_count=0,
+        skipped_count=0,
+        error_code=None,
+        error_message=None,
+        started_at=datetime(2026, 8, 28, tzinfo=UTC),
+        finished_at=None,
+    )
+
+    class StubManager:
+        def start_market_details(self) -> SyncJobSnapshot:
+            return snapshot
+
+        def get_latest_job(self, job_type: str) -> SyncJobSnapshot | None:
+            return snapshot if job_type == MARKET_DETAIL_JOB_TYPE else None
+
+        def get_last_successful_time(self, job_type: str) -> datetime | None:
+            return datetime(2026, 8, 27, 12, 0, tzinfo=UTC) if job_type == MARKET_DETAIL_JOB_TYPE else None
+
+    monkeypatch.setattr(funds, "get_sync_job_manager", lambda: StubManager())
+    with TestClient(create_application()) as client:
+        browser_response = client.post(
+            "/internal/v1/funds/sync-jobs/market-details",
+            headers={"X-Service-Token": "test-service-token", "Origin": "http://localhost:5173"},
+        )
+        response = client.post(
+            "/internal/v1/funds/sync-jobs/market-details",
+            headers={"X-Service-Token": "test-service-token"},
+        )
+        latest_response = client.get(
+            "/internal/v1/funds/sync-jobs/market-details/latest",
+            headers={"X-Service-Token": "test-service-token"},
+        )
+        success_response = client.get(
+            "/internal/v1/funds/sync-jobs/last-success",
+            headers={"X-Service-Token": "test-service-token"},
+        )
+
+    assert browser_response.status_code == 403
+    assert response.status_code == 202
+    assert response.json()["job_type"] == MARKET_DETAIL_JOB_TYPE
+    assert latest_response.status_code == 200
+    assert latest_response.json()["progress_current"] == 5
+    assert success_response.status_code == 200
+    assert success_response.json() == [
+        {"job_type": "MARKET_NAV_INCREMENTAL", "last_successful_at": None},
+        {"job_type": "MARKET_DETAIL", "last_successful_at": "2026-08-27T12:00:00Z"},
+    ]
     get_settings.cache_clear()
 
     from app.api.routes import funds

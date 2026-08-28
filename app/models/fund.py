@@ -12,6 +12,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -92,6 +93,48 @@ class FundShareClass(Base):
     )
 
 
+class FundProfile(Base):
+    """一只基金份额的当前基础资料快照，资料来源与净值来源独立可追溯。"""
+
+    __tablename__ = "fund_profile"
+    __table_args__ = (
+        UniqueConstraint("fund_code", "source_id", name="uq_fund_profile_source_fund"),
+        Index("ix_fund_profile_source_fund", "source_id", "fund_code"),
+    )
+
+    fund_profile_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4)
+    fund_code: Mapped[str] = mapped_column(String(32), ForeignKey("fund_share_class.fund_code"), nullable=False)
+    source_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("source_registry.source_id"), nullable=False
+    )
+    management_company_name: Mapped[str | None] = mapped_column(String(256))
+    custodian_name: Mapped[str | None] = mapped_column(String(256))
+    found_date: Mapped[date | None] = mapped_column(Date)
+    due_date: Mapped[date | None] = mapped_column(Date)
+    list_date: Mapped[date | None] = mapped_column(Date)
+    issue_date: Mapped[date | None] = mapped_column(Date)
+    delist_date: Mapped[date | None] = mapped_column(Date)
+    issue_amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    management_fee: Mapped[Decimal | None] = mapped_column(Numeric(12, 8))
+    custodian_fee: Mapped[Decimal | None] = mapped_column(Numeric(12, 8))
+    duration_year: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    par_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    min_purchase_amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    expected_return: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    benchmark: Mapped[str | None] = mapped_column(String(512))
+    invest_type: Mapped[str | None] = mapped_column(String(128))
+    source_fund_type: Mapped[str | None] = mapped_column(String(128))
+    trustee_name: Mapped[str | None] = mapped_column(String(256))
+    purchase_start_date: Mapped[date | None] = mapped_column(Date)
+    redemption_start_date: Mapped[date | None] = mapped_column(Date)
+    market: Mapped[str | None] = mapped_column(String(8))
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class NavDaily(Base):
     """按月分区的日净值表，粒度为基金份额类别、净值日期和数据源。"""
 
@@ -111,8 +154,99 @@ class NavDaily(Base):
     )
     unit_nav: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
     accumulated_nav: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    ann_date: Mapped[date | None] = mapped_column(Date)
+    accumulated_dividend: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    net_asset: Mapped[Decimal | None] = mapped_column(Numeric(24, 4))
+    total_net_asset: Mapped[Decimal | None] = mapped_column(Numeric(24, 4))
+    adjusted_nav: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     source_published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class FundManagerAssignment(Base):
+    """基金份额的经理任职历史，只保留产品说明所需的最小公开资料。"""
+
+    __tablename__ = "fund_manager_assignment"
+    __table_args__ = (
+        UniqueConstraint("fund_code", "source_id", "source_record_key", name="uq_fund_manager_assignment_source"),
+        Index("ix_fund_manager_assignment_fund_date", "fund_code", "ann_date", "begin_date"),
+    )
+
+    fund_manager_assignment_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    fund_code: Mapped[str] = mapped_column(String(32), ForeignKey("fund_share_class.fund_code"), nullable=False)
+    source_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("source_registry.source_id"), nullable=False
+    )
+    source_record_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    manager_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    ann_date: Mapped[date | None] = mapped_column(Date)
+    begin_date: Mapped[date | None] = mapped_column(Date)
+    end_date: Mapped[date | None] = mapped_column(Date)
+    education: Mapped[str | None] = mapped_column(String(128))
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class FundShareSnapshot(Base):
+    """基金份额规模历史，粒度为基金份额、变动日期和来源。"""
+
+    __tablename__ = "fund_share_snapshot"
+    __table_args__ = (
+        CheckConstraint("fund_share >= 0", name="ck_fund_share_snapshot_nonnegative"),
+        Index("ix_fund_share_snapshot_fund_date", "fund_code", "trade_date"),
+    )
+
+    fund_code: Mapped[str] = mapped_column(String(32), ForeignKey("fund_share_class.fund_code"), primary_key=True)
+    trade_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    source_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("source_registry.source_id"), primary_key=True
+    )
+    fund_share: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class FundDividend(Base):
+    """基金分红事件历史，事件键稳定后允许后续实施状态更新。"""
+
+    __tablename__ = "fund_dividend"
+    __table_args__ = (
+        Index("ix_fund_dividend_fund_ann_date", "fund_code", "ann_date"),
+    )
+
+    fund_code: Mapped[str] = mapped_column(String(32), ForeignKey("fund_share_class.fund_code"), primary_key=True)
+    source_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("source_registry.source_id"), primary_key=True
+    )
+    source_event_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    ann_date: Mapped[date | None] = mapped_column(Date)
+    implementation_ann_date: Mapped[date | None] = mapped_column(Date)
+    base_date: Mapped[date | None] = mapped_column(Date)
+    process_status: Mapped[str | None] = mapped_column(String(64))
+    record_date: Mapped[date | None] = mapped_column(Date)
+    ex_date: Mapped[date | None] = mapped_column(Date)
+    pay_date: Mapped[date | None] = mapped_column(Date)
+    earnings_pay_date: Mapped[date | None] = mapped_column(Date)
+    nav_ex_date: Mapped[date | None] = mapped_column(Date)
+    cash_dividend: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    base_unit: Mapped[Decimal | None] = mapped_column(Numeric(24, 4))
+    distributable_earnings: Mapped[Decimal | None] = mapped_column(Numeric(24, 4))
+    earnings_amount: Mapped[Decimal | None] = mapped_column(Numeric(24, 4))
+    reinvestment_arrival_date: Mapped[date | None] = mapped_column(Date)
+    base_year: Mapped[str | None] = mapped_column(String(16))
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()

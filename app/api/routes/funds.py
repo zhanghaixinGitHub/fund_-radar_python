@@ -15,10 +15,24 @@ from app.schemas.fund import (
     InternalFundNavHistory,
     InternalFundPage,
     InternalFundSummary,
+    InternalFundWatchlistDetail,
+    InternalSyncJobLastSuccess,
     InternalSyncJobStatus,
 )
-from app.services.fund_catalog_read import get_fund, get_fund_nav_history, get_funds_by_codes, list_funds
-from app.services.sync_jobs import SyncJobInProgressError, SyncJobSnapshot, get_sync_job_manager
+from app.services.fund_catalog_read import (
+    get_fund,
+    get_fund_nav_history,
+    get_fund_watchlist_detail,
+    get_funds_by_codes,
+    list_funds,
+)
+from app.services.sync_jobs import (
+    MARKET_DETAIL_JOB_TYPE,
+    MARKET_NAV_INCREMENTAL_JOB_TYPE,
+    SyncJobInProgressError,
+    SyncJobSnapshot,
+    get_sync_job_manager,
+)
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -116,6 +130,39 @@ def start_internal_market_nav_incremental_job() -> InternalSyncJobStatus:
     return _to_internal_sync_job_status(snapshot)
 
 
+@router.post(
+    "/sync-jobs/market-details",
+    response_model=InternalSyncJobStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_service_token)],
+)
+def start_internal_market_detail_job() -> InternalSyncJobStatus:
+    """创建基金完整资料同步任务；实际执行在本机后台线程中完成。"""
+    try:
+        logger.info(
+            "funds.start_internal_market_detail_job >>> manual market detail sync requested, trace_id=%s",
+            get_trace_id(),
+        )
+        snapshot = get_sync_job_manager().start_market_details()
+    except SyncJobInProgressError as error:
+        logger.warning(
+            "funds.start_internal_market_detail_job >>> duplicate sync rejected, trace_id=%s", get_trace_id()
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "MARKET_SYNC_IN_PROGRESS", "message": "已有基金市场同步正在执行，请稍后重试。"},
+        ) from error
+    except ValueError as error:
+        logger.error(
+            "funds.start_internal_market_detail_job >>> invalid sync configuration, trace_id=%s", get_trace_id()
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "MARKET_DETAIL_SYNC_UNAVAILABLE", "message": "基金完整资料同步服务尚未完成配置。"},
+        ) from error
+    return _to_internal_sync_job_status(snapshot)
+
+
 @router.get(
     "/sync-jobs/market-nav-incremental/latest",
     response_model=InternalSyncJobStatus | None,
@@ -125,6 +172,37 @@ def get_latest_internal_market_nav_incremental_job() -> InternalSyncJobStatus | 
     """读取当前 FastAPI 进程最近一次基金市场同步任务，页面刷新后可继续观察进度。"""
     snapshot = get_sync_job_manager().get_latest_job()
     return _to_internal_sync_job_status(snapshot) if snapshot else None
+
+
+@router.get(
+    "/sync-jobs/market-details/latest",
+    response_model=InternalSyncJobStatus | None,
+    dependencies=[Depends(require_service_token)],
+)
+def get_latest_internal_market_detail_job() -> InternalSyncJobStatus | None:
+    """读取当前 Python 进程最近一次完整资料同步任务。"""
+    snapshot = get_sync_job_manager().get_latest_job(MARKET_DETAIL_JOB_TYPE)
+    return _to_internal_sync_job_status(snapshot) if snapshot else None
+
+
+@router.get(
+    "/sync-jobs/last-success",
+    response_model=tuple[InternalSyncJobLastSuccess, ...],
+    dependencies=[Depends(require_service_token)],
+)
+def get_internal_sync_job_last_success_times() -> tuple[InternalSyncJobLastSuccess, ...]:
+    """读取两类任务最近一次完整成功时间；不触发外部数据请求。"""
+    manager = get_sync_job_manager()
+    return (
+        InternalSyncJobLastSuccess(
+            job_type=MARKET_NAV_INCREMENTAL_JOB_TYPE,
+            last_successful_at=manager.get_last_successful_time(MARKET_NAV_INCREMENTAL_JOB_TYPE),
+        ),
+        InternalSyncJobLastSuccess(
+            job_type=MARKET_DETAIL_JOB_TYPE,
+            last_successful_at=manager.get_last_successful_time(MARKET_DETAIL_JOB_TYPE),
+        ),
+    )
 
 
 @router.get(
@@ -165,6 +243,30 @@ def _to_internal_sync_job_status(snapshot: SyncJobSnapshot) -> InternalSyncJobSt
         started_at=snapshot.started_at,
         finished_at=snapshot.finished_at,
     )
+
+
+@router.get(
+    "/{fund_code}/watchlist-detail",
+    response_model=InternalFundWatchlistDetail,
+    dependencies=[Depends(require_service_token)],
+)
+async def get_internal_watchlist_fund_detail(
+    fund_code: Annotated[str, Path(min_length=6, max_length=6, pattern=r"^\d{6}$")],
+) -> InternalFundWatchlistDetail:
+    """返回本地完整详情；用户关注关系必须由 Java 在调用前完成校验。"""
+    logger.info(
+        "funds.get_internal_watchlist_fund_detail >>> persisted full detail requested, "
+        "trace_id=%s, fund_code=%s",
+        get_trace_id(),
+        fund_code,
+    )
+    detail = get_fund_watchlist_detail(fund_code)
+    if detail is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "FUND_NOT_FOUND", "message": "Fund is not available."},
+        )
+    return detail
 
 
 @router.get(

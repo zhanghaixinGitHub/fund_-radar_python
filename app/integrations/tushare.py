@@ -19,6 +19,19 @@ CATALOG_MARKETS: tuple[str, ...] = ("E", "O")
 CATALOG_STATUSES: tuple[str, ...] = ("L", "D", "I")
 FUND_TS_CODE_SUFFIXES: tuple[str, ...] = ("OF", "SH", "SZ")
 _RETRYABLE_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
+_FUND_BASIC_MINIMAL_FIELDS = "ts_code,name,management,fund_type,found_date,status,market"
+_FUND_BASIC_DETAIL_FIELDS = (
+    "ts_code,name,management,custodian,fund_type,found_date,due_date,list_date,issue_date,delist_date,"
+    "issue_amount,m_fee,c_fee,duration_year,p_value,min_amount,exp_return,benchmark,status,invest_type,type,"
+    "trustee,purc_startdate,redm_startdate,market"
+)
+_FUND_NAV_FIELDS = "ts_code,ann_date,nav_date,unit_nav,accum_nav,accum_div,net_asset,total_netasset,adj_nav"
+_FUND_MANAGER_FIELDS = "ts_code,ann_date,name,edu,begin_date,end_date"
+_FUND_SHARE_FIELDS = "ts_code,trade_date,fd_share"
+_FUND_DIVIDEND_FIELDS = (
+    "ts_code,ann_date,imp_anndate,base_date,div_proc,record_date,ex_date,pay_date,earpay_date,net_ex_date,"
+    "div_cash,base_unit,ear_distr,ear_amount,account_date,base_year"
+)
 
 
 class TushareIntegrationError(RuntimeError):
@@ -54,6 +67,24 @@ class TushareFundBasic:
     found_date: date | None
     status: str | None
     market: str | None
+    custodian: str | None = None
+    due_date: date | None = None
+    list_date: date | None = None
+    issue_date: date | None = None
+    delist_date: date | None = None
+    issue_amount: Decimal | None = None
+    management_fee: Decimal | None = None
+    custodian_fee: Decimal | None = None
+    duration_year: Decimal | None = None
+    par_value: Decimal | None = None
+    min_purchase_amount: Decimal | None = None
+    expected_return: Decimal | None = None
+    benchmark: str | None = None
+    invest_type: str | None = None
+    source_fund_type: str | None = None
+    trustee: str | None = None
+    purchase_start_date: date | None = None
+    redemption_start_date: date | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +96,53 @@ class TushareFundNav:
     nav_date: date
     unit_nav: Decimal
     accumulated_nav: Decimal | None
+    accumulated_dividend: Decimal | None = None
+    net_asset: Decimal | None = None
+    total_net_asset: Decimal | None = None
+    adjusted_nav: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class TushareFundManager:
+    """基金经理任职记录的最小展示字段。"""
+
+    ts_code: str
+    ann_date: date | None
+    name: str
+    education: str | None
+    begin_date: date | None
+    end_date: date | None
+
+
+@dataclass(frozen=True)
+class TushareFundShare:
+    """基金份额规模变动记录，单位遵循来源的“万份”口径。"""
+
+    ts_code: str
+    trade_date: date
+    fund_share: Decimal
+
+
+@dataclass(frozen=True)
+class TushareFundDividend:
+    """基金分红事件记录，不包含公告正文。"""
+
+    ts_code: str
+    ann_date: date | None
+    implementation_ann_date: date | None
+    base_date: date | None
+    process_status: str | None
+    record_date: date | None
+    ex_date: date | None
+    pay_date: date | None
+    earnings_pay_date: date | None
+    nav_ex_date: date | None
+    cash_dividend: Decimal | None
+    base_unit: Decimal | None
+    distributable_earnings: Decimal | None
+    earnings_amount: Decimal | None
+    reinvestment_arrival_date: date | None
+    base_year: str | None
 
 
 class TushareFundClient:
@@ -138,7 +216,7 @@ class TushareFundClient:
     def list_fund_basics(self) -> tuple[TushareFundBasic, ...]:
         """按市场和存续状态分片读取基金目录，拒绝达到单片上限的结果。"""
         by_ts_code: dict[str, TushareFundBasic] = {}
-        fields = "ts_code,name,management,fund_type,found_date,status,market"
+        fields = _FUND_BASIC_MINIMAL_FIELDS
         for market in CATALOG_MARKETS:
             for status in CATALOG_STATUSES:
                 rows = self._query("fund_basic", params={"market": market, "status": status}, fields=fields)
@@ -165,7 +243,7 @@ class TushareFundClient:
             raise ValueError("ts_codes must not be empty.")
         if len(set(ts_codes)) != len(ts_codes):
             raise ValueError("ts_codes must not contain duplicates.")
-        fields = "ts_code,name,management,fund_type,found_date,status,market"
+        fields = _FUND_BASIC_MINIMAL_FIELDS
         records: list[TushareFundBasic] = []
         for ts_code in ts_codes:
             rows = self._query("fund_basic", params={"ts_code": ts_code}, fields=fields)
@@ -189,7 +267,7 @@ class TushareFundClient:
         """
         if not fund_codes or len(set(fund_codes)) != len(fund_codes):
             raise ValueError("fund_codes must be non-empty and unique.")
-        fields = "ts_code,name,management,fund_type,found_date,status,market"
+        fields = _FUND_BASIC_MINIMAL_FIELDS
         records: list[TushareFundBasic] = []
         for fund_code in fund_codes:
             matches: list[TushareFundBasic] = []
@@ -220,7 +298,7 @@ class TushareFundClient:
         rows = self._query(
             "fund_nav",
             params={"nav_date": nav_date.strftime("%Y%m%d")},
-            fields="ts_code,ann_date,nav_date,unit_nav,accum_nav",
+            fields=_FUND_NAV_FIELDS,
         )
         return tuple(_to_fund_nav(row) for row in rows)
 
@@ -238,7 +316,7 @@ class TushareFundClient:
         rows = self._query(
             "fund_nav",
             params=params,
-            fields="ts_code,ann_date,nav_date,unit_nav,accum_nav",
+            fields=_FUND_NAV_FIELDS,
         )
         if len(rows) >= self._nav_max_rows_per_query:
             raise TushareIntegrationError(
@@ -247,6 +325,61 @@ class TushareFundClient:
         records = tuple(_to_fund_nav(row) for row in rows)
         if any(item.ts_code != ts_code for item in records):
             raise TushareIntegrationError("fund_nav", f"ts_code={ts_code} response contains another fund")
+        return records
+
+    def list_fund_detail_basics_by_ts_codes(self, ts_codes: tuple[str, ...]) -> tuple[TushareFundBasic, ...]:
+        """读取指定来源代码的完整基础资料，不回退至全市场目录。"""
+        if not ts_codes or len(set(ts_codes)) != len(ts_codes):
+            raise ValueError("ts_codes must be non-empty and unique.")
+        records: list[TushareFundBasic] = []
+        for ts_code in ts_codes:
+            rows = self._query("fund_basic", params={"ts_code": ts_code}, fields=_FUND_BASIC_DETAIL_FIELDS)
+            if len(rows) != 1:
+                raise TushareIntegrationError(
+                    "fund_basic", f"ts_code={ts_code} expected exactly one detail record but received {len(rows)}"
+                )
+            item = _to_fund_basic(rows[0])
+            if item.ts_code != ts_code:
+                raise TushareIntegrationError(
+                    "fund_basic", f"ts_code={ts_code} returned mismatched code={item.ts_code}"
+                )
+            records.append(item)
+        return tuple(records)
+
+    def list_fund_managers(self, ts_code: str) -> tuple[TushareFundManager, ...]:
+        """读取一只基金的经理任职历史，不请求简历和其他非必要个人资料。"""
+        rows = self._query("fund_manager", params={"ts_code": ts_code}, fields=_FUND_MANAGER_FIELDS)
+        records = tuple(_to_fund_manager(row) for row in rows)
+        if any(item.ts_code != ts_code for item in records):
+            raise TushareIntegrationError("fund_manager", f"ts_code={ts_code} response contains another fund")
+        return records
+
+    def list_fund_share_history(
+        self, ts_code: str, *, start_date: date, end_date: date
+    ) -> tuple[TushareFundShare, ...]:
+        """读取明确日期窗口的基金份额规模记录，防止无界历史请求。"""
+        if start_date > end_date:
+            raise ValueError("start_date must not be after end_date.")
+        rows = self._query(
+            "fund_share",
+            params={
+                "ts_code": ts_code,
+                "start_date": start_date.strftime("%Y%m%d"),
+                "end_date": end_date.strftime("%Y%m%d"),
+            },
+            fields=_FUND_SHARE_FIELDS,
+        )
+        records = tuple(_to_fund_share(row) for row in rows)
+        if any(item.ts_code != ts_code for item in records):
+            raise TushareIntegrationError("fund_share", f"ts_code={ts_code} response contains another fund")
+        return records
+
+    def list_fund_dividends(self, ts_code: str) -> tuple[TushareFundDividend, ...]:
+        """读取一只基金的结构化分红记录，不读取任何资讯正文。"""
+        rows = self._query("fund_div", params={"ts_code": ts_code}, fields=_FUND_DIVIDEND_FIELDS)
+        records = tuple(_to_fund_dividend(row) for row in rows)
+        if any(item.ts_code != ts_code for item in records):
+            raise TushareIntegrationError("fund_div", f"ts_code={ts_code} response contains another fund")
         return records
 
     def _query(
@@ -309,6 +442,24 @@ def _to_fund_basic(row: Mapping[str, Any]) -> TushareFundBasic:
         found_date=_optional_date(row.get("found_date"), "found_date", "fund_basic"),
         status=_optional_text(row.get("status")),
         market=_optional_text(row.get("market")),
+        custodian=_optional_text(row.get("custodian")),
+        due_date=_optional_date(row.get("due_date"), "due_date", "fund_basic"),
+        list_date=_optional_date(row.get("list_date"), "list_date", "fund_basic"),
+        issue_date=_optional_date(row.get("issue_date"), "issue_date", "fund_basic"),
+        delist_date=_optional_date(row.get("delist_date"), "delist_date", "fund_basic"),
+        issue_amount=_optional_decimal(row.get("issue_amount"), "issue_amount", "fund_basic"),
+        management_fee=_optional_decimal(row.get("m_fee"), "m_fee", "fund_basic"),
+        custodian_fee=_optional_decimal(row.get("c_fee"), "c_fee", "fund_basic"),
+        duration_year=_optional_decimal(row.get("duration_year"), "duration_year", "fund_basic"),
+        par_value=_optional_decimal(row.get("p_value"), "p_value", "fund_basic"),
+        min_purchase_amount=_optional_decimal(row.get("min_amount"), "min_amount", "fund_basic"),
+        expected_return=_optional_decimal(row.get("exp_return"), "exp_return", "fund_basic"),
+        benchmark=_optional_text(row.get("benchmark")),
+        invest_type=_optional_text(row.get("invest_type")),
+        source_fund_type=_optional_text(row.get("type")),
+        trustee=_optional_text(row.get("trustee")),
+        purchase_start_date=_optional_date(row.get("purc_startdate"), "purc_startdate", "fund_basic"),
+        redemption_start_date=_optional_date(row.get("redm_startdate"), "redm_startdate", "fund_basic"),
     )
 
 
@@ -320,6 +471,53 @@ def _to_fund_nav(row: Mapping[str, Any]) -> TushareFundNav:
         nav_date=_required_date(row.get("nav_date"), "nav_date", "fund_nav"),
         unit_nav=_required_decimal(row.get("unit_nav"), "unit_nav", "fund_nav"),
         accumulated_nav=_optional_decimal(row.get("accum_nav"), "accum_nav", "fund_nav"),
+        accumulated_dividend=_optional_decimal(row.get("accum_div"), "accum_div", "fund_nav"),
+        net_asset=_optional_decimal(row.get("net_asset"), "net_asset", "fund_nav"),
+        total_net_asset=_optional_decimal(row.get("total_netasset"), "total_netasset", "fund_nav"),
+        adjusted_nav=_optional_decimal(row.get("adj_nav"), "adj_nav", "fund_nav"),
+    )
+
+
+def _to_fund_manager(row: Mapping[str, Any]) -> TushareFundManager:
+    """将经理接口行转换为最小公开资料记录。"""
+    return TushareFundManager(
+        ts_code=_required_text(row, "ts_code", "fund_manager"),
+        ann_date=_optional_date(row.get("ann_date"), "ann_date", "fund_manager"),
+        name=_required_text(row, "name", "fund_manager"),
+        education=_optional_text(row.get("edu")),
+        begin_date=_optional_date(row.get("begin_date"), "begin_date", "fund_manager"),
+        end_date=_optional_date(row.get("end_date"), "end_date", "fund_manager"),
+    )
+
+
+def _to_fund_share(row: Mapping[str, Any]) -> TushareFundShare:
+    """将基金份额规模接口行转换为强类型记录。"""
+    return TushareFundShare(
+        ts_code=_required_text(row, "ts_code", "fund_share"),
+        trade_date=_required_date(row.get("trade_date"), "trade_date", "fund_share"),
+        fund_share=_required_decimal(row.get("fd_share"), "fd_share", "fund_share"),
+    )
+
+
+def _to_fund_dividend(row: Mapping[str, Any]) -> TushareFundDividend:
+    """将基金分红接口行转换为结构化事件，不保留资讯文本。"""
+    return TushareFundDividend(
+        ts_code=_required_text(row, "ts_code", "fund_div"),
+        ann_date=_optional_date(row.get("ann_date"), "ann_date", "fund_div"),
+        implementation_ann_date=_optional_date(row.get("imp_anndate"), "imp_anndate", "fund_div"),
+        base_date=_optional_date(row.get("base_date"), "base_date", "fund_div"),
+        process_status=_optional_text(row.get("div_proc")),
+        record_date=_optional_date(row.get("record_date"), "record_date", "fund_div"),
+        ex_date=_optional_date(row.get("ex_date"), "ex_date", "fund_div"),
+        pay_date=_optional_date(row.get("pay_date"), "pay_date", "fund_div"),
+        earnings_pay_date=_optional_date(row.get("earpay_date"), "earpay_date", "fund_div"),
+        nav_ex_date=_optional_date(row.get("net_ex_date"), "net_ex_date", "fund_div"),
+        cash_dividend=_optional_decimal(row.get("div_cash"), "div_cash", "fund_div"),
+        base_unit=_optional_decimal(row.get("base_unit"), "base_unit", "fund_div"),
+        distributable_earnings=_optional_decimal(row.get("ear_distr"), "ear_distr", "fund_div"),
+        earnings_amount=_optional_decimal(row.get("ear_amount"), "ear_amount", "fund_div"),
+        reinvestment_arrival_date=_optional_date(row.get("account_date"), "account_date", "fund_div"),
+        base_year=_optional_text(row.get("base_year")),
     )
 
 

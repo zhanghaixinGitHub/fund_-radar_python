@@ -33,6 +33,95 @@ class InternalFundDetail(InternalFundSummary):
     # 数值为空表示该份额当前尚无已同步净值；调用方不得补零或当作实时行情。
     unit_nav: Decimal | None = None
     accumulated_nav: Decimal | None = None
+    nav_ann_date: date | None = None
+    accumulated_dividend: Decimal | None = None
+    net_asset: Decimal | None = None
+    total_net_asset: Decimal | None = None
+    adjusted_nav: Decimal | None = None
+    # 基金市场只展示本期可公开的基础资料；未完成详情基线时保持为空。
+    profile_status: str = "NOT_SYNCED"
+    profile_data_source: str | None = None
+    management_company_name: str | None = None
+    custodian_name: str | None = None
+    found_date: date | None = None
+    due_date: date | None = None
+    list_date: date | None = None
+    issue_date: date | None = None
+    delist_date: date | None = None
+    issue_amount: Decimal | None = None
+    management_fee: Decimal | None = None
+    custodian_fee: Decimal | None = None
+    duration_year: Decimal | None = None
+    par_value: Decimal | None = None
+    min_purchase_amount: Decimal | None = None
+    expected_return: Decimal | None = None
+    benchmark: str | None = None
+    invest_type: str | None = None
+    source_fund_type: str | None = None
+    trustee_name: str | None = None
+    purchase_start_date: date | None = None
+    redemption_start_date: date | None = None
+    market: str | None = None
+
+
+class InternalFundManager(BaseModel):
+    """关注后可展示的基金经理任职资料，不返回简历等非必要个人信息。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    manager_name: str
+    ann_date: date | None = None
+    begin_date: date | None = None
+    end_date: date | None = None
+    education: str | None = None
+    data_source: str
+
+
+class InternalFundShareSnapshot(BaseModel):
+    """关注后可展示的最新基金份额规模快照。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    trade_date: date
+    fund_share: Decimal
+    data_source: str
+
+
+class InternalFundDividend(BaseModel):
+    """关注后可展示的结构化分红事件，不包含资讯原文。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    ann_date: date | None = None
+    implementation_ann_date: date | None = None
+    base_date: date | None = None
+    process_status: str | None = None
+    record_date: date | None = None
+    ex_date: date | None = None
+    pay_date: date | None = None
+    earnings_pay_date: date | None = None
+    nav_ex_date: date | None = None
+    cash_dividend: Decimal | None = None
+    base_unit: Decimal | None = None
+    distributable_earnings: Decimal | None = None
+    earnings_amount: Decimal | None = None
+    reinvestment_arrival_date: date | None = None
+    base_year: str | None = None
+    data_source: str
+
+
+class InternalFundWatchlistDetail(BaseModel):
+    """只提供给 Java 的完整详情读模型；不包含任何用户或授权状态。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    basic: InternalFundDetail
+    managers_status: str
+    managers: tuple[InternalFundManager, ...]
+    latest_share_status: str
+    latest_share: InternalFundShareSnapshot | None = None
+    dividends_status: str
+    dividends: tuple[InternalFundDividend, ...]
 
 
 class InternalFundNavPoint(BaseModel):
@@ -77,6 +166,15 @@ class InternalSyncJobStatus(BaseModel):
     error_message: str | None
     started_at: datetime | None
     finished_at: datetime | None
+
+
+class InternalSyncJobLastSuccess(BaseModel):
+    """一类同步任务最近一次完整成功的持久化时间。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    job_type: str
+    last_successful_at: datetime | None
 
 
 class InternalFundPage(BaseModel):

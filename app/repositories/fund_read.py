@@ -9,7 +9,16 @@ from decimal import Decimal
 from sqlalchemy import Select, and_, case, func, or_, select, true
 from sqlalchemy.orm import Session
 
-from app.models.fund import FundShareClass, NavDaily, SourceRegistry
+from app.models.fund import (
+    FundDividend,
+    FundManagerAssignment,
+    FundProfile,
+    FundShareClass,
+    FundShareSnapshot,
+    NavDaily,
+    SourceRegistry,
+    SourceSyncRun,
+)
 
 
 @dataclass(frozen=True)
@@ -21,6 +30,55 @@ class FundDetailSnapshot:
     unit_nav: Decimal | None
     accumulated_nav: Decimal | None
     source_code: str | None
+    ann_date: date | None
+    accumulated_dividend: Decimal | None
+    net_asset: Decimal | None
+    total_net_asset: Decimal | None
+    adjusted_nav: Decimal | None
+
+
+@dataclass(frozen=True)
+class FundProfileSnapshot:
+    """一条按来源代码稳定选择的基金资料快照。"""
+
+    profile: FundProfile
+    source_code: str
+
+
+@dataclass(frozen=True)
+class FundManagerDetailSnapshot:
+    """一条基金经理任职资料及其来源代码。"""
+
+    assignment: FundManagerAssignment
+    source_code: str
+
+
+@dataclass(frozen=True)
+class FundShareDetailSnapshot:
+    """最新基金份额规模快照及其来源代码。"""
+
+    snapshot: FundShareSnapshot
+    source_code: str
+
+
+@dataclass(frozen=True)
+class FundDividendDetailSnapshot:
+    """结构化分红事件及其来源代码。"""
+
+    dividend: FundDividend
+    source_code: str
+
+
+@dataclass(frozen=True)
+class FundWatchlistDetailSnapshot:
+    """完整详情的仓储投影；不包含任何用户标识或关注关系。"""
+
+    detail: FundDetailSnapshot
+    profile: FundProfileSnapshot | None
+    managers: tuple[FundManagerDetailSnapshot, ...]
+    latest_share: FundShareDetailSnapshot | None
+    dividends: tuple[FundDividendDetailSnapshot, ...]
+    succeeded_sync_types: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -149,6 +207,11 @@ def get_fund_summary(session: Session, fund_code: str) -> FundDetailSnapshot | N
             NavDaily.unit_nav.label("unit_nav"),
             NavDaily.accumulated_nav.label("accumulated_nav"),
             SourceRegistry.source_code.label("source_code"),
+            NavDaily.ann_date.label("ann_date"),
+            NavDaily.accumulated_dividend.label("accumulated_dividend"),
+            NavDaily.net_asset.label("net_asset"),
+            NavDaily.total_net_asset.label("total_net_asset"),
+            NavDaily.adjusted_nav.label("adjusted_nav"),
         )
         .select_from(NavDaily)
         .join(SourceRegistry, SourceRegistry.source_id == NavDaily.source_id)
@@ -164,19 +227,132 @@ def get_fund_summary(session: Session, fund_code: str) -> FundDetailSnapshot | N
             latest_nav.c.unit_nav,
             latest_nav.c.accumulated_nav,
             latest_nav.c.source_code,
+            latest_nav.c.ann_date,
+            latest_nav.c.accumulated_dividend,
+            latest_nav.c.net_asset,
+            latest_nav.c.total_net_asset,
+            latest_nav.c.adjusted_nav,
         )
         .outerjoin(latest_nav, true())
         .where(FundShareClass.fund_code == fund_code)
     ).one_or_none()
     if row is None:
         return None
-    fund, nav_date, unit_nav, accumulated_nav, source_code = row
+    (
+        fund,
+        nav_date,
+        unit_nav,
+        accumulated_nav,
+        source_code,
+        ann_date,
+        accumulated_dividend,
+        net_asset,
+        total_net_asset,
+        adjusted_nav,
+    ) = row
     return FundDetailSnapshot(
         fund=fund,
         nav_date=nav_date,
         unit_nav=unit_nav,
         accumulated_nav=accumulated_nav,
         source_code=source_code,
+        ann_date=ann_date,
+        accumulated_dividend=accumulated_dividend,
+        net_asset=net_asset,
+        total_net_asset=total_net_asset,
+        adjusted_nav=adjusted_nav,
+    )
+
+
+def get_fund_watchlist_detail(session: Session, fund_code: str) -> FundWatchlistDetailSnapshot | None:
+    """返回完整详情的本地快照；仅由 Java 完成用户关注关系校验后调用。"""
+    detail = get_fund_summary(session, fund_code)
+    if detail is None:
+        return None
+
+    profile = get_fund_profile_snapshot(session, fund_code)
+
+    manager_rows = session.execute(
+        select(FundManagerAssignment, SourceRegistry.source_code)
+        .join(SourceRegistry, SourceRegistry.source_id == FundManagerAssignment.source_id)
+        .where(FundManagerAssignment.fund_code == fund_code)
+        .order_by(
+            FundManagerAssignment.begin_date.desc().nulls_last(),
+            FundManagerAssignment.ann_date.desc().nulls_last(),
+            FundManagerAssignment.source_record_key.asc(),
+            SourceRegistry.source_code.asc(),
+        )
+        .limit(50)
+    ).all()
+    managers = tuple(
+        FundManagerDetailSnapshot(assignment=assignment, source_code=source_code)
+        for assignment, source_code in manager_rows
+    )
+
+    share_row = session.execute(
+        select(FundShareSnapshot, SourceRegistry.source_code)
+        .join(SourceRegistry, SourceRegistry.source_id == FundShareSnapshot.source_id)
+        .where(FundShareSnapshot.fund_code == fund_code)
+        .order_by(FundShareSnapshot.trade_date.desc(), SourceRegistry.source_code.asc())
+        .limit(1)
+    ).one_or_none()
+    latest_share = (
+        FundShareDetailSnapshot(snapshot=share_row[0], source_code=share_row[1]) if share_row is not None else None
+    )
+
+    dividend_rows = session.execute(
+        select(FundDividend, SourceRegistry.source_code)
+        .join(SourceRegistry, SourceRegistry.source_id == FundDividend.source_id)
+        .where(FundDividend.fund_code == fund_code)
+        .order_by(
+            FundDividend.ann_date.desc().nulls_last(),
+            FundDividend.implementation_ann_date.desc().nulls_last(),
+            FundDividend.source_event_key.asc(),
+            SourceRegistry.source_code.asc(),
+        )
+        .limit(100)
+    ).all()
+    dividends = tuple(
+        FundDividendDetailSnapshot(dividend=dividend, source_code=source_code)
+        for dividend, source_code in dividend_rows
+    )
+    succeeded_sync_types = frozenset(
+        session.scalars(
+            select(SourceSyncRun.sync_type)
+            .where(
+                SourceSyncRun.status == "SUCCEEDED",
+                SourceSyncRun.sync_type.in_(
+                    (
+                        "MARKET_DETAIL_MANAGER",
+                        "MARKET_DETAIL_SHARE",
+                        "MARKET_DETAIL_DIVIDEND",
+                    )
+                ),
+            )
+            .distinct()
+        ).all()
+    )
+    return FundWatchlistDetailSnapshot(
+        detail=detail,
+        profile=profile,
+        managers=managers,
+        latest_share=latest_share,
+        dividends=dividends,
+        succeeded_sync_types=succeeded_sync_types,
+    )
+
+
+def get_fund_profile_snapshot(session: Session, fund_code: str) -> FundProfileSnapshot | None:
+    """按来源代码稳定选择一条当前基础资料快照。"""
+    profile_row = session.execute(
+        select(FundProfile, SourceRegistry.source_code)
+        .join(SourceRegistry, SourceRegistry.source_id == FundProfile.source_id)
+        .where(FundProfile.fund_code == fund_code)
+        .order_by(SourceRegistry.source_code.asc())
+        .limit(1)
+    ).one_or_none()
+    return (
+        FundProfileSnapshot(profile=profile_row[0], source_code=profile_row[1]) if profile_row is not None else None
     )
 
 

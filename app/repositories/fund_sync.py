@@ -10,7 +10,17 @@ from uuid import UUID, uuid4
 from sqlalchemy import func, select, tuple_
 from sqlalchemy.orm import Session
 
-from app.models.fund import FundMaster, FundShareClass, NavDaily, SourceRegistry, SourceSyncRun
+from app.models.fund import (
+    FundDividend,
+    FundManagerAssignment,
+    FundMaster,
+    FundProfile,
+    FundShareClass,
+    FundShareSnapshot,
+    NavDaily,
+    SourceRegistry,
+    SourceSyncRun,
+)
 
 TUSHARE_SOURCE_CODE = "TUSHARE_PRO_FUND"
 TUSHARE_SOURCE_DISPLAY_NAME = "Tushare Pro 公募基金数据"
@@ -45,6 +55,88 @@ class NavDailyUpsert:
     nav_date: date
     unit_nav: Decimal
     accumulated_nav: Decimal | None
+    content_hash: str
+    ann_date: date | None = None
+    accumulated_dividend: Decimal | None = None
+    net_asset: Decimal | None = None
+    total_net_asset: Decimal | None = None
+    adjusted_nav: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class FundProfileUpsert:
+    """一只基金份额当前基础资料的规范化快照。"""
+
+    fund_code: str
+    management_company_name: str | None
+    custodian_name: str | None
+    found_date: date | None
+    due_date: date | None
+    list_date: date | None
+    issue_date: date | None
+    delist_date: date | None
+    issue_amount: Decimal | None
+    management_fee: Decimal | None
+    custodian_fee: Decimal | None
+    duration_year: Decimal | None
+    par_value: Decimal | None
+    min_purchase_amount: Decimal | None
+    expected_return: Decimal | None
+    benchmark: str | None
+    invest_type: str | None
+    source_fund_type: str | None
+    trustee_name: str | None
+    purchase_start_date: date | None
+    redemption_start_date: date | None
+    market: str | None
+    content_hash: str
+
+
+@dataclass(frozen=True)
+class FundManagerAssignmentUpsert:
+    """基金经理任职历史的一条规范化来源记录。"""
+
+    fund_code: str
+    source_record_key: str
+    manager_name: str
+    ann_date: date | None
+    begin_date: date | None
+    end_date: date | None
+    education: str | None
+    content_hash: str
+
+
+@dataclass(frozen=True)
+class FundShareSnapshotUpsert:
+    """基金份额规模的一条规范化来源记录。"""
+
+    fund_code: str
+    trade_date: date
+    fund_share: Decimal
+    content_hash: str
+
+
+@dataclass(frozen=True)
+class FundDividendUpsert:
+    """基金分红事件的一条规范化来源记录。"""
+
+    fund_code: str
+    source_event_key: str
+    ann_date: date | None
+    implementation_ann_date: date | None
+    base_date: date | None
+    process_status: str | None
+    record_date: date | None
+    ex_date: date | None
+    pay_date: date | None
+    earnings_pay_date: date | None
+    nav_ex_date: date | None
+    cash_dividend: Decimal | None
+    base_unit: Decimal | None
+    distributable_earnings: Decimal | None
+    earnings_amount: Decimal | None
+    reinvestment_arrival_date: date | None
+    base_year: str | None
     content_hash: str
 
 
@@ -150,6 +242,22 @@ def fail_sync_run(session: Session, *, source_id: UUID, sync_run_id: UUID, error
     run.finished_at = failed_at
     source.last_error_at = failed_at
     source.last_error_summary = safe_summary
+
+
+def get_latest_successful_sync_time(session: Session, *, sync_types: tuple[str, ...]) -> datetime | None:
+    """返回指定同步类型最近一次完整成功的结束时间。"""
+    if not sync_types:
+        return None
+    return session.scalar(
+        select(SourceSyncRun.finished_at)
+        .where(
+            SourceSyncRun.sync_type.in_(sync_types),
+            SourceSyncRun.status == "SUCCEEDED",
+            SourceSyncRun.finished_at.is_not(None),
+        )
+        .order_by(SourceSyncRun.finished_at.desc())
+        .limit(1)
+    )
 
 
 def upsert_fund_catalog_batch(session: Session, records: tuple[FundCatalogUpsert, ...]) -> WriteStats:
@@ -299,6 +407,11 @@ def upsert_nav_daily_batch(
                     source_id=source_id,
                     unit_nav=record.unit_nav,
                     accumulated_nav=record.accumulated_nav,
+                    ann_date=record.ann_date,
+                    accumulated_dividend=record.accumulated_dividend,
+                    net_asset=record.net_asset,
+                    total_net_asset=record.total_net_asset,
+                    adjusted_nav=record.adjusted_nav,
                     content_hash=record.content_hash,
                 )
             )
@@ -308,7 +421,189 @@ def upsert_nav_daily_batch(
         else:
             existing.unit_nav = record.unit_nav
             existing.accumulated_nav = record.accumulated_nav
+            existing.ann_date = record.ann_date
+            existing.accumulated_dividend = record.accumulated_dividend
+            existing.net_asset = record.net_asset
+            existing.total_net_asset = record.total_net_asset
+            existing.adjusted_nav = record.adjusted_nav
             existing.content_hash = record.content_hash
+            updated_count += 1
+    return WriteStats(created_count=created_count, updated_count=updated_count, skipped_count=skipped_count)
+
+
+def upsert_fund_profiles_batch(
+    session: Session, *, source_id: UUID, records: tuple[FundProfileUpsert, ...]
+) -> WriteStats:
+    """按基金份额和来源幂等写入当前基础资料快照。"""
+    if not records:
+        return WriteStats()
+    fund_codes = tuple({record.fund_code for record in records})
+    available_codes = set(
+        session.scalars(select(FundShareClass.fund_code).where(FundShareClass.fund_code.in_(fund_codes))).all()
+    )
+    existing_by_fund_code = {
+        profile.fund_code: profile
+        for profile in session.scalars(
+            select(FundProfile).where(FundProfile.source_id == source_id, FundProfile.fund_code.in_(fund_codes))
+        ).all()
+    }
+    created_count = 0
+    updated_count = 0
+    skipped_count = 0
+    for record in records:
+        if record.fund_code not in available_codes:
+            skipped_count += 1
+            continue
+        existing = existing_by_fund_code.get(record.fund_code)
+        if existing is None:
+            existing = _new_fund_profile(source_id, record)
+            session.add(existing)
+            existing_by_fund_code[record.fund_code] = existing
+            created_count += 1
+        elif existing.content_hash == record.content_hash:
+            skipped_count += 1
+        else:
+            _update_fund_profile(existing, record)
+            updated_count += 1
+    return WriteStats(created_count=created_count, updated_count=updated_count, skipped_count=skipped_count)
+
+
+def upsert_fund_manager_assignments_batch(
+    session: Session, *, source_id: UUID, records: tuple[FundManagerAssignmentUpsert, ...]
+) -> WriteStats:
+    """按来源稳定记录键幂等写入基金经理任职历史。"""
+    if not records:
+        return WriteStats()
+    fund_codes = tuple({record.fund_code for record in records})
+    available_codes = set(
+        session.scalars(select(FundShareClass.fund_code).where(FundShareClass.fund_code.in_(fund_codes))).all()
+    )
+    existing_by_key = {
+        (item.fund_code, item.source_record_key): item
+        for item in session.scalars(
+            select(FundManagerAssignment).where(
+                FundManagerAssignment.source_id == source_id, FundManagerAssignment.fund_code.in_(fund_codes)
+            )
+        ).all()
+    }
+    created_count = 0
+    updated_count = 0
+    skipped_count = 0
+    for record in records:
+        if record.fund_code not in available_codes:
+            skipped_count += 1
+            continue
+        existing = existing_by_key.get((record.fund_code, record.source_record_key))
+        if existing is None:
+            existing = FundManagerAssignment(
+                fund_code=record.fund_code,
+                source_id=source_id,
+                source_record_key=record.source_record_key,
+                manager_name=record.manager_name,
+                ann_date=record.ann_date,
+                begin_date=record.begin_date,
+                end_date=record.end_date,
+                education=record.education,
+                content_hash=record.content_hash,
+            )
+            session.add(existing)
+            existing_by_key[(record.fund_code, record.source_record_key)] = existing
+            created_count += 1
+        elif existing.content_hash == record.content_hash:
+            skipped_count += 1
+        else:
+            existing.manager_name = record.manager_name
+            existing.ann_date = record.ann_date
+            existing.begin_date = record.begin_date
+            existing.end_date = record.end_date
+            existing.education = record.education
+            existing.content_hash = record.content_hash
+            updated_count += 1
+    return WriteStats(created_count=created_count, updated_count=updated_count, skipped_count=skipped_count)
+
+
+def upsert_fund_share_snapshots_batch(
+    session: Session, *, source_id: UUID, records: tuple[FundShareSnapshotUpsert, ...]
+) -> WriteStats:
+    """按基金、变动日期和来源幂等写入基金份额规模历史。"""
+    if not records:
+        return WriteStats()
+    fund_codes = tuple({record.fund_code for record in records})
+    dates = tuple({record.trade_date for record in records})
+    available_codes = set(
+        session.scalars(select(FundShareClass.fund_code).where(FundShareClass.fund_code.in_(fund_codes))).all()
+    )
+    existing_by_key = {
+        (item.fund_code, item.trade_date): item
+        for item in session.scalars(
+            select(FundShareSnapshot).where(
+                FundShareSnapshot.source_id == source_id,
+                FundShareSnapshot.fund_code.in_(fund_codes),
+                FundShareSnapshot.trade_date.in_(dates),
+            )
+        ).all()
+    }
+    created_count = 0
+    updated_count = 0
+    skipped_count = 0
+    for record in records:
+        if record.fund_code not in available_codes:
+            skipped_count += 1
+            continue
+        existing = existing_by_key.get((record.fund_code, record.trade_date))
+        if existing is None:
+            existing = FundShareSnapshot(
+                fund_code=record.fund_code,
+                trade_date=record.trade_date,
+                source_id=source_id,
+                fund_share=record.fund_share,
+                content_hash=record.content_hash,
+            )
+            session.add(existing)
+            existing_by_key[(record.fund_code, record.trade_date)] = existing
+            created_count += 1
+        elif existing.content_hash == record.content_hash:
+            skipped_count += 1
+        else:
+            existing.fund_share = record.fund_share
+            existing.content_hash = record.content_hash
+            updated_count += 1
+    return WriteStats(created_count=created_count, updated_count=updated_count, skipped_count=skipped_count)
+
+
+def upsert_fund_dividends_batch(
+    session: Session, *, source_id: UUID, records: tuple[FundDividendUpsert, ...]
+) -> WriteStats:
+    """按稳定事件键幂等写入分红事件，并允许来源更新实施状态。"""
+    if not records:
+        return WriteStats()
+    fund_codes = tuple({record.fund_code for record in records})
+    available_codes = set(
+        session.scalars(select(FundShareClass.fund_code).where(FundShareClass.fund_code.in_(fund_codes))).all()
+    )
+    existing_by_key = {
+        (item.fund_code, item.source_event_key): item
+        for item in session.scalars(
+            select(FundDividend).where(FundDividend.source_id == source_id, FundDividend.fund_code.in_(fund_codes))
+        ).all()
+    }
+    created_count = 0
+    updated_count = 0
+    skipped_count = 0
+    for record in records:
+        if record.fund_code not in available_codes:
+            skipped_count += 1
+            continue
+        existing = existing_by_key.get((record.fund_code, record.source_event_key))
+        if existing is None:
+            existing = _new_fund_dividend(source_id, record)
+            session.add(existing)
+            existing_by_key[(record.fund_code, record.source_event_key)] = existing
+            created_count += 1
+        elif existing.content_hash == record.content_hash:
+            skipped_count += 1
+        else:
+            _update_fund_dividend(existing, record)
             updated_count += 1
     return WriteStats(created_count=created_count, updated_count=updated_count, skipped_count=skipped_count)
 
@@ -329,6 +624,109 @@ def get_latest_nav_dates(
         .group_by(NavDaily.fund_code)
     ).all()
     return {fund_code: nav_date for fund_code, nav_date in rows}
+
+
+def _new_fund_profile(source_id: UUID, record: FundProfileUpsert) -> FundProfile:
+    return FundProfile(
+        fund_code=record.fund_code,
+        source_id=source_id,
+        management_company_name=record.management_company_name,
+        custodian_name=record.custodian_name,
+        found_date=record.found_date,
+        due_date=record.due_date,
+        list_date=record.list_date,
+        issue_date=record.issue_date,
+        delist_date=record.delist_date,
+        issue_amount=record.issue_amount,
+        management_fee=record.management_fee,
+        custodian_fee=record.custodian_fee,
+        duration_year=record.duration_year,
+        par_value=record.par_value,
+        min_purchase_amount=record.min_purchase_amount,
+        expected_return=record.expected_return,
+        benchmark=record.benchmark,
+        invest_type=record.invest_type,
+        source_fund_type=record.source_fund_type,
+        trustee_name=record.trustee_name,
+        purchase_start_date=record.purchase_start_date,
+        redemption_start_date=record.redemption_start_date,
+        market=record.market,
+        content_hash=record.content_hash,
+    )
+
+
+def _update_fund_profile(profile: FundProfile, record: FundProfileUpsert) -> None:
+    for field_name in (
+        "management_company_name",
+        "custodian_name",
+        "found_date",
+        "due_date",
+        "list_date",
+        "issue_date",
+        "delist_date",
+        "issue_amount",
+        "management_fee",
+        "custodian_fee",
+        "duration_year",
+        "par_value",
+        "min_purchase_amount",
+        "expected_return",
+        "benchmark",
+        "invest_type",
+        "source_fund_type",
+        "trustee_name",
+        "purchase_start_date",
+        "redemption_start_date",
+        "market",
+        "content_hash",
+    ):
+        setattr(profile, field_name, getattr(record, field_name))
+
+
+def _new_fund_dividend(source_id: UUID, record: FundDividendUpsert) -> FundDividend:
+    return FundDividend(
+        fund_code=record.fund_code,
+        source_id=source_id,
+        source_event_key=record.source_event_key,
+        ann_date=record.ann_date,
+        implementation_ann_date=record.implementation_ann_date,
+        base_date=record.base_date,
+        process_status=record.process_status,
+        record_date=record.record_date,
+        ex_date=record.ex_date,
+        pay_date=record.pay_date,
+        earnings_pay_date=record.earnings_pay_date,
+        nav_ex_date=record.nav_ex_date,
+        cash_dividend=record.cash_dividend,
+        base_unit=record.base_unit,
+        distributable_earnings=record.distributable_earnings,
+        earnings_amount=record.earnings_amount,
+        reinvestment_arrival_date=record.reinvestment_arrival_date,
+        base_year=record.base_year,
+        content_hash=record.content_hash,
+    )
+
+
+def _update_fund_dividend(dividend: FundDividend, record: FundDividendUpsert) -> None:
+    for field_name in (
+        "ann_date",
+        "implementation_ann_date",
+        "base_date",
+        "process_status",
+        "record_date",
+        "ex_date",
+        "pay_date",
+        "earnings_pay_date",
+        "nav_ex_date",
+        "cash_dividend",
+        "base_unit",
+        "distributable_earnings",
+        "earnings_amount",
+        "reinvestment_arrival_date",
+        "base_year",
+        "content_hash",
+    ):
+        setattr(dividend, field_name, getattr(record, field_name))
 
 
 def _get_sync_run(session: Session, sync_run_id: UUID) -> SourceSyncRun:

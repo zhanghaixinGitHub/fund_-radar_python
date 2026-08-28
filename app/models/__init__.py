@@ -2,15 +2,29 @@
 
 from app.models.analysis import BacktestRun, FeatureSnapshot, ForecastResult
 from app.models.event import EventRelation, MarketEvent, NewsItem, NewsSourceReference
-from app.models.fund import FundMaster, FundShareClass, NavDaily, SourceRegistry, SourceSyncRun
+from app.models.fund import (
+    FundDividend,
+    FundManagerAssignment,
+    FundMaster,
+    FundProfile,
+    FundShareClass,
+    FundShareSnapshot,
+    NavDaily,
+    SourceRegistry,
+    SourceSyncRun,
+)
 
 __all__ = [
     "BacktestRun",
     "EventRelation",
     "FeatureSnapshot",
     "ForecastResult",
+    "FundDividend",
+    "FundManagerAssignment",
     "FundMaster",
+    "FundProfile",
     "FundShareClass",
+    "FundShareSnapshot",
     "MarketEvent",
     "NavDaily",
     "NewsItem",

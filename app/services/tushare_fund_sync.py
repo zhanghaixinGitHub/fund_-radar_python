@@ -21,12 +21,19 @@ from app.integrations.tushare import (
     TushareFundBasic,
     TushareFundClient,
     TushareFundCompany,
+    TushareFundDividend,
+    TushareFundManager,
     TushareFundNav,
+    TushareFundShare,
     TushareIntegrationError,
 )
 from app.repositories.fund_sync import (
     TUSHARE_SOURCE_CODE,
     FundCatalogUpsert,
+    FundDividendUpsert,
+    FundManagerAssignmentUpsert,
+    FundProfileUpsert,
+    FundShareSnapshotUpsert,
     MarketSyncTarget,
     NavDailyUpsert,
     WriteStats,
@@ -38,12 +45,17 @@ from app.repositories.fund_sync import (
     get_latest_nav_dates,
     list_active_market_sync_targets,
     upsert_fund_catalog_batch,
+    upsert_fund_dividends_batch,
+    upsert_fund_manager_assignments_batch,
+    upsert_fund_profiles_batch,
+    upsert_fund_share_snapshots_batch,
     upsert_nav_daily_batch,
 )
 
 logger = get_logger(__name__)
 
 _MARKET_NAV_INCREMENTAL_LOCK_KEY = 7_089_123_006
+_MARKET_DETAIL_HISTORY_START_DATE = date(1990, 1, 1)
 
 
 class TushareFundProvider(Protocol):
@@ -68,6 +80,20 @@ class TushareFundProvider(Protocol):
         self, ts_code: str, *, start_date: date | None = None, end_date: date | None = None
     ) -> tuple[TushareFundNav, ...]:
         """返回指定基金份额的历史净值。"""
+
+    def list_fund_detail_basics_by_ts_codes(self, ts_codes: tuple[str, ...]) -> tuple[TushareFundBasic, ...]:
+        """返回指定完整 Tushare 代码的完整基础资料。"""
+
+    def list_fund_managers(self, ts_code: str) -> tuple[TushareFundManager, ...]:
+        """返回指定基金份额的经理任职历史。"""
+
+    def list_fund_share_history(
+        self, ts_code: str, *, start_date: date, end_date: date
+    ) -> tuple[TushareFundShare, ...]:
+        """返回指定日期窗口内的基金份额规模历史。"""
+
+    def list_fund_dividends(self, ts_code: str) -> tuple[TushareFundDividend, ...]:
+        """返回指定基金份额的结构化分红事件。"""
 
 
 @dataclass(frozen=True)
@@ -104,6 +130,15 @@ class MarketNavIncrementalInProgressError(RuntimeError):
 
 
 MarketNavProgressReporter = Callable[[int, int, str | None, str], None]
+MarketDetailProgressReporter = MarketNavProgressReporter
+
+
+@dataclass(frozen=True)
+class MarketDetailSyncResult:
+    """完整资料同步的父任务与五个可追溯阶段结果。"""
+
+    overall_outcome: SyncOutcome
+    outcomes: tuple[SyncOutcome, ...]
 
 
 @dataclass(frozen=True)
@@ -297,9 +332,25 @@ class TushareFundSyncService:
         self, ts_codes: tuple[str, ...], *, start_date: date | None = None, end_date: date | None = None
     ) -> SyncOutcome:
         """回填已纳入基金市场份额的完整历史净值；响应校验通过后才开始写库。"""
+        return self._sync_market_nav_history(
+            ts_codes,
+            start_date=start_date,
+            end_date=end_date,
+            sync_type="MARKET_NAV_HISTORY",
+        )
+
+    def _sync_market_nav_history(
+        self,
+        ts_codes: tuple[str, ...],
+        *,
+        start_date: date | None,
+        end_date: date | None,
+        sync_type: str,
+    ) -> SyncOutcome:
+        """按指定运行类型同步全市场历史净值，供详情基线与既有历史回填共用。"""
         if start_date and end_date and start_date > end_date:
             raise ValueError("start_date must not be after end_date.")
-        source_id, sync_run_id = self._start_run(sync_type="MARKET_NAV_HISTORY", requested_nav_date=None)
+        source_id, sync_run_id = self._start_run(sync_type=sync_type, requested_nav_date=None)
         try:
             navs = tuple(
                 nav
@@ -323,7 +374,7 @@ class TushareFundSyncService:
                     )
             outcome = SyncOutcome(
                 sync_run_id=sync_run_id,
-                sync_type="MARKET_NAV_HISTORY",
+                sync_type=sync_type,
                 requested_nav_date=None,
                 fetched_count=len(navs),
                 created_count=write_stats.created_count,
@@ -344,6 +395,293 @@ class TushareFundSyncService:
         except Exception as error:
             self._record_failure(source_id, sync_run_id, error)
             logger.exception("tushare_fund_sync.sync_market_nav_history >>> failed run_id=%s", sync_run_id)
+            raise
+
+    def sync_market_details(
+        self,
+        *,
+        history_start_date: date = _MARKET_DETAIL_HISTORY_START_DATE,
+        history_end_date: date | None = None,
+        progress_reporter: MarketDetailProgressReporter | None = None,
+    ) -> MarketDetailSyncResult:
+        """手工补齐当前基金市场的完整详情基线并回传真实阶段进度。
+
+        同步范围只读取 `ACTIVE + TUSHARE_PRO_FUND` 的市场份额，不读取任何
+        用户关注关系。五类来源接口独立形成运行记录，父运行记录只会在五类资料
+        全部成功后标记成功，避免将部分完成误报为完整详情已同步。
+        """
+        target_end_date = history_end_date or date.today()
+        if history_start_date > target_end_date:
+            raise ValueError("history_start_date must not be after history_end_date.")
+        with _market_nav_incremental_lock(self._engine):
+            source_id, parent_run_id = self._start_run(
+                sync_type="MARKET_DETAIL", requested_nav_date=target_end_date
+            )
+            try:
+                _report_market_nav_progress(progress_reporter, 0, 0, None, "正在读取基金市场同步范围")
+                with Session(self._engine) as session:
+                    targets = list_active_market_sync_targets(session)
+                ts_codes = self._resolve_market_source_fund_codes(source_id, targets)
+                total_steps = 3 + 3 * len(ts_codes)
+                _report_market_nav_progress(progress_reporter, 0, total_steps, None, "正在读取基金基础资料")
+
+                profile_outcome = self._sync_market_detail_profiles(ts_codes)
+                _report_market_nav_progress(progress_reporter, 1, total_steps, None, "基金基础资料已写入")
+
+                nav_outcome = self._sync_market_nav_history(
+                    ts_codes,
+                    start_date=history_start_date,
+                    end_date=target_end_date,
+                    sync_type="MARKET_DETAIL_NAV",
+                )
+                _report_market_nav_progress(progress_reporter, 2, total_steps, None, "扩展净值资料已写入")
+
+                manager_outcome = self._sync_market_detail_managers(
+                    ts_codes,
+                    progress_reporter=lambda completed, ts_code: _report_market_nav_progress(
+                        progress_reporter,
+                        2 + completed,
+                        total_steps,
+                        ts_code,
+                        f"已读取 {ts_code} 的基金经理资料",
+                    ),
+                )
+                share_outcome = self._sync_market_detail_shares(
+                    ts_codes,
+                    start_date=history_start_date,
+                    end_date=target_end_date,
+                    progress_reporter=lambda completed, ts_code: _report_market_nav_progress(
+                        progress_reporter,
+                        2 + len(ts_codes) + completed,
+                        total_steps,
+                        ts_code,
+                        f"已读取 {ts_code} 的基金份额规模",
+                    ),
+                )
+                dividend_outcome = self._sync_market_detail_dividends(
+                    ts_codes,
+                    progress_reporter=lambda completed, ts_code: _report_market_nav_progress(
+                        progress_reporter,
+                        2 + 2 * len(ts_codes) + completed,
+                        total_steps,
+                        ts_code,
+                        f"已读取 {ts_code} 的分红记录",
+                    ),
+                )
+                outcomes = (
+                    profile_outcome,
+                    nav_outcome,
+                    manager_outcome,
+                    share_outcome,
+                    dividend_outcome,
+                )
+                write_stats = WriteStats(
+                    created_count=sum(outcome.created_count for outcome in outcomes),
+                    updated_count=sum(outcome.updated_count for outcome in outcomes),
+                    skipped_count=sum(outcome.skipped_count for outcome in outcomes),
+                )
+                overall_outcome = SyncOutcome(
+                    sync_run_id=parent_run_id,
+                    sync_type="MARKET_DETAIL",
+                    requested_nav_date=target_end_date,
+                    fetched_count=sum(outcome.fetched_count for outcome in outcomes),
+                    created_count=write_stats.created_count,
+                    updated_count=write_stats.updated_count,
+                    skipped_count=write_stats.skipped_count,
+                )
+                self._complete_run(source_id, overall_outcome, write_stats)
+                _report_market_nav_progress(progress_reporter, total_steps, total_steps, None, "完整资料同步完成")
+                return MarketDetailSyncResult(overall_outcome=overall_outcome, outcomes=outcomes)
+            except Exception as error:
+                self._record_failure(source_id, parent_run_id, error)
+                logger.exception("tushare_fund_sync.sync_market_details >>> failed run_id=%s", parent_run_id)
+                raise
+
+    def _sync_market_detail_profiles(self, ts_codes: tuple[str, ...]) -> SyncOutcome:
+        source_id, sync_run_id = self._start_run(sync_type="MARKET_DETAIL_PROFILE", requested_nav_date=None)
+        try:
+            companies = self._provider.list_fund_companies()
+            basics = self._provider.list_fund_detail_basics_by_ts_codes(ts_codes)
+            _ensure_market_catalog_complete(ts_codes, basics)
+            records, invalid_count = _normalize_market_profile_records(companies, basics)
+            if invalid_count or len(records) != len(ts_codes):
+                raise TushareIntegrationError("fund_basic", "market detail profiles contain invalid records")
+            write_stats = WriteStats()
+            for batch in _chunked(records, self._batch_size):
+                with Session(self._engine) as session, session.begin():
+                    write_stats = write_stats.combine(
+                        upsert_fund_profiles_batch(session, source_id=source_id, records=batch)
+                    )
+            outcome = SyncOutcome(
+                sync_run_id=sync_run_id,
+                sync_type="MARKET_DETAIL_PROFILE",
+                requested_nav_date=None,
+                fetched_count=len(basics),
+                created_count=write_stats.created_count,
+                updated_count=write_stats.updated_count,
+                skipped_count=write_stats.skipped_count,
+            )
+            self._complete_run(source_id, outcome, write_stats)
+            logger.info(
+                "tushare_fund_sync._sync_market_detail_profiles >>> completed run_id=%s "
+                "fetched=%s created=%s updated=%s skipped=%s",
+                sync_run_id,
+                outcome.fetched_count,
+                outcome.created_count,
+                outcome.updated_count,
+                outcome.skipped_count,
+            )
+            return outcome
+        except Exception as error:
+            self._record_failure(source_id, sync_run_id, error)
+            logger.exception("tushare_fund_sync._sync_market_detail_profiles >>> failed run_id=%s", sync_run_id)
+            raise
+
+    def _sync_market_detail_managers(
+        self,
+        ts_codes: tuple[str, ...],
+        *,
+        progress_reporter: Callable[[int, str], None] | None = None,
+    ) -> SyncOutcome:
+        source_id, sync_run_id = self._start_run(sync_type="MARKET_DETAIL_MANAGER", requested_nav_date=None)
+        try:
+            managers: list[TushareFundManager] = []
+            for completed_count, ts_code in enumerate(ts_codes, start=1):
+                managers.extend(self._provider.list_fund_managers(ts_code))
+                _report_market_detail_fund_progress(progress_reporter, completed_count, ts_code)
+            records, invalid_count = _normalize_market_manager_records(managers, ts_codes=ts_codes)
+            if invalid_count:
+                raise TushareIntegrationError("fund_manager", "market manager records contain invalid values")
+            write_stats = WriteStats()
+            for batch in _chunked(records, self._batch_size):
+                with Session(self._engine) as session, session.begin():
+                    write_stats = write_stats.combine(
+                        upsert_fund_manager_assignments_batch(session, source_id=source_id, records=batch)
+                    )
+            outcome = SyncOutcome(
+                sync_run_id=sync_run_id,
+                sync_type="MARKET_DETAIL_MANAGER",
+                requested_nav_date=None,
+                fetched_count=len(managers),
+                created_count=write_stats.created_count,
+                updated_count=write_stats.updated_count,
+                skipped_count=write_stats.skipped_count,
+            )
+            self._complete_run(source_id, outcome, write_stats)
+            logger.info(
+                "tushare_fund_sync._sync_market_detail_managers >>> completed run_id=%s "
+                "fetched=%s created=%s updated=%s skipped=%s",
+                sync_run_id,
+                outcome.fetched_count,
+                outcome.created_count,
+                outcome.updated_count,
+                outcome.skipped_count,
+            )
+            return outcome
+        except Exception as error:
+            self._record_failure(source_id, sync_run_id, error)
+            logger.exception("tushare_fund_sync._sync_market_detail_managers >>> failed run_id=%s", sync_run_id)
+            raise
+
+    def _sync_market_detail_shares(
+        self,
+        ts_codes: tuple[str, ...],
+        *,
+        start_date: date,
+        end_date: date,
+        progress_reporter: Callable[[int, str], None] | None = None,
+    ) -> SyncOutcome:
+        source_id, sync_run_id = self._start_run(sync_type="MARKET_DETAIL_SHARE", requested_nav_date=None)
+        try:
+            shares: list[TushareFundShare] = []
+            for completed_count, ts_code in enumerate(ts_codes, start=1):
+                shares.extend(
+                    self._provider.list_fund_share_history(ts_code, start_date=start_date, end_date=end_date)
+                )
+                _report_market_detail_fund_progress(progress_reporter, completed_count, ts_code)
+            records, invalid_count = _normalize_market_share_records(
+                shares,
+                ts_codes=ts_codes,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if invalid_count:
+                raise TushareIntegrationError("fund_share", "market share records contain invalid values")
+            write_stats = WriteStats()
+            for batch in _chunked(records, self._batch_size):
+                with Session(self._engine) as session, session.begin():
+                    write_stats = write_stats.combine(
+                        upsert_fund_share_snapshots_batch(session, source_id=source_id, records=batch)
+                    )
+            outcome = SyncOutcome(
+                sync_run_id=sync_run_id,
+                sync_type="MARKET_DETAIL_SHARE",
+                requested_nav_date=None,
+                fetched_count=len(shares),
+                created_count=write_stats.created_count,
+                updated_count=write_stats.updated_count,
+                skipped_count=write_stats.skipped_count,
+            )
+            self._complete_run(source_id, outcome, write_stats)
+            logger.info(
+                "tushare_fund_sync._sync_market_detail_shares >>> completed run_id=%s "
+                "fetched=%s created=%s updated=%s skipped=%s",
+                sync_run_id,
+                outcome.fetched_count,
+                outcome.created_count,
+                outcome.updated_count,
+                outcome.skipped_count,
+            )
+            return outcome
+        except Exception as error:
+            self._record_failure(source_id, sync_run_id, error)
+            logger.exception("tushare_fund_sync._sync_market_detail_shares >>> failed run_id=%s", sync_run_id)
+            raise
+
+    def _sync_market_detail_dividends(
+        self,
+        ts_codes: tuple[str, ...],
+        *,
+        progress_reporter: Callable[[int, str], None] | None = None,
+    ) -> SyncOutcome:
+        source_id, sync_run_id = self._start_run(sync_type="MARKET_DETAIL_DIVIDEND", requested_nav_date=None)
+        try:
+            dividends: list[TushareFundDividend] = []
+            for completed_count, ts_code in enumerate(ts_codes, start=1):
+                dividends.extend(self._provider.list_fund_dividends(ts_code))
+                _report_market_detail_fund_progress(progress_reporter, completed_count, ts_code)
+            records, invalid_count = _normalize_market_dividend_records(dividends, ts_codes=ts_codes)
+            if invalid_count:
+                raise TushareIntegrationError("fund_div", "market dividend records contain invalid values")
+            write_stats = WriteStats()
+            for batch in _chunked(records, self._batch_size):
+                with Session(self._engine) as session, session.begin():
+                    write_stats = write_stats.combine(
+                        upsert_fund_dividends_batch(session, source_id=source_id, records=batch)
+                    )
+            outcome = SyncOutcome(
+                sync_run_id=sync_run_id,
+                sync_type="MARKET_DETAIL_DIVIDEND",
+                requested_nav_date=None,
+                fetched_count=len(dividends),
+                created_count=write_stats.created_count,
+                updated_count=write_stats.updated_count,
+                skipped_count=write_stats.skipped_count,
+            )
+            self._complete_run(source_id, outcome, write_stats)
+            logger.info(
+                "tushare_fund_sync._sync_market_detail_dividends >>> completed run_id=%s "
+                "fetched=%s created=%s updated=%s skipped=%s",
+                sync_run_id,
+                outcome.fetched_count,
+                outcome.created_count,
+                outcome.updated_count,
+                outcome.skipped_count,
+            )
+            return outcome
+        except Exception as error:
+            self._record_failure(source_id, sync_run_id, error)
+            logger.exception("tushare_fund_sync._sync_market_detail_dividends >>> failed run_id=%s", sync_run_id)
             raise
 
     def sync_market_nav_incremental(
@@ -591,6 +929,21 @@ def _report_market_nav_progress(
         logger.warning("tushare_fund_sync._report_market_nav_progress >>> progress callback failed", exc_info=True)
 
 
+def _report_market_detail_fund_progress(
+    reporter: Callable[[int, str], None] | None, completed_count: int, ts_code: str
+) -> None:
+    """安全上报完整资料同步的逐基金读取进度。"""
+    if reporter is None:
+        return
+    try:
+        reporter(completed_count, ts_code)
+    except Exception:
+        logger.warning(
+            "tushare_fund_sync._report_market_detail_fund_progress >>> progress callback failed",
+            exc_info=True,
+        )
+
+
 def _normalize_catalog_records(
     companies: tuple[TushareFundCompany, ...], basics: tuple[TushareFundBasic, ...]
 ) -> tuple[tuple[FundCatalogUpsert, ...], int]:
@@ -639,13 +992,7 @@ def _normalize_nav_records(
         if fund_code is None or nav.nav_date != requested_nav_date:
             invalid_count += 1
             continue
-        record = NavDailyUpsert(
-            fund_code=fund_code,
-            nav_date=nav.nav_date,
-            unit_nav=nav.unit_nav,
-            accumulated_nav=nav.accumulated_nav,
-            content_hash=_nav_content_hash(fund_code, nav),
-        )
+        record = _to_nav_daily_upsert(fund_code, nav)
         key = (record.fund_code, record.nav_date)
         existing = by_key.get(key)
         if existing is not None and existing.content_hash != record.content_hash:
@@ -676,17 +1023,237 @@ def _normalize_market_nav_history_records(
         ):
             invalid_count += 1
             continue
-        record = NavDailyUpsert(
-            fund_code=fund_code,
-            nav_date=nav.nav_date,
-            unit_nav=nav.unit_nav,
-            accumulated_nav=nav.accumulated_nav,
-            content_hash=_nav_content_hash(fund_code, nav),
-        )
+        record = _to_nav_daily_upsert(fund_code, nav)
         key = (record.fund_code, record.nav_date)
         existing = by_key.get(key)
         if existing is not None and existing.content_hash != record.content_hash:
             raise TushareIntegrationError("fund_nav", f"conflicting duplicate NAV for fund_code={fund_code}")
+        by_key[key] = record
+    return tuple(by_key[key] for key in sorted(by_key)), invalid_count
+
+
+def _normalize_market_profile_records(
+    companies: tuple[TushareFundCompany, ...], basics: tuple[TushareFundBasic, ...]
+) -> tuple[tuple[FundProfileUpsert, ...], int]:
+    """将 `fund_basic` 的可展示资料规范化为当前快照。"""
+    company_name_by_short_name = _build_company_name_mapping(companies)
+    by_fund_code: dict[str, FundProfileUpsert] = {}
+    invalid_count = 0
+    for basic in basics:
+        fund_code = _normalize_fund_code(basic.ts_code)
+        if fund_code is None or not basic.name.strip():
+            invalid_count += 1
+            continue
+        management_company_name = _normalize_manager_name(basic.management, company_name_by_short_name)
+        record = FundProfileUpsert(
+            fund_code=fund_code,
+            management_company_name=management_company_name,
+            custodian_name=_normalized_optional_text(basic.custodian),
+            found_date=basic.found_date,
+            due_date=basic.due_date,
+            list_date=basic.list_date,
+            issue_date=basic.issue_date,
+            delist_date=basic.delist_date,
+            issue_amount=basic.issue_amount,
+            management_fee=basic.management_fee,
+            custodian_fee=basic.custodian_fee,
+            duration_year=basic.duration_year,
+            par_value=basic.par_value,
+            min_purchase_amount=basic.min_purchase_amount,
+            expected_return=basic.expected_return,
+            benchmark=_normalized_optional_text(basic.benchmark),
+            invest_type=_normalized_optional_text(basic.invest_type),
+            source_fund_type=_normalized_optional_text(basic.source_fund_type),
+            trustee_name=_normalized_optional_text(basic.trustee),
+            purchase_start_date=basic.purchase_start_date,
+            redemption_start_date=basic.redemption_start_date,
+            market=_normalized_optional_text(basic.market),
+            content_hash=_content_hash(
+                {
+                    "fund_code": fund_code,
+                    "management_company_name": management_company_name,
+                    "custodian_name": _normalized_optional_text(basic.custodian),
+                    "found_date": basic.found_date,
+                    "due_date": basic.due_date,
+                    "list_date": basic.list_date,
+                    "issue_date": basic.issue_date,
+                    "delist_date": basic.delist_date,
+                    "issue_amount": basic.issue_amount,
+                    "management_fee": basic.management_fee,
+                    "custodian_fee": basic.custodian_fee,
+                    "duration_year": basic.duration_year,
+                    "par_value": basic.par_value,
+                    "min_purchase_amount": basic.min_purchase_amount,
+                    "expected_return": basic.expected_return,
+                    "benchmark": _normalized_optional_text(basic.benchmark),
+                    "invest_type": _normalized_optional_text(basic.invest_type),
+                    "source_fund_type": _normalized_optional_text(basic.source_fund_type),
+                    "trustee_name": _normalized_optional_text(basic.trustee),
+                    "purchase_start_date": basic.purchase_start_date,
+                    "redemption_start_date": basic.redemption_start_date,
+                    "market": _normalized_optional_text(basic.market),
+                    "source_code": TUSHARE_SOURCE_CODE,
+                }
+            ),
+        )
+        existing = by_fund_code.get(fund_code)
+        if existing is not None and existing.content_hash != record.content_hash:
+            raise TushareIntegrationError("fund_basic", f"conflicting profile for fund_code={fund_code}")
+        by_fund_code[fund_code] = record
+    return tuple(by_fund_code[fund_code] for fund_code in sorted(by_fund_code)), invalid_count
+
+
+def _normalize_market_manager_records(
+    managers: tuple[TushareFundManager, ...], *, ts_codes: tuple[str, ...]
+) -> tuple[tuple[FundManagerAssignmentUpsert, ...], int]:
+    """校验经理记录只属于目标市场范围，并生成不含简历文本的稳定来源键。"""
+    expected_fund_codes = {_require_normalized_fund_code(ts_code) for ts_code in ts_codes}
+    by_key: dict[tuple[str, str], FundManagerAssignmentUpsert] = {}
+    invalid_count = 0
+    for manager in managers:
+        fund_code = _normalize_fund_code(manager.ts_code)
+        manager_name = _normalized_optional_text(manager.name)
+        if fund_code not in expected_fund_codes or manager_name is None:
+            invalid_count += 1
+            continue
+        source_record_key = _content_hash(
+            {
+                "fund_code": fund_code,
+                "manager_name": manager_name,
+                "ann_date": manager.ann_date,
+                "begin_date": manager.begin_date,
+                "end_date": manager.end_date,
+            }
+        )
+        record = FundManagerAssignmentUpsert(
+            fund_code=fund_code,
+            source_record_key=source_record_key,
+            manager_name=manager_name,
+            ann_date=manager.ann_date,
+            begin_date=manager.begin_date,
+            end_date=manager.end_date,
+            education=_normalized_optional_text(manager.education),
+            content_hash=_content_hash(
+                {
+                    "fund_code": fund_code,
+                    "source_record_key": source_record_key,
+                    "manager_name": manager_name,
+                    "ann_date": manager.ann_date,
+                    "begin_date": manager.begin_date,
+                    "end_date": manager.end_date,
+                    "education": _normalized_optional_text(manager.education),
+                    "source_code": TUSHARE_SOURCE_CODE,
+                }
+            ),
+        )
+        key = (fund_code, source_record_key)
+        existing = by_key.get(key)
+        if existing is not None and existing.content_hash != record.content_hash:
+            raise TushareIntegrationError("fund_manager", f"conflicting manager record for fund_code={fund_code}")
+        by_key[key] = record
+    return tuple(by_key[key] for key in sorted(by_key)), invalid_count
+
+
+def _normalize_market_share_records(
+    shares: tuple[TushareFundShare, ...],
+    *,
+    ts_codes: tuple[str, ...],
+    start_date: date,
+    end_date: date,
+) -> tuple[tuple[FundShareSnapshotUpsert, ...], int]:
+    """校验份额规模的所属基金、日期范围与重复数据。"""
+    expected_fund_codes = {_require_normalized_fund_code(ts_code) for ts_code in ts_codes}
+    by_key: dict[tuple[str, date], FundShareSnapshotUpsert] = {}
+    invalid_count = 0
+    for share in shares:
+        fund_code = _normalize_fund_code(share.ts_code)
+        if fund_code not in expected_fund_codes or share.trade_date < start_date or share.trade_date > end_date:
+            invalid_count += 1
+            continue
+        record = FundShareSnapshotUpsert(
+            fund_code=fund_code,
+            trade_date=share.trade_date,
+            fund_share=share.fund_share,
+            content_hash=_content_hash(
+                {
+                    "fund_code": fund_code,
+                    "trade_date": share.trade_date,
+                    "fund_share": share.fund_share,
+                    "source_code": TUSHARE_SOURCE_CODE,
+                }
+            ),
+        )
+        key = (fund_code, share.trade_date)
+        existing = by_key.get(key)
+        if existing is not None and existing.content_hash != record.content_hash:
+            raise TushareIntegrationError("fund_share", f"conflicting share record for fund_code={fund_code}")
+        by_key[key] = record
+    return tuple(by_key[key] for key in sorted(by_key)), invalid_count
+
+
+def _normalize_market_dividend_records(
+    dividends: tuple[TushareFundDividend, ...], *, ts_codes: tuple[str, ...]
+) -> tuple[tuple[FundDividendUpsert, ...], int]:
+    """校验分红事件归属并使用公告/实施日期组合生成稳定事件键。"""
+    expected_fund_codes = {_require_normalized_fund_code(ts_code) for ts_code in ts_codes}
+    by_key: dict[tuple[str, str], FundDividendUpsert] = {}
+    invalid_count = 0
+    for dividend in dividends:
+        fund_code = _normalize_fund_code(dividend.ts_code)
+        event_identity = {
+            "fund_code": fund_code,
+            "ann_date": dividend.ann_date,
+            "implementation_ann_date": dividend.implementation_ann_date,
+            "base_date": dividend.base_date,
+            "record_date": dividend.record_date,
+            "ex_date": dividend.ex_date,
+            "pay_date": dividend.pay_date,
+            "base_year": _normalized_optional_text(dividend.base_year),
+        }
+        if fund_code not in expected_fund_codes or not any(
+            value is not None for field_name, value in event_identity.items() if field_name != "fund_code"
+        ):
+            invalid_count += 1
+            continue
+        source_event_key = _content_hash(event_identity)
+        record = FundDividendUpsert(
+            fund_code=fund_code,
+            source_event_key=source_event_key,
+            ann_date=dividend.ann_date,
+            implementation_ann_date=dividend.implementation_ann_date,
+            base_date=dividend.base_date,
+            process_status=_normalized_optional_text(dividend.process_status),
+            record_date=dividend.record_date,
+            ex_date=dividend.ex_date,
+            pay_date=dividend.pay_date,
+            earnings_pay_date=dividend.earnings_pay_date,
+            nav_ex_date=dividend.nav_ex_date,
+            cash_dividend=dividend.cash_dividend,
+            base_unit=dividend.base_unit,
+            distributable_earnings=dividend.distributable_earnings,
+            earnings_amount=dividend.earnings_amount,
+            reinvestment_arrival_date=dividend.reinvestment_arrival_date,
+            base_year=_normalized_optional_text(dividend.base_year),
+            content_hash=_content_hash(
+                {
+                    **event_identity,
+                    "source_event_key": source_event_key,
+                    "process_status": _normalized_optional_text(dividend.process_status),
+                    "earnings_pay_date": dividend.earnings_pay_date,
+                    "nav_ex_date": dividend.nav_ex_date,
+                    "cash_dividend": dividend.cash_dividend,
+                    "base_unit": dividend.base_unit,
+                    "distributable_earnings": dividend.distributable_earnings,
+                    "earnings_amount": dividend.earnings_amount,
+                    "reinvestment_arrival_date": dividend.reinvestment_arrival_date,
+                    "source_code": TUSHARE_SOURCE_CODE,
+                }
+            ),
+        )
+        key = (fund_code, source_event_key)
+        existing = by_key.get(key)
+        if existing is not None and existing.content_hash != record.content_hash:
+            raise TushareIntegrationError("fund_div", f"conflicting dividend record for fund_code={fund_code}")
         by_key[key] = record
     return tuple(by_key[key] for key in sorted(by_key)), invalid_count
 
@@ -739,13 +1306,7 @@ def _normalize_market_nav_incremental_records(
         if window is None or nav.nav_date < window.start_date or nav.nav_date > window.end_date:
             invalid_count += 1
             continue
-        record = NavDailyUpsert(
-            fund_code=fund_code,
-            nav_date=nav.nav_date,
-            unit_nav=nav.unit_nav,
-            accumulated_nav=nav.accumulated_nav,
-            content_hash=_nav_content_hash(fund_code, nav),
-        )
+        record = _to_nav_daily_upsert(fund_code, nav)
         key = (record.fund_code, record.nav_date)
         existing = by_key.get(key)
         if existing is not None and existing.content_hash != record.content_hash:
@@ -847,18 +1408,61 @@ def _derive_share_class(fund_name: str) -> str:
 
 
 def _nav_content_hash(fund_code: str, nav: TushareFundNav) -> str:
-    payload = {
-        "fund_code": fund_code,
-        "nav_date": nav.nav_date.isoformat(),
-        "unit_nav": format(nav.unit_nav, "f"),
-        "accumulated_nav": format(nav.accumulated_nav, "f") if nav.accumulated_nav is not None else None,
-        "source_code": TUSHARE_SOURCE_CODE,
-    }
-    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return _content_hash(
+        {
+            "fund_code": fund_code,
+            "ann_date": nav.ann_date,
+            "nav_date": nav.nav_date,
+            "unit_nav": nav.unit_nav,
+            "accumulated_nav": nav.accumulated_nav,
+            "accumulated_dividend": nav.accumulated_dividend,
+            "net_asset": nav.net_asset,
+            "total_net_asset": nav.total_net_asset,
+            "adjusted_nav": nav.adjusted_nav,
+            "source_code": TUSHARE_SOURCE_CODE,
+        }
+    )
+
+
+def _to_nav_daily_upsert(fund_code: str, nav: TushareFundNav) -> NavDailyUpsert:
+    return NavDailyUpsert(
+        fund_code=fund_code,
+        nav_date=nav.nav_date,
+        unit_nav=nav.unit_nav,
+        accumulated_nav=nav.accumulated_nav,
+        ann_date=nav.ann_date,
+        accumulated_dividend=nav.accumulated_dividend,
+        net_asset=nav.net_asset,
+        total_net_asset=nav.total_net_asset,
+        adjusted_nav=nav.adjusted_nav,
+        content_hash=_nav_content_hash(fund_code, nav),
+    )
+
+
+def _normalized_optional_text(value: str | None) -> str | None:
+    return value.strip() or None if value is not None else None
+
+
+def _content_hash(payload: Mapping[str, object]) -> str:
+    """为业务字段生成稳定哈希，不纳入同步时间、用户态或来源原始响应。"""
+    serialized = json.dumps(
+        {key: _to_hash_value(value) for key, value in payload.items()},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(serialized.encode()).hexdigest()
 
 
-def _chunked(records: tuple[FundCatalogUpsert, ...] | tuple[NavDailyUpsert, ...], size: int) -> Iterator:
+def _to_hash_value(value: object) -> object:
+    if isinstance(value, date):
+        return value.isoformat()
+    if hasattr(value, "as_tuple"):
+        return format(value, "f")
+    return value
+
+
+def _chunked[RecordT](records: tuple[RecordT, ...], size: int) -> Iterator[tuple[RecordT, ...]]:
     for start in range(0, len(records), size):
         yield records[start : start + size]
 

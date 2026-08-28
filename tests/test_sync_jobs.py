@@ -4,8 +4,8 @@ from datetime import date
 from threading import Event
 from uuid import UUID
 
-from app.services.sync_jobs import LocalSyncJobManager
-from app.services.tushare_fund_sync import SyncOutcome
+from app.services.sync_jobs import MARKET_DETAIL_JOB_TYPE, LocalSyncJobManager
+from app.services.tushare_fund_sync import MarketDetailSyncResult, SyncOutcome
 
 
 def test_local_sync_job_manager_reports_progress_and_final_counts() -> None:
@@ -44,3 +44,43 @@ def test_local_sync_job_manager_reports_progress_and_final_counts() -> None:
     assert result.progress_total == 3
     assert result.sync_run_id == UUID("00000000-0000-0000-0000-000000000303")
     assert (result.fetched_count, result.created_count, result.updated_count, result.skipped_count) == (4, 2, 1, 1)
+
+
+def test_local_sync_job_manager_reports_market_detail_stage_progress() -> None:
+    """完整资料任务必须回传阶段与逐基金进度，并汇总父运行统计。"""
+    completed = Event()
+
+    class StubService:
+        def sync_market_details(self, *, progress_reporter):
+            progress_reporter(1, 9, None, "基金基础资料已写入")
+            progress_reporter(5, 9, "010710.OF", "已读取 010710.OF 的基金经理资料")
+            progress_reporter(9, 9, None, "完整资料同步完成")
+            overall = SyncOutcome(
+                sync_run_id=UUID("00000000-0000-0000-0000-000000000304"),
+                sync_type=MARKET_DETAIL_JOB_TYPE,
+                requested_nav_date=date(2026, 8, 28),
+                fetched_count=12,
+                created_count=7,
+                updated_count=3,
+                skipped_count=2,
+            )
+            return MarketDetailSyncResult(overall_outcome=overall, outcomes=(overall,))
+
+        def close(self) -> None:
+            completed.set()
+
+    manager = LocalSyncJobManager(service_factory=StubService)
+    started = manager.start_market_details()
+
+    assert started.job_type == MARKET_DETAIL_JOB_TYPE
+    assert completed.wait(timeout=1)
+    result = manager.get_job(started.job_id)
+    manager.close()
+
+    assert result is not None
+    assert result.status == "SUCCEEDED"
+    assert result.progress_current == 9
+    assert result.progress_total == 9
+    assert result.progress_message == "同步完成"
+    assert result.sync_run_id == UUID("00000000-0000-0000-0000-000000000304")
+    assert (result.fetched_count, result.created_count, result.updated_count, result.skipped_count) == (12, 7, 3, 2)

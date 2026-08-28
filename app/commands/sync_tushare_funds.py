@@ -12,7 +12,7 @@ from app.services.tushare_fund_sync import TushareFundSyncService
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """执行目录或指定净值日同步，输出不含 Token 和原始数据的 JSON 摘要。"""
+    """执行受控的基金同步，输出不含 Token 和原始数据的 JSON 摘要。"""
     parser = argparse.ArgumentParser(description="Sync authorized Tushare public-fund data into fund_ai.")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("catalog", help="sync fund_company and fund_basic")
@@ -35,6 +35,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     incremental_parser.add_argument(
         "--as-of-date", type=date.fromisoformat, help="latest NAV date to request, defaults to local current date"
     )
+    detail_parser = subparsers.add_parser(
+        "market-details", help="manually sync detailed data for every active fund already in the market"
+    )
+    detail_parser.add_argument(
+        "--start-date", type=date.fromisoformat, help="history start date; defaults to 1990-01-01"
+    )
+    detail_parser.add_argument(
+        "--end-date", type=date.fromisoformat, help="history end date; defaults to local current date"
+    )
     arguments = parser.parse_args(argv)
 
     service = TushareFundSyncService()
@@ -52,6 +61,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 end_date=arguments.end_date,
             )
             payload = {"catalog": catalog.to_payload(), "nav_history": history.to_payload()}
+        elif arguments.command == "market-details":
+            detail_result = service.sync_market_details(
+                history_start_date=arguments.start_date or date(1990, 1, 1),
+                history_end_date=arguments.end_date,
+            )
+            payload = {
+                "overall": detail_result.overall_outcome.to_payload(),
+                "outcomes": [
+                    outcome.to_payload()
+                    for outcome in detail_result.outcomes
+                ]
+            }
         else:
             payload = service.sync_market_nav_incremental(as_of_date=arguments.as_of_date).to_payload()
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
