@@ -16,15 +16,15 @@ from uuid import UUID, uuid4
 from app.core.logging import get_logger
 from app.integrations.tushare import TushareIntegrationError
 from app.services.tushare_fund_sync import (
-    FocusedNavIncrementalInProgressError,
-    FocusedNavIncrementalPreconditionError,
+    MarketNavIncrementalInProgressError,
+    MarketNavIncrementalPreconditionError,
     SyncOutcome,
     TushareFundSyncService,
 )
 
 logger = get_logger(__name__)
 
-FOCUSED_NAV_INCREMENTAL_JOB_TYPE = "FOCUSED_NAV_INCREMENTAL"
+MARKET_NAV_INCREMENTAL_JOB_TYPE = "MARKET_NAV_INCREMENTAL"
 _ACTIVE_STATUSES = frozenset({"QUEUED", "RUNNING"})
 
 
@@ -71,10 +71,8 @@ class LocalSyncJobManager:
         self._lock = Lock()
         self._closed = False
 
-    def start_focused_nav_incremental(self, ts_codes: tuple[str, ...]) -> SyncJobSnapshot:
-        """创建并提交重点基金增量任务；已有活动任务时返回受控冲突。"""
-        if not ts_codes:
-            raise ValueError("focused fund codes must not be empty")
+    def start_market_nav_incremental(self) -> SyncJobSnapshot:
+        """创建并提交基金市场增量任务；已有活动任务时返回受控冲突。"""
         with self._lock:
             if self._closed:
                 raise RuntimeError("sync job manager is stopped")
@@ -84,14 +82,14 @@ class LocalSyncJobManager:
                     raise SyncJobInProgressError("a local sync job is already running")
             snapshot = SyncJobSnapshot(
                 job_id=uuid4(),
-                job_type=FOCUSED_NAV_INCREMENTAL_JOB_TYPE,
+                job_type=MARKET_NAV_INCREMENTAL_JOB_TYPE,
                 status="QUEUED",
                 requested_nav_date=date.today(),
-                fund_codes=tuple(ts_codes),
+                fund_codes=(),
                 progress_current=0,
-                progress_total=len(ts_codes) + 1,
+                progress_total=0,
                 current_fund_code=None,
-                progress_message="任务已创建，等待后台执行",
+                progress_message="任务已创建，等待读取基金市场范围",
                 sync_run_id=None,
                 fetched_count=0,
                 created_count=0,
@@ -105,7 +103,7 @@ class LocalSyncJobManager:
             self._jobs[snapshot.job_id] = snapshot
             self._latest_job_id = snapshot.job_id
             self._active_job_id = snapshot.job_id
-            self._executor.submit(self._run_focused_nav_incremental, snapshot.job_id)
+            self._executor.submit(self._run_market_nav_incremental, snapshot.job_id)
             return snapshot
 
     def get_job(self, job_id: UUID) -> SyncJobSnapshot | None:
@@ -126,21 +124,19 @@ class LocalSyncJobManager:
             self._closed = True
         self._executor.shutdown(wait=False, cancel_futures=False)
 
-    def _run_focused_nav_incremental(self, job_id: UUID) -> None:
+    def _run_market_nav_incremental(self, job_id: UUID) -> None:
         service: TushareFundSyncService | None = None
         self._replace_job(job_id, status="RUNNING", started_at=datetime.now(UTC), progress_message="正在准备同步")
         try:
-            snapshot = self._required_job(job_id)
             service = self._service_factory()
-            outcome = service.sync_focused_nav_incremental(
-                snapshot.fund_codes,
+            outcome = service.sync_market_nav_incremental(
                 progress_reporter=lambda current, total, fund_code, message: self._update_progress(
                     job_id, current, total, fund_code, message
                 ),
             )
             self._complete_job(job_id, outcome)
             logger.info(
-                "sync_jobs._run_focused_nav_incremental >>> completed job_id=%s, sync_run_id=%s, "
+                "sync_jobs._run_market_nav_incremental >>> completed job_id=%s, sync_run_id=%s, "
                 "fetched=%s, created=%s, updated=%s",
                 job_id,
                 outcome.sync_run_id,
@@ -148,17 +144,17 @@ class LocalSyncJobManager:
                 outcome.created_count,
                 outcome.updated_count,
             )
-        except FocusedNavIncrementalPreconditionError:
-            self._fail_job(job_id, "FOCUSED_SYNC_BASELINE_MISSING", "请先完成重点基金历史净值回填。")
-        except FocusedNavIncrementalInProgressError:
-            self._fail_job(job_id, "FOCUSED_SYNC_IN_PROGRESS", "已有重点基金同步正在执行，请稍后重试。")
+        except MarketNavIncrementalPreconditionError:
+            self._fail_job(job_id, "MARKET_SYNC_BASELINE_MISSING", "请先完成基金市场历史净值回填或来源代码校验。")
+        except MarketNavIncrementalInProgressError:
+            self._fail_job(job_id, "MARKET_SYNC_IN_PROGRESS", "已有基金市场同步正在执行，请稍后重试。")
         except TushareIntegrationError:
-            self._fail_job(job_id, "FOCUSED_SYNC_FAILED", "净值同步未完成，请稍后重试。")
+            self._fail_job(job_id, "MARKET_SYNC_FAILED", "基金市场净值同步未完成，请稍后重试。")
         except ValueError:
-            self._fail_job(job_id, "FOCUSED_SYNC_UNAVAILABLE", "净值同步服务尚未完成配置。")
+            self._fail_job(job_id, "MARKET_SYNC_UNAVAILABLE", "基金市场同步服务尚未完成配置。")
         except Exception:
-            logger.exception("sync_jobs._run_focused_nav_incremental >>> unexpected task failure, job_id=%s", job_id)
-            self._fail_job(job_id, "FOCUSED_SYNC_FAILED", "净值同步未完成，请稍后重试。")
+            logger.exception("sync_jobs._run_market_nav_incremental >>> unexpected task failure, job_id=%s", job_id)
+            self._fail_job(job_id, "MARKET_SYNC_FAILED", "基金市场净值同步未完成，请稍后重试。")
         finally:
             if service is not None:
                 service.close()

@@ -15,7 +15,7 @@ from app.integrations.tushare import (
 )
 from app.services.tushare_fund_sync import (
     _normalize_catalog_records,
-    _normalize_focused_nav_history_records,
+    _normalize_market_nav_history_records,
     _normalize_nav_records,
 )
 
@@ -112,8 +112,8 @@ def test_tushare_api_error_does_not_echo_token() -> None:
     assert "sensitive-test-token" not in str(error.value)
 
 
-def test_tushare_client_reads_exact_focused_catalog_and_history_by_known_code() -> None:
-    """重点模式只请求明确的完整代码和日期窗口，不会回退到全市场目录。"""
+def test_tushare_client_reads_exact_market_catalog_and_history_by_known_code() -> None:
+    """基金市场维护只请求明确的完整代码和日期窗口，不会回退到全市场目录。"""
     requests: list[dict[str, object]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -175,6 +175,42 @@ def test_tushare_client_reads_exact_focused_catalog_and_history_by_known_code() 
     ]
 
 
+def test_tushare_client_resolves_suffix_only_from_a_unique_catalog_response() -> None:
+    """历史记录缺少后缀时，只能依据来源目录的唯一精确响应补齐。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        ts_code = payload["params"]["ts_code"]
+        items = (
+            [["160323.SZ", "华夏磐泰混合（LOF）A", "华夏基金", "混合型", "20161226", "L", "E"]]
+            if ts_code == "160323.SZ"
+            else []
+        )
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "fields": ["ts_code", "name", "management", "fund_type", "found_date", "status", "market"],
+                    "items": items,
+                },
+            },
+        )
+
+    with TushareFundClient(
+        token="test-token",
+        api_url="https://tushare.test",
+        connect_timeout_seconds=1,
+        read_timeout_seconds=1,
+        max_retries=0,
+        catalog_max_rows_per_query=15_000,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        resolved = client.resolve_fund_basics_by_fund_codes(("160323",))
+
+    assert [item.ts_code for item in resolved] == ["160323.SZ"]
+
+
 def test_catalog_normalization_uses_company_full_name_and_conservative_share_class() -> None:
     """管理人简称要映射全称，ETF 等非份额字母结尾的简称不得误判份额类别。"""
     records, invalid_count = _normalize_catalog_records(
@@ -221,9 +257,9 @@ def test_nav_normalization_rejects_conflicting_duplicate_values() -> None:
         _normalize_nav_records(navs, date(2026, 8, 25))
 
 
-def test_focused_nav_history_rejects_records_outside_requested_window() -> None:
-    """重点历史同步不能把请求窗口外的外部记录静默写入。"""
-    records, invalid_count = _normalize_focused_nav_history_records(
+def test_market_nav_history_rejects_records_outside_requested_window() -> None:
+    """基金市场历史同步不能把请求窗口外的外部记录静默写入。"""
+    records, invalid_count = _normalize_market_nav_history_records(
         (
             TushareFundNav("002112.OF", None, date(2026, 8, 25), Decimal("4.8"), Decimal("5.0")),
             TushareFundNav("002112.OF", None, date(2026, 7, 31), Decimal("4.7"), Decimal("4.9")),

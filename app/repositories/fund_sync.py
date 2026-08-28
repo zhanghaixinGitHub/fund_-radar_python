@@ -34,6 +34,7 @@ class FundCatalogUpsert:
     status: str
     share_class: str
     established_date: date | None
+    source_fund_code: str
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,14 @@ class NavDailyUpsert:
     unit_nav: Decimal
     accumulated_nav: Decimal | None
     content_hash: str
+
+
+@dataclass(frozen=True)
+class MarketSyncTarget:
+    """基金市场中需要由指定来源补齐净值的启用份额。"""
+
+    fund_code: str
+    source_fund_code: str | None
 
 
 @dataclass(frozen=True)
@@ -192,6 +201,7 @@ def upsert_fund_catalog_batch(session: Session, records: tuple[FundCatalogUpsert
                     fund_type=record.fund_type,
                     status=record.status,
                     source_code=TUSHARE_SOURCE_CODE,
+                    source_fund_code=record.source_fund_code,
                 )
             )
             created_count += 1
@@ -203,6 +213,7 @@ def upsert_fund_catalog_batch(session: Session, records: tuple[FundCatalogUpsert
             ("fund_type", record.fund_type),
             ("status", record.status),
             ("source_code", TUSHARE_SOURCE_CODE),
+            ("source_fund_code", record.source_fund_code),
         ):
             if getattr(share, field_name) != expected_value:
                 setattr(share, field_name, expected_value)
@@ -215,6 +226,40 @@ def upsert_fund_catalog_batch(session: Session, records: tuple[FundCatalogUpsert
         else:
             skipped_count += 1
     return WriteStats(created_count=created_count, updated_count=updated_count, skipped_count=skipped_count)
+
+
+def list_active_market_sync_targets(session: Session) -> tuple[MarketSyncTarget, ...]:
+    """返回基金市场中全部启用且由 Tushare 维护的份额，不读取用户关注列表。"""
+    rows = session.execute(
+        select(FundShareClass.fund_code, FundShareClass.source_fund_code)
+        .where(FundShareClass.status == "ACTIVE", FundShareClass.source_code == TUSHARE_SOURCE_CODE)
+        .order_by(FundShareClass.fund_code.asc())
+    ).all()
+    return tuple(
+        MarketSyncTarget(fund_code=fund_code, source_fund_code=source_fund_code)
+        for fund_code, source_fund_code in rows
+    )
+
+
+def assign_source_fund_codes(session: Session, source_fund_codes: dict[str, str]) -> None:
+    """为已有市场基金补齐已校验的来源精确代码；未知代码或重复映射均失败关闭。"""
+    if not source_fund_codes:
+        return
+    shares = {
+        share.fund_code: share
+        for share in session.scalars(
+            select(FundShareClass).where(FundShareClass.fund_code.in_(tuple(source_fund_codes)))
+        ).all()
+    }
+    if set(shares) != set(source_fund_codes):
+        raise ValueError("market source code resolution contains unknown fund codes")
+    if len(set(source_fund_codes.values())) != len(source_fund_codes):
+        raise ValueError("market source code resolution contains duplicate source fund codes")
+    for fund_code, source_fund_code in source_fund_codes.items():
+        share = shares[fund_code]
+        if share.source_fund_code not in (None, source_fund_code):
+            raise ValueError(f"source fund code conflicts for fund_code={fund_code}")
+        share.source_fund_code = source_fund_code
 
 
 def upsert_nav_daily_batch(

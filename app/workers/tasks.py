@@ -2,7 +2,6 @@
 
 from datetime import UTC, date, datetime
 
-from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.integrations.tushare import TushareIntegrationError
 from app.services.tushare_fund_sync import TushareFundSyncService
@@ -52,20 +51,17 @@ def sync_tushare_nav_daily(nav_date: str) -> dict[str, str | int | None]:
 
 
 @celery_app.task(
-    name="fund_ai.tushare.sync_focused_nav_incremental",
+    name="fund_ai.tushare.sync_market_nav_incremental",
     autoretry_for=(TushareIntegrationError,),
     retry_backoff=True,
     retry_jitter=True,
     retry_kwargs={"max_retries": 2},
 )
-def sync_focused_nav_incremental(as_of_date: str | None = None) -> dict[str, str | int | None]:
-    """按每只重点基金的同源水位补齐净值；不执行全量历史回填。"""
+def sync_market_nav_incremental(as_of_date: str | None = None) -> dict[str, str | int | None]:
+    """按基金市场中每只启用份额的同源水位补齐净值；不执行全量历史回填。"""
     parsed_as_of_date = date.fromisoformat(as_of_date) if as_of_date else None
     service = TushareFundSyncService()
     try:
-        return service.sync_focused_nav_incremental(
-            get_settings().focused_fund_ts_codes,
-            as_of_date=parsed_as_of_date,
-        ).to_payload()
+        return service.sync_market_nav_incremental(as_of_date=parsed_as_of_date).to_payload()
     finally:
         service.close()

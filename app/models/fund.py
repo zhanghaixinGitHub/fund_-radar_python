@@ -83,6 +83,7 @@ class FundShareClass(Base):
     fund_type: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     source_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_fund_code: Mapped[str | None] = mapped_column(String(16), unique=True)
     benchmark_code: Mapped[str | None] = mapped_column(String(64))
     risk_level: Mapped[str | None] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

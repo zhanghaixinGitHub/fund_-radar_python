@@ -2,7 +2,6 @@
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from types import SimpleNamespace
 from uuid import UUID
 
 from app.core.config import get_settings
@@ -138,27 +137,32 @@ def test_internal_fund_list_uses_page_mode_and_rejects_cursor_conflict(monkeypat
     from app.main import create_application
     from app.schemas.fund import InternalFundPage
 
-    received: dict[str, object] = {}
+    received: list[dict[str, object]] = []
     monkeypatch.setattr(
         funds,
         "list_funds",
-        lambda keyword, page_size, cursor, page: received.update(
-            keyword=keyword, page_size=page_size, cursor=cursor, page=page
+        lambda keyword, page_size, cursor, page: received.append(
+            {"keyword": keyword, "page_size": page_size, "cursor": cursor, "page": page}
         )
         or InternalFundPage(items=(), page=3, page_size=10, total_count=43, total_pages=5),
     )
 
     with TestClient(create_application()) as client:
         headers = {"X-Service-Token": "test-service-token"}
+        default_response = client.get("/internal/v1/funds", headers=headers)
         page_response = client.get("/internal/v1/funds?pageSize=10&page=3", headers=headers)
         conflict_response = client.get("/internal/v1/funds?page=2&cursor=010710", headers=headers)
 
+    assert default_response.status_code == 200
     assert page_response.status_code == 200
     assert page_response.json()["page"] == 3
     assert page_response.json()["page_size"] == 10
     assert page_response.json()["total_count"] == 43
     assert page_response.json()["total_pages"] == 5
-    assert received == {"keyword": None, "page_size": 10, "cursor": None, "page": 3}
+    assert received == [
+        {"keyword": None, "page_size": 10, "cursor": None, "page": None},
+        {"keyword": None, "page_size": 10, "cursor": None, "page": 3},
+    ]
     assert conflict_response.status_code == 422
     assert conflict_response.json()["detail"]["code"] == "PAGINATION_MODE_CONFLICT"
     get_settings.cache_clear()
@@ -170,20 +174,20 @@ def test_internal_fund_nav_history_requires_service_token_and_returns_snapshot(m
     get_settings.cache_clear()
 
 
-def test_internal_focused_nav_sync_job_requires_service_token_and_returns_progress(monkeypatch) -> None:
+def test_internal_market_nav_sync_job_requires_service_token_and_returns_progress(monkeypatch) -> None:
     """页面只能经 Java 创建任务，并能轮询安全的进度摘要。"""
     monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
     get_settings.cache_clear()
 
     from app.api.routes import funds
     from app.main import create_application
-    from app.services.sync_jobs import FOCUSED_NAV_INCREMENTAL_JOB_TYPE, SyncJobSnapshot
+    from app.services.sync_jobs import MARKET_NAV_INCREMENTAL_JOB_TYPE, SyncJobSnapshot
 
     received: dict[str, object] = {}
     job_id = UUID("00000000-0000-0000-0000-000000000301")
     snapshot = SyncJobSnapshot(
         job_id=job_id,
-        job_type=FOCUSED_NAV_INCREMENTAL_JOB_TYPE,
+        job_type=MARKET_NAV_INCREMENTAL_JOB_TYPE,
         status="RUNNING",
         requested_nav_date=datetime(2026, 8, 27, tzinfo=UTC).date(),
         fund_codes=("002112.OF", "010710.OF"),
@@ -203,8 +207,8 @@ def test_internal_focused_nav_sync_job_requires_service_token_and_returns_progre
     )
 
     class StubManager:
-        def start_focused_nav_incremental(self, ts_codes: tuple[str, ...]) -> SyncJobSnapshot:
-            received["ts_codes"] = ts_codes
+        def start_market_nav_incremental(self) -> SyncJobSnapshot:
+            received["started"] = True
             return snapshot
 
         def get_job(self, received_job_id: UUID) -> SyncJobSnapshot | None:
@@ -214,26 +218,20 @@ def test_internal_focused_nav_sync_job_requires_service_token_and_returns_progre
             return snapshot
 
     monkeypatch.setattr(funds, "get_sync_job_manager", lambda: StubManager())
-    monkeypatch.setattr(
-        funds,
-        "get_settings",
-        lambda: SimpleNamespace(focused_fund_ts_codes=("002112.OF", "010710.OF")),
-    )
-
     with TestClient(create_application()) as client:
         browser_response = client.post(
-            "/internal/v1/funds/sync-jobs/focused-nav-incremental",
+            "/internal/v1/funds/sync-jobs/market-nav-incremental",
             headers={"X-Service-Token": "test-service-token", "Origin": "http://localhost:5173"},
         )
         response = client.post(
-            "/internal/v1/funds/sync-jobs/focused-nav-incremental",
+            "/internal/v1/funds/sync-jobs/market-nav-incremental",
             headers={"X-Service-Token": "test-service-token", "X-Trace-Id": "manual-sync-test"},
         )
         status_response = client.get(
             f"/internal/v1/funds/sync-jobs/{job_id}", headers={"X-Service-Token": "test-service-token"}
         )
         latest_response = client.get(
-            "/internal/v1/funds/sync-jobs/focused-nav-incremental/latest",
+            "/internal/v1/funds/sync-jobs/market-nav-incremental/latest",
             headers={"X-Service-Token": "test-service-token"},
         )
 
@@ -242,7 +240,7 @@ def test_internal_focused_nav_sync_job_requires_service_token_and_returns_progre
     assert response.headers["X-Trace-Id"] == "manual-sync-test"
     assert response.json() == {
         "job_id": "00000000-0000-0000-0000-000000000301",
-        "job_type": "FOCUSED_NAV_INCREMENTAL",
+        "job_type": "MARKET_NAV_INCREMENTAL",
         "status": "RUNNING",
         "requested_nav_date": "2026-08-27",
         "fund_codes": ["002112.OF", "010710.OF"],
@@ -264,22 +262,22 @@ def test_internal_focused_nav_sync_job_requires_service_token_and_returns_progre
     assert latest_response.status_code == 200
     assert status_response.json()["progress_current"] == 1
     assert latest_response.json()["job_id"] == str(job_id)
-    assert received == {"ts_codes": ("002112.OF", "010710.OF")}
+    assert received == {"started": True}
     get_settings.cache_clear()
 
 
-def test_internal_focused_nav_sync_job_returns_latest_failed_state(monkeypatch) -> None:
+def test_internal_market_nav_sync_job_returns_latest_failed_state(monkeypatch) -> None:
     """后台发现历史基线缺失时，页面从任务状态获得可操作错误。"""
     monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
     get_settings.cache_clear()
 
     from app.api.routes import funds
     from app.main import create_application
-    from app.services.sync_jobs import FOCUSED_NAV_INCREMENTAL_JOB_TYPE, SyncJobSnapshot
+    from app.services.sync_jobs import MARKET_NAV_INCREMENTAL_JOB_TYPE, SyncJobSnapshot
 
     snapshot = SyncJobSnapshot(
         job_id=UUID("00000000-0000-0000-0000-000000000302"),
-        job_type=FOCUSED_NAV_INCREMENTAL_JOB_TYPE,
+        job_type=MARKET_NAV_INCREMENTAL_JOB_TYPE,
         status="FAILED",
         requested_nav_date=datetime(2026, 8, 27, tzinfo=UTC).date(),
         fund_codes=("002112.OF",),
@@ -292,8 +290,8 @@ def test_internal_focused_nav_sync_job_returns_latest_failed_state(monkeypatch) 
         created_count=0,
         updated_count=0,
         skipped_count=0,
-        error_code="FOCUSED_SYNC_BASELINE_MISSING",
-        error_message="请先完成重点基金历史净值回填。",
+        error_code="MARKET_SYNC_BASELINE_MISSING",
+        error_message="请先完成基金市场历史净值回填或来源代码校验。",
         started_at=datetime(2026, 8, 27, tzinfo=UTC),
         finished_at=datetime(2026, 8, 27, tzinfo=UTC),
     )
@@ -306,13 +304,13 @@ def test_internal_focused_nav_sync_job_returns_latest_failed_state(monkeypatch) 
 
     with TestClient(create_application()) as client:
         response = client.get(
-            "/internal/v1/funds/sync-jobs/focused-nav-incremental/latest",
+            "/internal/v1/funds/sync-jobs/market-nav-incremental/latest",
             headers={"X-Service-Token": "test-service-token"},
         )
 
     assert response.status_code == 200
     assert response.json()["status"] == "FAILED"
-    assert response.json()["error_code"] == "FOCUSED_SYNC_BASELINE_MISSING"
+    assert response.json()["error_code"] == "MARKET_SYNC_BASELINE_MISSING"
     get_settings.cache_clear()
 
     from app.api.routes import funds

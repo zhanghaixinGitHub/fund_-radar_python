@@ -7,7 +7,6 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 
 from app.api.dependencies import require_service_token
-from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.middleware import get_trace_id
 from app.schemas.fund import InternalFundDetail, InternalFundNavHistory, InternalFundPage, InternalSyncJobStatus
@@ -21,14 +20,14 @@ logger = get_logger(__name__)
 @router.get("", response_model=InternalFundPage, dependencies=[Depends(require_service_token)])
 async def list_internal_funds(
     keyword: Annotated[str | None, Query(max_length=50)] = None,
-    page_size: Annotated[int, Query(alias="pageSize", ge=1, le=100)] = 20,
+    page_size: Annotated[int, Query(alias="pageSize", ge=1, le=100)] = 10,
     cursor: Annotated[str | None, Query(pattern=r"^\d+$")] = None,
     page: Annotated[int | None, Query(ge=1, le=10_000)] = None,
 ) -> InternalFundPage:
     """按兼容游标或页码返回已落库的真实基金目录样本。
 
     该接口只向通过服务令牌校验的 Java 核心服务开放；目录为一次性手工核验样本，
-    ``as_of_date`` 为空时表示尚未获得合规净值同步，不能视为实时行情。
+    ``as_of_date`` 为空时表示尚未获得净值同步，不能视为实时行情。
     """
     if page is not None and cursor is not None:
         raise HTTPException(
@@ -48,51 +47,47 @@ async def list_internal_funds(
 
 
 @router.post(
-    "/sync-jobs/focused-nav-incremental",
+    "/sync-jobs/market-nav-incremental",
     response_model=InternalSyncJobStatus,
     status_code=status.HTTP_202_ACCEPTED,
     dependencies=[Depends(require_service_token)],
 )
-def start_internal_focused_nav_incremental_job() -> InternalSyncJobStatus:
-    """创建重点基金手动同步任务；执行由本机后台线程承担，不依赖 Celery Worker。"""
+def start_internal_market_nav_incremental_job() -> InternalSyncJobStatus:
+    """创建基金市场手动同步任务；执行由本机后台线程承担，不依赖 Celery Worker。"""
     try:
-        settings = get_settings()
-        ts_codes = settings.focused_fund_ts_codes
         logger.info(
-            "funds.start_internal_focused_nav_incremental_job >>> manual focused NAV sync requested, "
-            "trace_id=%s, fund_count=%s",
+            "funds.start_internal_market_nav_incremental_job >>> manual market NAV sync requested, trace_id=%s",
             get_trace_id(),
-            len(ts_codes),
         )
-        snapshot = get_sync_job_manager().start_focused_nav_incremental(ts_codes)
+        snapshot = get_sync_job_manager().start_market_nav_incremental()
     except SyncJobInProgressError as error:
         logger.warning(
-            "funds.start_internal_focused_nav_incremental_job >>> duplicate sync rejected, trace_id=%s",
+            "funds.start_internal_market_nav_incremental_job >>> duplicate sync rejected, trace_id=%s",
             get_trace_id(),
         )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail={"code": "FOCUSED_SYNC_IN_PROGRESS", "message": "已有重点基金同步正在执行，请稍后重试。"},
+            detail={"code": "MARKET_SYNC_IN_PROGRESS", "message": "已有基金市场同步正在执行，请稍后重试。"},
         ) from error
     except ValueError as error:
         logger.error(
-            "funds.start_internal_focused_nav_incremental_job >>> invalid sync configuration, trace_id=%s",
+            "funds.start_internal_market_nav_incremental_job >>> invalid sync configuration, trace_id=%s",
             get_trace_id(),
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"code": "FOCUSED_SYNC_UNAVAILABLE", "message": "净值同步服务尚未完成配置。"},
+            detail={"code": "MARKET_SYNC_UNAVAILABLE", "message": "基金市场同步服务尚未完成配置。"},
         ) from error
     return _to_internal_sync_job_status(snapshot)
 
 
 @router.get(
-    "/sync-jobs/focused-nav-incremental/latest",
+    "/sync-jobs/market-nav-incremental/latest",
     response_model=InternalSyncJobStatus | None,
     dependencies=[Depends(require_service_token)],
 )
-def get_latest_internal_focused_nav_incremental_job() -> InternalSyncJobStatus | None:
-    """读取当前 FastAPI 进程最近一次重点基金同步任务，页面刷新后可继续观察进度。"""
+def get_latest_internal_market_nav_incremental_job() -> InternalSyncJobStatus | None:
+    """读取当前 FastAPI 进程最近一次基金市场同步任务，页面刷新后可继续观察进度。"""
     snapshot = get_sync_job_manager().get_latest_job()
     return _to_internal_sync_job_status(snapshot) if snapshot else None
 

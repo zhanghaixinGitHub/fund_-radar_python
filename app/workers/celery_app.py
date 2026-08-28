@@ -7,16 +7,16 @@ from app.core.config import Settings, get_settings
 
 
 def build_beat_schedule(settings: Settings) -> dict[str, dict[str, object]]:
-    """构建本机重点基金日常增量同步计划；禁用时不注册外部数据调用。"""
-    if not settings.tushare_focused_incremental_enabled:
+    """构建基金市场日常增量同步计划；禁用时不注册外部数据调用。"""
+    if not settings.tushare_market_incremental_enabled:
         return {}
     return {
-        "focused-nav-incremental-weekdays": {
-            "task": "fund_ai.tushare.sync_focused_nav_incremental",
+        "market-nav-incremental-weekdays": {
+            "task": "fund_ai.tushare.sync_market_nav_incremental",
             "schedule": crontab(
                 day_of_week="1-5",
-                hour=settings.tushare_focused_incremental_hour,
-                minute=settings.tushare_focused_incremental_minute,
+                hour=settings.tushare_market_incremental_hour,
+                minute=settings.tushare_market_incremental_minute,
             ),
         }
     }

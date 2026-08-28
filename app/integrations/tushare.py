@@ -17,6 +17,7 @@ import httpx
 
 CATALOG_MARKETS: tuple[str, ...] = ("E", "O")
 CATALOG_STATUSES: tuple[str, ...] = ("L", "D", "I")
+FUND_TS_CODE_SUFFIXES: tuple[str, ...] = ("OF", "SH", "SZ")
 _RETRYABLE_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
@@ -76,7 +77,7 @@ class TushareFundClient:
         read_timeout_seconds: 读取超时秒数。
         max_retries: 仅对传输和服务端可恢复错误的额外重试次数。
         catalog_max_rows_per_query: 单个 `fund_basic` 分片的允许最大记录数。
-        nav_max_rows_per_query: 单只重点基金历史净值请求的允许最大记录数。
+        nav_max_rows_per_query: 单只基金份额历史净值请求的允许最大记录数。
         transport: 仅用于自动化测试的 HTTPX transport。
 
     Raises:
@@ -155,10 +156,10 @@ class TushareFundClient:
         return tuple(by_ts_code[ts_code] for ts_code in sorted(by_ts_code))
 
     def list_fund_basics_by_ts_codes(self, ts_codes: tuple[str, ...]) -> tuple[TushareFundBasic, ...]:
-        """按已知完整 Tushare 代码读取重点基金目录，不触发全市场分片查询。
+        """按已知完整 Tushare 代码读取基金目录，不触发全市场分片查询。
 
         每个代码必须恰好返回自身的一条记录；缺失、重复或代码错配都直接失败，
-        防止把部分重点清单误当作完整清单写入。
+        防止把部分指定清单误当作完整清单写入。
         """
         if not ts_codes:
             raise ValueError("ts_codes must not be empty.")
@@ -180,6 +181,40 @@ class TushareFundClient:
             records.append(item)
         return tuple(records)
 
+    def resolve_fund_basics_by_fund_codes(self, fund_codes: tuple[str, ...]) -> tuple[TushareFundBasic, ...]:
+        """以来源目录验证六位展示代码对应的唯一完整 Tushare 代码。
+
+        该方法仅用于补齐历史数据缺失的来源后缀。它会逐个查询标准后缀，
+        但只接受 API 返回的唯一精确记录，绝不把任一候选后缀当作推断结果写库。
+        """
+        if not fund_codes or len(set(fund_codes)) != len(fund_codes):
+            raise ValueError("fund_codes must be non-empty and unique.")
+        fields = "ts_code,name,management,fund_type,found_date,status,market"
+        records: list[TushareFundBasic] = []
+        for fund_code in fund_codes:
+            matches: list[TushareFundBasic] = []
+            for suffix in FUND_TS_CODE_SUFFIXES:
+                ts_code = f"{fund_code}.{suffix}"
+                rows = self._query("fund_basic", params={"ts_code": ts_code}, fields=fields)
+                if not rows:
+                    continue
+                if len(rows) != 1:
+                    raise TushareIntegrationError(
+                        "fund_basic", f"ts_code={ts_code} expected zero or one record but received {len(rows)}"
+                    )
+                item = _to_fund_basic(rows[0])
+                if item.ts_code != ts_code:
+                    raise TushareIntegrationError(
+                        "fund_basic", f"ts_code={ts_code} returned mismatched code={item.ts_code}"
+                    )
+                matches.append(item)
+            if len(matches) != 1:
+                raise TushareIntegrationError(
+                    "fund_basic", f"fund_code={fund_code} could not be resolved to one exact Tushare code"
+                )
+            records.append(matches[0])
+        return tuple(records)
+
     def list_nav_daily(self, nav_date: date) -> tuple[TushareFundNav, ...]:
         """按净值日期批量读取公募基金净值，不逐基金发起远程请求。"""
         rows = self._query(
@@ -192,7 +227,7 @@ class TushareFundClient:
     def list_nav_history(
         self, ts_code: str, *, start_date: date | None = None, end_date: date | None = None
     ) -> tuple[TushareFundNav, ...]:
-        """读取一只重点基金的历史净值，并拒绝达到受控行数上限的可疑响应。"""
+        """读取一只基金份额的历史净值，并拒绝达到受控行数上限的可疑响应。"""
         if start_date and end_date and start_date > end_date:
             raise ValueError("start_date must not be after end_date.")
         params = {"ts_code": ts_code}
