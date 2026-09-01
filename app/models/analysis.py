@@ -98,7 +98,7 @@ class AnalysisRun(Base):
 
     __tablename__ = "analysis_run"
     __table_args__ = (
-        CheckConstraint("run_type IN ('ROLLING_BACKTEST')", name="ck_analysis_run_type"),
+        CheckConstraint("run_type IN ('ROLLING_BACKTEST', 'FUND_EXPLANATION')", name="ck_analysis_run_type"),
         CheckConstraint("status IN ('QUEUED', 'RUNNING', 'COMPLETED', 'FAILED')", name="ck_analysis_run_status"),
         Index("ix_analysis_run_status_requested", "status", "requested_at"),
         Index("ix_analysis_run_task_id", "task_id"),
@@ -120,6 +120,47 @@ class AnalysisRun(Base):
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AnalysisExplanationSnapshot(Base):
+    """已发布量化评分的 DeepSeek 解释快照；不保存原始提示词或外部原始响应。"""
+
+    __tablename__ = "analysis_explanation_snapshot"
+    __table_args__ = (
+        CheckConstraint("provider = 'DEEPSEEK'", name="ck_analysis_explanation_provider"),
+        UniqueConstraint(
+            "forecast_id", "provider", "provider_model", "prompt_version",
+            name="uq_analysis_explanation_forecast_provider_prompt",
+        ),
+        UniqueConstraint("content_hash", name="uq_analysis_explanation_content_hash"),
+        Index("ix_analysis_explanation_fund_generated", "fund_code", "generated_at", "explanation_id"),
+        Index("ix_analysis_explanation_release_generated", "model_release_id", "generated_at"),
+    )
+
+    explanation_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4)
+    forecast_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("forecast_result.forecast_id"), nullable=False
+    )
+    model_release_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("analysis_model_release.model_release_id"), nullable=False
+    )
+    fund_code: Mapped[str] = mapped_column(String(32), ForeignKey("fund_share_class.fund_code"), nullable=False)
+    as_of_date: Mapped[date] = mapped_column(Date, nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False, default="DEEPSEEK", server_default="DEEPSEEK")
+    provider_model: Mapped[str] = mapped_column(String(128), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider_request_id: Mapped[str | None] = mapped_column(String(128))
+    source_input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    overview: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
+    risk_notice: Mapped[str] = mapped_column(Text, nullable=False)
+    data_gap: Mapped[str] = mapped_column(Text, nullable=False)
+    disclaimer: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt_tokens: Mapped[int | None] = mapped_column()
+    completion_tokens: Mapped[int | None] = mapped_column()
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 class ForecastResult(Base):

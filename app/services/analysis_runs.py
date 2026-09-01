@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -13,11 +15,18 @@ from app.core.logging import get_logger
 from app.db.session import get_engine
 from app.models.analysis import AnalysisRun
 from app.schemas.analysis_run import InternalAnalysisRunStatus, InternalModelReleaseStatus
+from app.services.analysis_explanation import (
+    FundExplanationSourceNotReadyError,
+    generate_fund_explanation,
+    validate_deepseek_explanation_configuration,
+)
 from app.services.baseline_analysis import STOCK_FUND_TYPE, BaselineAnalysisService, RollingBacktestConfig
+from app.services.deepseek_explanation_client import DeepSeekExplanationError
 
 logger = get_logger(__name__)
 
 ROLLING_BACKTEST_RUN_TYPE = "ROLLING_BACKTEST"
+FUND_EXPLANATION_RUN_TYPE = "FUND_EXPLANATION"
 _ANALYSIS_RUN_LOCK_KEY = 7_089_123_103
 _ACTIVE_RUN_STATUSES = ("QUEUED", "RUNNING")
 
@@ -44,11 +53,11 @@ def start_stock_rolling_backtest(
         session.execute(select(func.pg_advisory_xact_lock(_ANALYSIS_RUN_LOCK_KEY)))
         active = session.scalar(
             select(AnalysisRun.analysis_run_id)
-            .where(AnalysisRun.run_type == ROLLING_BACKTEST_RUN_TYPE, AnalysisRun.status.in_(_ACTIVE_RUN_STATUSES))
+            .where(AnalysisRun.status.in_(_ACTIVE_RUN_STATUSES))
             .limit(1)
         )
         if active is not None:
-            raise AnalysisRunInProgressError("a rolling backtest run is already queued or running")
+            raise AnalysisRunInProgressError("an analysis run is already queued or running")
         run = AnalysisRun(
             run_type=ROLLING_BACKTEST_RUN_TYPE,
             status="QUEUED",
@@ -134,6 +143,114 @@ def execute_stock_rolling_backtest(analysis_run_id: UUID) -> dict[str, str | Non
         summary.run_id,
     )
     return result_payload
+
+
+def start_fund_explanation(*, fund_code: str, trace_id: str) -> InternalAnalysisRunStatus:
+    """排队生成一条已发布评分解释；不接受自由提示词、外部数据或任意模型选择。"""
+    normalized_fund_code = _normalize_fund_code(fund_code)
+    provider_model = validate_deepseek_explanation_configuration()
+    engine = get_engine()
+    with Session(engine) as session:
+        session.execute(select(func.pg_advisory_xact_lock(_ANALYSIS_RUN_LOCK_KEY)))
+        active = session.scalar(
+            select(AnalysisRun.analysis_run_id)
+            .where(AnalysisRun.status.in_(_ACTIVE_RUN_STATUSES))
+            .limit(1)
+        )
+        if active is not None:
+            raise AnalysisRunInProgressError("an analysis run is already queued or running")
+        run = AnalysisRun(
+            run_type=FUND_EXPLANATION_RUN_TYPE,
+            status="QUEUED",
+            fund_type=STOCK_FUND_TYPE,
+            config_hash=_explanation_config_hash(normalized_fund_code, provider_model),
+            request_payload={"fund_code": normalized_fund_code, "provider_model": provider_model},
+            trace_id=trace_id,
+        )
+        session.add(run)
+        session.flush()
+        analysis_run_id = run.analysis_run_id
+        session.commit()
+
+    try:
+        from app.workers.tasks import run_controlled_fund_explanation
+
+        task = run_controlled_fund_explanation.delay(str(analysis_run_id))
+    except Exception as error:
+        _mark_failed(analysis_run_id, "fund explanation task could not be queued")
+        logger.exception(
+            "analysis_runs.start_fund_explanation >>> queue submission failed, analysis_run_id=%s",
+            analysis_run_id,
+        )
+        raise RuntimeError("fund explanation task could not be queued") from error
+
+    with Session(engine) as session:
+        run = _required_run(session, analysis_run_id, lock=True)
+        run.task_id = task.id
+        session.commit()
+        session.refresh(run)
+        payload = _to_status(run)
+    logger.info(
+        "analysis_runs.start_fund_explanation >>> queued, analysis_run_id=%s, fund_code=%s, task_id=%s",
+        analysis_run_id,
+        normalized_fund_code,
+        task.id,
+    )
+    return payload
+
+
+def execute_fund_explanation(analysis_run_id: UUID) -> dict[str, str | None]:
+    """由 Celery 执行一条解释任务；任何外部失败只写入稳定错误码。"""
+    engine = get_engine()
+    with Session(engine) as session:
+        run = _required_run(session, analysis_run_id, lock=True)
+        if run.status in {"COMPLETED", "FAILED"}:
+            return _task_payload(run)
+        if run.status != "QUEUED" or run.run_type != FUND_EXPLANATION_RUN_TYPE:
+            raise RuntimeError(f"analysis run has unsupported explanation execution status={run.status}")
+        fund_code = run.request_payload.get("fund_code")
+        if not isinstance(fund_code, str):
+            raise RuntimeError("analysis explanation run fund_code is invalid")
+        run.status = "RUNNING"
+        run.started_at = datetime.now(UTC)
+        session.commit()
+
+    try:
+        generated = generate_fund_explanation(fund_code)
+    except (DeepSeekExplanationError, FundExplanationSourceNotReadyError) as error:
+        _mark_failed(analysis_run_id, str(error))
+        logger.warning(
+            "analysis_runs.execute_fund_explanation >>> controlled failure, analysis_run_id=%s, reason=%s",
+            analysis_run_id,
+            error,
+        )
+        return _task_payload_for_id(analysis_run_id)
+    except Exception:
+        _mark_failed(analysis_run_id, "fund explanation execution failed")
+        logger.exception(
+            "analysis_runs.execute_fund_explanation >>> execution failed, analysis_run_id=%s",
+            analysis_run_id,
+        )
+        raise
+
+    result_payload = {
+        "explanation_id": generated.explanation_id,
+        "provider_model": generated.provider_model,
+        "reused": generated.reused,
+    }
+    with Session(engine) as session:
+        run = _required_run(session, analysis_run_id, lock=True)
+        run.status = "COMPLETED"
+        run.result_payload = result_payload
+        run.finished_at = datetime.now(UTC)
+        session.commit()
+    logger.info(
+        "analysis_runs.execute_fund_explanation >>> completed, analysis_run_id=%s, explanation_id=%s, reused=%s",
+        analysis_run_id,
+        generated.explanation_id,
+        generated.reused,
+    )
+    return _task_payload_for_id(analysis_run_id)
 
 
 def get_analysis_run(analysis_run_id: UUID) -> InternalAnalysisRunStatus:
@@ -231,3 +348,28 @@ def _task_payload(run: AnalysisRun) -> dict[str, str | None]:
             result.get("model_release_status") if isinstance(result.get("model_release_status"), str) else None
         ),
     }
+
+
+def _task_payload_for_id(analysis_run_id: UUID) -> dict[str, str | None]:
+    """读取刚刚持久化的任务结果，保证 Celery 重试也只返回数据库事实。"""
+    with Session(get_engine()) as session:
+        return _task_payload(_required_run(session, analysis_run_id))
+
+
+def _normalize_fund_code(fund_code: str) -> str:
+    """限制解释目标为标准六位基金代码，避免自由文本成为模型输入的一部分。"""
+    normalized = fund_code.strip()
+    if len(normalized) != 6 or not normalized.isdigit():
+        raise ValueError("fund_code must be a six digit code")
+    return normalized
+
+
+def _explanation_config_hash(fund_code: str, provider_model: str) -> str:
+    """为解释任务写入可追溯配置摘要，不保存提示词、密钥或外部请求正文。"""
+    return hashlib.sha256(
+        json.dumps(
+            {"run_type": FUND_EXPLANATION_RUN_TYPE, "fund_code": fund_code, "provider_model": provider_model},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()

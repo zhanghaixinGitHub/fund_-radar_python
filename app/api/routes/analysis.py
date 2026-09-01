@@ -13,6 +13,7 @@ from app.schemas.analysis_run import (
     InternalBenchmarkPointImportRequest,
     InternalBenchmarkRegistrationRequest,
     InternalBenchmarkSeriesStatus,
+    InternalFundExplanationRunRequest,
     InternalModelReleaseStatus,
     InternalModelReleaseTransitionRequest,
     InternalRollingBacktestRequest,
@@ -23,6 +24,7 @@ from app.services.analysis_runs import (
     AnalysisRunNotFoundError,
     activate_model_release,
     get_analysis_run,
+    start_fund_explanation,
     start_stock_rolling_backtest,
     suspend_model_release,
 )
@@ -208,6 +210,30 @@ def start_internal_rolling_backtest(request: InternalRollingBacktestRequest) -> 
         "analysis.start_internal_rolling_backtest >>> analysis run queued, trace_id=%s, analysis_run_id=%s",
         get_trace_id(),
         payload.analysis_run_id,
+    )
+    return payload
+
+
+@router.post(
+    "/runs/fund-explanations",
+    response_model=InternalAnalysisRunStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_service_token)],
+)
+def start_internal_fund_explanation(request: InternalFundExplanationRunRequest) -> InternalAnalysisRunStatus:
+    """排队已发布评分的 DeepSeek 解释；不能通过本接口影响回测、评分或模型发布。"""
+    try:
+        payload = start_fund_explanation(fund_code=request.fund_code, trace_id=get_trace_id())
+    except AnalysisRunInProgressError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except (RuntimeError, ValueError) as error:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+    logger.info(
+        "analysis.start_internal_fund_explanation >>> explanation run queued, "
+        "trace_id=%s, analysis_run_id=%s, fund_code=%s",
+        get_trace_id(),
+        payload.analysis_run_id,
+        request.fund_code,
     )
     return payload
 

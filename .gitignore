@@ -6,3 +6,4 @@ fund_ai.db
 .idea/
 *.iml
 .env
+.env.deepseek

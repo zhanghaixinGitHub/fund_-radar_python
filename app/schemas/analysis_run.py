@@ -22,6 +22,14 @@ class InternalRollingBacktestRequest(BaseModel):
     )
 
 
+class InternalFundExplanationRunRequest(BaseModel):
+    """管理员手动请求已发布评分的 DeepSeek 解释；不接受自由提示词或模型名称。"""
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    fund_code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$", alias="fundCode")
+
+
 class InternalBenchmarkRegistrationRequest(BaseModel):
     """登记一个股票型候选回测基准；不会自动启用来源或模型。"""
 

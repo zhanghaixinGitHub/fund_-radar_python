@@ -60,6 +60,39 @@ def test_analysis_run_endpoint_requires_service_token_and_rejects_browser_origin
     get_settings.cache_clear()
 
 
+def test_fund_explanation_run_endpoint_is_service_only(monkeypatch) -> None:
+    """DeepSeek 解释只能由 Java 管理端排队，浏览器和匿名访问均不能消耗外部模型额度。"""
+    monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
+    get_settings.cache_clear()
+
+    from app.api.routes import analysis
+    from app.main import create_application
+
+    monkeypatch.setattr(
+        analysis,
+        "start_fund_explanation",
+        lambda **_kwargs: _analysis_run_status().model_copy(update={"run_type": "FUND_EXPLANATION"}),
+    )
+
+    with TestClient(create_application()) as client:
+        anonymous = client.post("/internal/v1/analysis/runs/fund-explanations", json={"fund_code": "000001"})
+        browser = client.post(
+            "/internal/v1/analysis/runs/fund-explanations",
+            headers={**_headers(), "Origin": "http://localhost:5173"},
+            json={"fund_code": "000001"},
+        )
+        authorized = client.post(
+            "/internal/v1/analysis/runs/fund-explanations",
+            headers=_headers(),
+            json={"fund_code": "000001"},
+        )
+
+    assert anonymous.status_code == 403
+    assert browser.status_code == 403
+    assert authorized.status_code == 202
+    assert authorized.json()["run_type"] == "FUND_EXPLANATION"
+    get_settings.cache_clear()
+
 def test_signal_change_endpoint_requires_paired_cursor_and_returns_active_scores(monkeypatch) -> None:
     """消费游标必须成对提供；响应仍只传递评分摘要而不是运行模型。"""
     monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")

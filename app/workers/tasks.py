@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from app.core.logging import get_logger
 from app.integrations.tushare import TushareIntegrationError
-from app.services.analysis_runs import execute_stock_rolling_backtest
+from app.services.analysis_runs import execute_fund_explanation, execute_stock_rolling_backtest
 from app.services.baseline_analysis import BaselineAnalysisService, RollingBacktestConfig
 from app.services.stock_feature_snapshot import FeatureSnapshotBuildInProgressError, StockFeatureSnapshotService
 from app.services.tushare_fund_sync import SyncOutcome, TushareFundSyncService
@@ -134,3 +134,11 @@ def run_controlled_stock_rolling_backtest(analysis_run_id: str) -> dict[str, str
     from uuid import UUID
 
     return execute_stock_rolling_backtest(UUID(analysis_run_id))
+
+
+@celery_app.task(name="fund_ai.analysis.run_fund_explanation_controlled")
+def run_controlled_fund_explanation(analysis_run_id: str) -> dict[str, str | None]:
+    """执行由内部控制面排队的 DeepSeek 解释任务，不接受浏览器直连或自由提示词。"""
+    from uuid import UUID
+
+    return execute_fund_explanation(UUID(analysis_run_id))

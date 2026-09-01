@@ -48,6 +48,34 @@ class InternalModelAnalysisSummary(BaseModel):
     suspended_at: datetime | None
 
 
+class InternalFundExplanationEvidence(BaseModel):
+    """解释中单条已验证证据；只允许服务端白名单字段。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    label: str
+    detail: str
+
+
+class InternalFundExplanation(BaseModel):
+    """DeepSeek 生成并持久化的基金解释快照，不能作为交易指令。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    explanation_id: UUID
+    forecast_id: UUID
+    as_of_date: date
+    provider: str
+    provider_model: str
+    prompt_version: str
+    overview: str
+    evidence: tuple[InternalFundExplanationEvidence, ...]
+    risk_notice: str
+    data_gap: str
+    disclaimer: str
+    generated_at: datetime
+
+
 class InternalFundAnalysisSummary(BaseModel):
     """基金详情读取的发布闸门状态；读取不会启动评分、回测或模型发布。"""
 
@@ -59,3 +87,4 @@ class InternalFundAnalysisSummary(BaseModel):
     message: str
     model: InternalModelAnalysisSummary | None
     backtest: InternalBacktestSummary | None
+    explanation: InternalFundExplanation | None = None
