@@ -1,9 +1,11 @@
 """后台任务入口；外部数据同步只能通过已登记的受控服务执行。"""
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 
 from app.core.logging import get_logger
 from app.integrations.tushare import TushareIntegrationError
+from app.services.baseline_analysis import BaselineAnalysisService, RollingBacktestConfig
 from app.services.stock_feature_snapshot import FeatureSnapshotBuildInProgressError, StockFeatureSnapshotService
 from app.services.tushare_fund_sync import SyncOutcome, TushareFundSyncService
 from app.workers.celery_app import celery_app
@@ -106,3 +108,20 @@ def _with_feature_snapshot_payload(outcome: SyncOutcome) -> dict[str, object]:
 def build_stock_feature_snapshots() -> dict[str, str | int | None]:
     """手动构建 M3-G1 特征快照；不注册定时计划、不调用外部来源。"""
     return StockFeatureSnapshotService().build().to_payload()
+
+
+@celery_app.task(name="fund_ai.analysis.score_stock_baseline")
+def score_stock_baseline() -> dict[str, str | int | None]:
+    """对最新股票型特征执行受控评分；没有 ACTIVE 模型时只写 MODEL_REJECTED。"""
+    return BaselineAnalysisService().score_latest_stock_features().to_payload()
+
+
+@celery_app.task(name="fund_ai.analysis.run_stock_rolling_backtest")
+def run_stock_rolling_backtest(
+    *,
+    fee_rate: str = "0.001500",
+    benchmark_id: str | None = None,
+) -> dict[str, str | None]:
+    """运行股票型固定基线回测；缺少已授权基准时结果明确保持不可发布。"""
+    config = RollingBacktestConfig(fee_rate=Decimal(fee_rate), benchmark_id=benchmark_id)
+    return BaselineAnalysisService().run_rolling_backtest(config).to_payload()

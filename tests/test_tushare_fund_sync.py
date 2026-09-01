@@ -538,3 +538,66 @@ def test_market_detail_normalizers_keep_only_the_requested_fund_scope() -> None:
     assert [record.fund_share for record in share_records] == [Decimal("100.5")]
     assert dividend_invalid_count == 1
     assert len(dividend_records) == 1
+
+
+def test_market_dividend_normalizer_merges_tushare_duplicate_when_only_optional_value_is_missing() -> None:
+    """同一分红事件的一空一非空字段应合并为更完整的来源记录。"""
+    common = {
+        "ts_code": "001021.OF",
+        "ann_date": date(2023, 6, 26),
+        "implementation_ann_date": date(2023, 6, 26),
+        "base_date": date(2023, 6, 20),
+        "process_status": "实施",
+        "record_date": date(2023, 6, 28),
+        "ex_date": date(2023, 6, 28),
+        "pay_date": date(2023, 6, 29),
+        "earnings_pay_date": None,
+        "cash_dividend": Decimal("0.0655"),
+        "base_unit": Decimal("595897.1907"),
+        "distributable_earnings": Decimal("1951563299.7"),
+        "earnings_amount": Decimal("390312659.94"),
+        "reinvestment_arrival_date": date(2023, 6, 29),
+        "base_year": "20230628",
+    }
+
+    records, invalid_count = _normalize_market_dividend_records(
+        (
+            TushareFundDividend(**common, nav_ex_date=None),
+            TushareFundDividend(**common, nav_ex_date=date(2023, 6, 28)),
+        ),
+        ts_codes=("001021.OF",),
+    )
+
+    assert invalid_count == 0
+    assert len(records) == 1
+    assert records[0].nav_ex_date == date(2023, 6, 28)
+
+
+def test_market_dividend_normalizer_rejects_conflicting_non_empty_values() -> None:
+    """同一分红事件若同一字段出现不同非空值，必须继续阻断写库。"""
+    common = {
+        "ts_code": "001021.OF",
+        "ann_date": date(2023, 6, 26),
+        "implementation_ann_date": date(2023, 6, 26),
+        "base_date": date(2023, 6, 20),
+        "process_status": "实施",
+        "record_date": date(2023, 6, 28),
+        "ex_date": date(2023, 6, 28),
+        "pay_date": date(2023, 6, 29),
+        "earnings_pay_date": None,
+        "cash_dividend": Decimal("0.0655"),
+        "base_unit": Decimal("595897.1907"),
+        "distributable_earnings": Decimal("1951563299.7"),
+        "earnings_amount": Decimal("390312659.94"),
+        "reinvestment_arrival_date": date(2023, 6, 29),
+        "base_year": "20230628",
+    }
+
+    with pytest.raises(TushareIntegrationError, match="field=nav_ex_date"):
+        _normalize_market_dividend_records(
+            (
+                TushareFundDividend(**common, nav_ex_date=date(2023, 6, 28)),
+                TushareFundDividend(**common, nav_ex_date=date(2023, 6, 29)),
+            ),
+            ts_codes=("001021.OF",),
+        )

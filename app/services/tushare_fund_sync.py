@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from typing import Protocol
 from uuid import UUID
@@ -1234,28 +1234,71 @@ def _normalize_market_dividend_records(
             earnings_amount=dividend.earnings_amount,
             reinvestment_arrival_date=dividend.reinvestment_arrival_date,
             base_year=_normalized_optional_text(dividend.base_year),
-            content_hash=_content_hash(
-                {
-                    **event_identity,
-                    "source_event_key": source_event_key,
-                    "process_status": _normalized_optional_text(dividend.process_status),
-                    "earnings_pay_date": dividend.earnings_pay_date,
-                    "nav_ex_date": dividend.nav_ex_date,
-                    "cash_dividend": dividend.cash_dividend,
-                    "base_unit": dividend.base_unit,
-                    "distributable_earnings": dividend.distributable_earnings,
-                    "earnings_amount": dividend.earnings_amount,
-                    "reinvestment_arrival_date": dividend.reinvestment_arrival_date,
-                    "source_code": TUSHARE_SOURCE_CODE,
-                }
-            ),
+            content_hash="",
         )
+        record = replace(record, content_hash=_fund_dividend_content_hash(record))
         key = (fund_code, source_event_key)
         existing = by_key.get(key)
-        if existing is not None and existing.content_hash != record.content_hash:
-            raise TushareIntegrationError("fund_div", f"conflicting dividend record for fund_code={fund_code}")
+        if existing is not None:
+            record = _merge_market_dividend_records(existing, record)
         by_key[key] = record
     return tuple(by_key[key] for key in sorted(by_key)), invalid_count
+
+
+def _merge_market_dividend_records(
+    existing: FundDividendUpsert, incoming: FundDividendUpsert
+) -> FundDividendUpsert:
+    """合并同一来源事件的空字段补全，拒绝任一非空字段的不同取值。"""
+    merged_fields: dict[str, object] = {}
+    for field_name in (
+        "process_status",
+        "earnings_pay_date",
+        "nav_ex_date",
+        "cash_dividend",
+        "base_unit",
+        "distributable_earnings",
+        "earnings_amount",
+        "reinvestment_arrival_date",
+    ):
+        existing_value = getattr(existing, field_name)
+        incoming_value = getattr(incoming, field_name)
+        if existing_value is None:
+            merged_fields[field_name] = incoming_value
+        elif incoming_value is None or existing_value == incoming_value:
+            merged_fields[field_name] = existing_value
+        else:
+            raise TushareIntegrationError(
+                "fund_div",
+                f"conflicting non-empty dividend field={field_name} for fund_code={existing.fund_code}",
+            )
+    merged = replace(existing, **merged_fields, content_hash="")
+    return replace(merged, content_hash=_fund_dividend_content_hash(merged))
+
+
+def _fund_dividend_content_hash(record: FundDividendUpsert) -> str:
+    """为已规范化的分红事件生成包含全部展示字段的内容摘要。"""
+    return _content_hash(
+        {
+            "fund_code": record.fund_code,
+            "ann_date": record.ann_date,
+            "implementation_ann_date": record.implementation_ann_date,
+            "base_date": record.base_date,
+            "record_date": record.record_date,
+            "ex_date": record.ex_date,
+            "pay_date": record.pay_date,
+            "base_year": record.base_year,
+            "source_event_key": record.source_event_key,
+            "process_status": record.process_status,
+            "earnings_pay_date": record.earnings_pay_date,
+            "nav_ex_date": record.nav_ex_date,
+            "cash_dividend": record.cash_dividend,
+            "base_unit": record.base_unit,
+            "distributable_earnings": record.distributable_earnings,
+            "earnings_amount": record.earnings_amount,
+            "reinvestment_arrival_date": record.reinvestment_arrival_date,
+            "source_code": TUSHARE_SOURCE_CODE,
+        }
+    )
 
 
 def _build_market_nav_incremental_windows(
