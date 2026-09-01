@@ -19,6 +19,11 @@ from app.core.logging import get_logger
 from app.db.session import get_engine
 from app.integrations.tushare import TushareIntegrationError
 from app.repositories.fund_sync import get_latest_successful_sync_time
+from app.services.stock_feature_snapshot import (
+    FeatureSnapshotBuildInProgressError,
+    StockFeatureBuildSummary,
+    StockFeatureSnapshotService,
+)
 from app.services.tushare_fund_sync import (
     MarketDetailSyncResult,
     MarketNavIncrementalInProgressError,
@@ -31,11 +36,21 @@ logger = get_logger(__name__)
 
 MARKET_NAV_INCREMENTAL_JOB_TYPE = "MARKET_NAV_INCREMENTAL"
 MARKET_DETAIL_JOB_TYPE = "MARKET_DETAIL"
+STOCK_FEATURE_SNAPSHOT_JOB_TYPE = "STOCK_FEATURE_SNAPSHOT"
 _ACTIVE_STATUSES = frozenset({"QUEUED", "RUNNING"})
 _SYNC_TYPES_BY_JOB_TYPE = {
     MARKET_NAV_INCREMENTAL_JOB_TYPE: ("MARKET_NAV_INCREMENTAL",),
     MARKET_DETAIL_JOB_TYPE: ("MARKET_DETAIL",),
 }
+
+
+def _feature_completion_message(summary: StockFeatureBuildSummary) -> str:
+    """返回可展示的特征构建结果摘要，不混淆为预测或回测结论。"""
+    return (
+        "特征快照同步完成："
+        f"处理 {summary.attempted_fund_count} 只，新建 {summary.created_count}，"
+        f"更新 {summary.updated_count}，未变化 {summary.skipped_count}"
+    )
 
 
 class SyncJobInProgressError(RuntimeError):
@@ -67,13 +82,19 @@ class SyncJobSnapshot:
 
 
 SyncServiceFactory = Callable[[], TushareFundSyncService]
+FeatureServiceFactory = Callable[[], StockFeatureSnapshotService]
 
 
 class LocalSyncJobManager:
     """单进程、单并发的同步任务管理器，适用于本机部署的手动任务。"""
 
-    def __init__(self, service_factory: SyncServiceFactory = TushareFundSyncService) -> None:
+    def __init__(
+        self,
+        service_factory: SyncServiceFactory = TushareFundSyncService,
+        feature_service_factory: FeatureServiceFactory = StockFeatureSnapshotService,
+    ) -> None:
         self._service_factory = service_factory
+        self._feature_service_factory = feature_service_factory
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fund-sync-job")
         self._jobs: dict[UUID, SyncJobSnapshot] = {}
         self._latest_job_ids: dict[str, UUID] = {}
@@ -151,6 +172,41 @@ class LocalSyncJobManager:
             self._executor.submit(self._run_market_details, snapshot.job_id)
             return snapshot
 
+    def start_stock_feature_snapshots(self) -> SyncJobSnapshot:
+        """创建特征快照手动重试任务；只读取已落库数据，不触发外部拉取。"""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("sync job manager is stopped")
+            if self._active_job_id is not None:
+                active = self._jobs.get(self._active_job_id)
+                if active is not None and active.status in _ACTIVE_STATUSES:
+                    raise SyncJobInProgressError("a local sync job is already running")
+            snapshot = SyncJobSnapshot(
+                job_id=uuid4(),
+                job_type=STOCK_FEATURE_SNAPSHOT_JOB_TYPE,
+                status="QUEUED",
+                requested_nav_date=date.today(),
+                fund_codes=(),
+                progress_current=0,
+                progress_total=0,
+                current_fund_code=None,
+                progress_message="任务已创建，等待读取已同步净值",
+                sync_run_id=None,
+                fetched_count=0,
+                created_count=0,
+                updated_count=0,
+                skipped_count=0,
+                error_code=None,
+                error_message=None,
+                started_at=None,
+                finished_at=None,
+            )
+            self._jobs[snapshot.job_id] = snapshot
+            self._latest_job_ids[STOCK_FEATURE_SNAPSHOT_JOB_TYPE] = snapshot.job_id
+            self._active_job_id = snapshot.job_id
+            self._executor.submit(self._run_stock_feature_snapshots, snapshot.job_id)
+            return snapshot
+
     def get_job(self, job_id: UUID) -> SyncJobSnapshot | None:
         """按任务标识读取最新进度。"""
         with self._lock:
@@ -188,7 +244,27 @@ class LocalSyncJobManager:
                     job_id, current, total, fund_code, message
                 ),
             )
-            self._complete_job(job_id, outcome)
+            self._record_source_outcome(job_id, outcome)
+            try:
+                feature_summary = self._build_feature_snapshots(job_id)
+            except FeatureSnapshotBuildInProgressError:
+                self._mark_feature_stage_partial(job_id, error_code="FEATURE_SYNC_IN_PROGRESS")
+                return
+            except Exception:
+                logger.exception(
+                    "sync_jobs._run_market_nav_incremental >>> feature stage failed after source sync, job_id=%s",
+                    job_id,
+                )
+                self._mark_feature_stage_partial(job_id, error_code="FEATURE_SNAPSHOT_BUILD_FAILED")
+                return
+            if feature_summary.status != "COMPLETED":
+                self._mark_feature_stage_partial(job_id, error_code="FEATURE_SOURCE_NOT_READY")
+                return
+            self._complete_job(
+                job_id,
+                outcome,
+                completion_message=_feature_completion_message(feature_summary),
+            )
             logger.info(
                 "sync_jobs._run_market_nav_incremental >>> completed job_id=%s, sync_run_id=%s, "
                 "fetched=%s, created=%s, updated=%s",
@@ -212,6 +288,39 @@ class LocalSyncJobManager:
         finally:
             if service is not None:
                 service.close()
+            with self._lock:
+                if self._active_job_id == job_id:
+                    self._active_job_id = None
+
+    def _run_stock_feature_snapshots(self, job_id: UUID) -> None:
+        """手动重试特征构建；来源未就绪时不写入、不伪造成功状态。"""
+        self._replace_job(job_id, status="RUNNING", started_at=datetime.now(UTC), progress_message="正在读取已同步净值")
+        try:
+            feature_summary = self._build_feature_snapshots(job_id)
+            if feature_summary.status != "COMPLETED":
+                self._fail_job(
+                    job_id,
+                    "FEATURE_SOURCE_NOT_READY",
+                    "特征来源尚未就绪，请先完成基金市场净值同步后再重试。",
+                )
+                return
+            self._complete_feature_job(job_id, feature_summary)
+            logger.info(
+                "sync_jobs._run_stock_feature_snapshots >>> completed job_id=%s, source_sync_run_id=%s, "
+                "attempted=%s, created=%s, updated=%s, skipped=%s",
+                job_id,
+                feature_summary.source_sync_run_id,
+                feature_summary.attempted_fund_count,
+                feature_summary.created_count,
+                feature_summary.updated_count,
+                feature_summary.skipped_count,
+            )
+        except FeatureSnapshotBuildInProgressError:
+            self._fail_job(job_id, "FEATURE_SYNC_IN_PROGRESS", "特征快照正在由其他任务生成，请稍后重试。")
+        except Exception:
+            logger.exception("sync_jobs._run_stock_feature_snapshots >>> unexpected task failure, job_id=%s", job_id)
+            self._fail_job(job_id, "FEATURE_SNAPSHOT_BUILD_FAILED", "特征快照未完成，请稍后重试。")
+        finally:
             with self._lock:
                 if self._active_job_id == job_id:
                     self._active_job_id = None
@@ -266,14 +375,36 @@ class LocalSyncJobManager:
             progress_message=message,
         )
 
-    def _complete_job(self, job_id: UUID, outcome: SyncOutcome) -> None:
+    def _build_feature_snapshots(self, job_id: UUID) -> StockFeatureBuildSummary:
+        """以当前成功来源为唯一输入构建特征，并将逐基金进度映射到同步快照。"""
+        return self._feature_service_factory().build(
+            progress_reporter=lambda current, total, fund_code, message: self._update_progress(
+                job_id, current, total, fund_code, message
+            )
+        )
+
+    def _record_source_outcome(self, job_id: UUID, outcome: SyncOutcome) -> None:
+        """保留来源同步事实，但在特征阶段完成前不结束父任务。"""
+        self._replace_job(
+            job_id,
+            sync_run_id=outcome.sync_run_id,
+            fetched_count=outcome.fetched_count,
+            created_count=outcome.created_count,
+            updated_count=outcome.updated_count,
+            skipped_count=outcome.skipped_count,
+            progress_message="基金市场净值同步完成，正在生成特征快照",
+        )
+
+    def _complete_job(
+        self, job_id: UUID, outcome: SyncOutcome, *, completion_message: str = "同步完成"
+    ) -> None:
         snapshot = self._required_job(job_id)
         self._replace_job(
             job_id,
             status="SUCCEEDED",
             progress_current=snapshot.progress_total,
             current_fund_code=None,
-            progress_message="同步完成",
+            progress_message=completion_message,
             sync_run_id=outcome.sync_run_id,
             fetched_count=outcome.fetched_count,
             created_count=outcome.created_count,
@@ -281,6 +412,36 @@ class LocalSyncJobManager:
             skipped_count=outcome.skipped_count,
             finished_at=datetime.now(UTC),
         )
+
+    def _complete_feature_job(self, job_id: UUID, summary: StockFeatureBuildSummary) -> None:
+        """完成独立特征任务，统计字段仅表达特征构建结果。"""
+        snapshot = self._required_job(job_id)
+        self._replace_job(
+            job_id,
+            status="SUCCEEDED",
+            progress_current=snapshot.progress_total,
+            current_fund_code=None,
+            progress_message=_feature_completion_message(summary),
+            sync_run_id=summary.source_sync_run_id,
+            fetched_count=summary.attempted_fund_count,
+            created_count=summary.created_count,
+            updated_count=summary.updated_count,
+            skipped_count=summary.skipped_count,
+            finished_at=datetime.now(UTC),
+        )
+
+    def _mark_feature_stage_partial(self, job_id: UUID, *, error_code: str) -> None:
+        """来源同步已成功但特征未能生成时，保留来源统计并提供独立重试入口。"""
+        self._replace_job(
+            job_id,
+            status="PARTIAL_SUCCESS",
+            current_fund_code=None,
+            progress_message="基金市场净值同步完成，特征快照未更新",
+            error_code=error_code,
+            error_message="基金市场净值已同步，但特征快照未生成，可在同步中心单独重试。",
+            finished_at=datetime.now(UTC),
+        )
+        logger.warning("sync_jobs._mark_feature_stage_partial >>> job_id=%s, code=%s", job_id, error_code)
 
     def _fail_job(self, job_id: UUID, error_code: str, error_message: str) -> None:
         self._replace_job(

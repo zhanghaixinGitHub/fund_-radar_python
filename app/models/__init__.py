@@ -1,6 +1,6 @@
 """由 AI 服务维护的 SQLAlchemy 领域模型。"""
 
-from app.models.analysis import BacktestRun, FeatureSnapshot, ForecastResult
+from app.models.analysis import AnalysisModelRelease, BacktestRun, FeatureSnapshot, ForecastResult
 from app.models.event import EventRelation, MarketEvent, NewsItem, NewsSourceReference
 from app.models.fund import (
     FundDividend,
@@ -16,6 +16,7 @@ from app.models.fund import (
 
 __all__ = [
     "BacktestRun",
+    "AnalysisModelRelease",
     "EventRelation",
     "FeatureSnapshot",
     "ForecastResult",

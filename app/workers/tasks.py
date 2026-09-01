@@ -4,7 +4,8 @@ from datetime import UTC, date, datetime
 
 from app.core.logging import get_logger
 from app.integrations.tushare import TushareIntegrationError
-from app.services.tushare_fund_sync import TushareFundSyncService
+from app.services.stock_feature_snapshot import FeatureSnapshotBuildInProgressError, StockFeatureSnapshotService
+from app.services.tushare_fund_sync import SyncOutcome, TushareFundSyncService
 from app.workers.celery_app import celery_app
 
 logger = get_logger(__name__)
@@ -40,12 +41,12 @@ def sync_tushare_catalog() -> dict[str, str | int | None]:
     retry_jitter=True,
     retry_kwargs={"max_retries": 2},
 )
-def sync_tushare_nav_daily(nav_date: str) -> dict[str, str | int | None]:
+def sync_tushare_nav_daily(nav_date: str) -> dict[str, object]:
     """异步同步指定净值日；日期无效时由调用方修正，不做无意义重试。"""
     parsed_nav_date = date.fromisoformat(nav_date)
     service = TushareFundSyncService()
     try:
-        return service.sync_nav_daily(parsed_nav_date).to_payload()
+        return _with_feature_snapshot_payload(service.sync_nav_daily(parsed_nav_date))
     finally:
         service.close()
 
@@ -57,11 +58,51 @@ def sync_tushare_nav_daily(nav_date: str) -> dict[str, str | int | None]:
     retry_jitter=True,
     retry_kwargs={"max_retries": 2},
 )
-def sync_market_nav_incremental(as_of_date: str | None = None) -> dict[str, str | int | None]:
+def sync_market_nav_incremental(as_of_date: str | None = None) -> dict[str, object]:
     """按基金市场中每只启用份额的同源水位补齐净值；不执行全量历史回填。"""
     parsed_as_of_date = date.fromisoformat(as_of_date) if as_of_date else None
     service = TushareFundSyncService()
     try:
-        return service.sync_market_nav_incremental(as_of_date=parsed_as_of_date).to_payload()
+        return _with_feature_snapshot_payload(service.sync_market_nav_incremental(as_of_date=parsed_as_of_date))
     finally:
         service.close()
+
+
+def _with_feature_snapshot_payload(outcome: SyncOutcome) -> dict[str, object]:
+    """在来源净值成功后自动构建特征；特征失败不重复执行外部来源同步。"""
+    payload: dict[str, object] = outcome.to_payload()
+    try:
+        summary = StockFeatureSnapshotService().build()
+    except FeatureSnapshotBuildInProgressError:
+        payload["feature_snapshot"] = {
+            "status": "IN_PROGRESS",
+            "error_code": "FEATURE_SYNC_IN_PROGRESS",
+            "message": "特征快照正在由其他任务生成，来源净值同步结果已保留。",
+        }
+        return payload
+    except Exception:
+        logger.exception(
+            "tasks._with_feature_snapshot_payload >>> feature build failed after source sync, sync_run_id=%s",
+            outcome.sync_run_id,
+        )
+        payload["feature_snapshot"] = {
+            "status": "FAILED",
+            "error_code": "FEATURE_SNAPSHOT_BUILD_FAILED",
+            "message": "来源净值同步成功，但特征快照未完成；请在同步中心手动重试。",
+        }
+        return payload
+    if summary.status != "COMPLETED":
+        payload["feature_snapshot"] = {
+            "status": summary.status,
+            "error_code": "FEATURE_SOURCE_NOT_READY",
+            "message": "来源净值同步成功，但特征来源尚未就绪；请在同步中心手动重试。",
+        }
+        return payload
+    payload["feature_snapshot"] = summary.to_payload()
+    return payload
+
+
+@celery_app.task(name="fund_ai.analysis.build_stock_feature_snapshots")
+def build_stock_feature_snapshots() -> dict[str, str | int | None]:
+    """手动构建 M3-G1 特征快照；不注册定时计划、不调用外部来源。"""
+    return StockFeatureSnapshotService().build().to_payload()

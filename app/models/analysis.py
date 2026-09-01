@@ -6,7 +6,19 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint, Date, DateTime, ForeignKey, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    CheckConstraint,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -41,6 +53,46 @@ class FeatureSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class AnalysisModelRelease(Base):
+    """经过回测准入的模型发布控制面；只有 ACTIVE 发布可供后续评分任务消费。"""
+
+    __tablename__ = "analysis_model_release"
+    __table_args__ = (
+        CheckConstraint(
+            "release_status IN ('DRAFT', 'ELIGIBLE', 'ACTIVE', 'SUSPENDED', 'RETIRED')",
+            name="ck_analysis_model_release_status",
+        ),
+        UniqueConstraint("model_code", "model_version", "fund_type", name="uq_analysis_model_release_version"),
+        Index(
+            "uq_analysis_model_release_active",
+            "model_code",
+            "fund_type",
+            unique=True,
+            postgresql_where=text("release_status = 'ACTIVE'"),
+        ),
+    )
+
+    model_release_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4)
+    model_code: Mapped[str] = mapped_column(String(128), nullable=False)
+    model_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    feature_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    fund_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    backtest_run_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("backtest_run.run_id"), nullable=False
+    )
+    release_status: Mapped[str] = mapped_column(String(16), nullable=False, default="DRAFT", server_default="DRAFT")
+    effective_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    suspended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    release_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    config_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    wide_created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    wide_updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class ForecastResult(Base):
     """可复现的 M3 评分结果；数据不足或不适用时不得产生方向结论。"""
 
@@ -68,8 +120,13 @@ class ForecastResult(Base):
             "directional_probability IS NULL AND confidence IS NULL)",
             name="ck_forecast_result_no_direction_without_score",
         ),
+        CheckConstraint(
+            "score_status <> 'SCORED' OR model_release_id IS NOT NULL",
+            name="ck_forecast_result_scored_release",
+        ),
         UniqueConstraint("fund_code", "as_of_date", "model_version", name="uq_forecast_result_business"),
         UniqueConstraint("result_hash", name="uq_forecast_result_result_hash"),
+        Index("ix_forecast_result_release_scored", "model_release_id", "scored_at", "forecast_id"),
     )
 
     forecast_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -80,6 +137,9 @@ class ForecastResult(Base):
     as_of_date: Mapped[date] = mapped_column(Date, nullable=False)
     model_version: Mapped[str] = mapped_column(String(128), nullable=False)
     feature_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    model_release_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("analysis_model_release.model_release_id")
+    )
     score_status: Mapped[str] = mapped_column(String(32), nullable=False)
     direction: Mapped[str | None] = mapped_column(String(16))
     directional_probability: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))

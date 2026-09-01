@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 from app.core.config import Settings
 from app.integrations.tushare import TushareFundNav
+from app.services.stock_feature_snapshot import StockFeatureBuildSummary
 from app.services.tushare_fund_sync import (
     MarketNavIncrementalPreconditionError,
     SyncOutcome,
@@ -105,12 +106,59 @@ def test_incremental_task_uses_market_scope_and_optional_as_of_date(monkeypatch)
         def close(self) -> None:
             received["closed"] = True
 
+    class StubFeatureService:
+        def build(self) -> StockFeatureBuildSummary:
+            received["feature_build"] = True
+            return StockFeatureBuildSummary(
+                status="COMPLETED",
+                source_code="TUSHARE_PRO_FUND",
+                source_sync_run_id=uuid4(),
+                attempted_fund_count=2,
+                scorable_count=1,
+                data_insufficient_count=1,
+                no_nav_count=0,
+                created_count=1,
+                updated_count=0,
+                skipped_count=1,
+            )
+
     monkeypatch.setattr(tasks, "TushareFundSyncService", StubService)
+    monkeypatch.setattr(tasks, "StockFeatureSnapshotService", StubFeatureService)
     payload = tasks.sync_market_nav_incremental.run("2026-08-27")
 
     assert received == {
         "as_of_date": date(2026, 8, 27),
+        "feature_build": True,
         "closed": True,
     }
     assert payload["sync_type"] == "MARKET_NAV_INCREMENTAL"
     assert payload["requested_nav_date"] == "2026-08-27"
+    assert payload["feature_snapshot"]["status"] == "COMPLETED"
+
+
+def test_feature_failure_after_incremental_sync_does_not_retry_the_source(monkeypatch) -> None:
+    """特征失败应以部分结果返回，避免 Celery 为本地计算重跑外部市场同步。"""
+    outcome = SyncOutcome(
+        sync_run_id=uuid4(),
+        sync_type="MARKET_NAV_INCREMENTAL",
+        requested_nav_date=date(2026, 8, 27),
+        fetched_count=3,
+        created_count=1,
+        updated_count=1,
+        skipped_count=1,
+    )
+
+    class FailingFeatureService:
+        def build(self) -> StockFeatureBuildSummary:
+            raise RuntimeError("local feature persistence failed")
+
+    monkeypatch.setattr(tasks, "StockFeatureSnapshotService", FailingFeatureService)
+    payload = tasks._with_feature_snapshot_payload(outcome)
+
+    assert payload["sync_type"] == "MARKET_NAV_INCREMENTAL"
+    assert payload["fetched_count"] == 3
+    assert payload["feature_snapshot"] == {
+        "status": "FAILED",
+        "error_code": "FEATURE_SNAPSHOT_BUILD_FAILED",
+        "message": "来源净值同步成功，但特征快照未完成；请在同步中心手动重试。",
+    }

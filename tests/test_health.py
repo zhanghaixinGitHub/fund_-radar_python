@@ -549,6 +549,67 @@ def test_internal_market_nav_sync_job_returns_latest_failed_state(monkeypatch) -
     get_settings.cache_clear()
 
 
+def test_internal_feature_snapshot_sync_job_requires_gateway_and_returns_latest(monkeypatch) -> None:
+    """特征重算只能由 Java 服务发起，并返回不含来源原始内容的进度摘要。"""
+    monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
+    get_settings.cache_clear()
+
+    from app.api.routes import funds
+    from app.main import create_application
+    from app.services.sync_jobs import STOCK_FEATURE_SNAPSHOT_JOB_TYPE, SyncJobSnapshot
+
+    job_id = UUID("00000000-0000-0000-0000-000000000306")
+    snapshot = SyncJobSnapshot(
+        job_id=job_id,
+        job_type=STOCK_FEATURE_SNAPSHOT_JOB_TYPE,
+        status="RUNNING",
+        requested_nav_date=datetime(2026, 9, 1, tzinfo=UTC).date(),
+        fund_codes=(),
+        progress_current=3,
+        progress_total=24,
+        current_fund_code="010710.OF",
+        progress_message="正在生成 010710.OF 的特征快照",
+        sync_run_id=UUID("00000000-0000-0000-0000-000000000301"),
+        fetched_count=0,
+        created_count=0,
+        updated_count=0,
+        skipped_count=0,
+        error_code=None,
+        error_message=None,
+        started_at=datetime(2026, 9, 1, tzinfo=UTC),
+        finished_at=None,
+    )
+
+    class StubManager:
+        def start_stock_feature_snapshots(self) -> SyncJobSnapshot:
+            return snapshot
+
+        def get_latest_job(self, job_type: str) -> SyncJobSnapshot | None:
+            return snapshot if job_type == STOCK_FEATURE_SNAPSHOT_JOB_TYPE else None
+
+    monkeypatch.setattr(funds, "get_sync_job_manager", lambda: StubManager())
+    with TestClient(create_application()) as client:
+        browser_response = client.post(
+            "/internal/v1/funds/sync-jobs/stock-feature-snapshots",
+            headers={"X-Service-Token": "test-service-token", "Origin": "http://localhost:5173"},
+        )
+        response = client.post(
+            "/internal/v1/funds/sync-jobs/stock-feature-snapshots",
+            headers={"X-Service-Token": "test-service-token"},
+        )
+        latest_response = client.get(
+            "/internal/v1/funds/sync-jobs/stock-feature-snapshots/latest",
+            headers={"X-Service-Token": "test-service-token"},
+        )
+
+    assert browser_response.status_code == 403
+    assert response.status_code == 202
+    assert response.json()["job_type"] == STOCK_FEATURE_SNAPSHOT_JOB_TYPE
+    assert latest_response.status_code == 200
+    assert latest_response.json()["progress_current"] == 3
+    get_settings.cache_clear()
+
+
 def test_internal_market_detail_sync_job_returns_progress_and_last_success(monkeypatch) -> None:
     """完整资料任务只接受 Java 服务令牌，并返回阶段进度和持久化成功时间。"""
     monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")

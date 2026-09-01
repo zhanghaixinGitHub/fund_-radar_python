@@ -33,6 +33,7 @@ from app.services.fund_catalog_read import (
 from app.services.sync_jobs import (
     MARKET_DETAIL_JOB_TYPE,
     MARKET_NAV_INCREMENTAL_JOB_TYPE,
+    STOCK_FEATURE_SNAPSHOT_JOB_TYPE,
     SyncJobInProgressError,
     SyncJobSnapshot,
     get_sync_job_manager,
@@ -167,6 +168,41 @@ def start_internal_market_detail_job() -> InternalSyncJobStatus:
     return _to_internal_sync_job_status(snapshot)
 
 
+@router.post(
+    "/sync-jobs/stock-feature-snapshots",
+    response_model=InternalSyncJobStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_service_token)],
+)
+def start_internal_stock_feature_snapshot_job() -> InternalSyncJobStatus:
+    """创建手动特征快照任务；只读取已落库净值，不访问外部来源。"""
+    try:
+        logger.info(
+            "funds.start_internal_stock_feature_snapshot_job >>> manual feature snapshot sync requested, trace_id=%s",
+            get_trace_id(),
+        )
+        snapshot = get_sync_job_manager().start_stock_feature_snapshots()
+    except SyncJobInProgressError as error:
+        logger.warning(
+            "funds.start_internal_stock_feature_snapshot_job >>> duplicate sync rejected, trace_id=%s",
+            get_trace_id(),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "FEATURE_SYNC_IN_PROGRESS", "message": "已有同步任务正在执行，请稍后重试。"},
+        ) from error
+    except ValueError as error:
+        logger.error(
+            "funds.start_internal_stock_feature_snapshot_job >>> invalid feature configuration, trace_id=%s",
+            get_trace_id(),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "FEATURE_SYNC_UNAVAILABLE", "message": "特征快照同步服务尚未完成配置。"},
+        ) from error
+    return _to_internal_sync_job_status(snapshot)
+
+
 @router.get(
     "/sync-jobs/market-nav-incremental/latest",
     response_model=InternalSyncJobStatus | None,
@@ -186,6 +222,17 @@ def get_latest_internal_market_nav_incremental_job() -> InternalSyncJobStatus | 
 def get_latest_internal_market_detail_job() -> InternalSyncJobStatus | None:
     """读取当前 Python 进程最近一次完整资料同步任务。"""
     snapshot = get_sync_job_manager().get_latest_job(MARKET_DETAIL_JOB_TYPE)
+    return _to_internal_sync_job_status(snapshot) if snapshot else None
+
+
+@router.get(
+    "/sync-jobs/stock-feature-snapshots/latest",
+    response_model=InternalSyncJobStatus | None,
+    dependencies=[Depends(require_service_token)],
+)
+def get_latest_internal_stock_feature_snapshot_job() -> InternalSyncJobStatus | None:
+    """读取当前 Python 进程最近一次特征快照任务，供同步中心轮询。"""
+    snapshot = get_sync_job_manager().get_latest_job(STOCK_FEATURE_SNAPSHOT_JOB_TYPE)
     return _to_internal_sync_job_status(snapshot) if snapshot else None
 
 
