@@ -31,7 +31,12 @@ from app.repositories.analysis_execution import (
     list_stock_backtest_nav_points,
     upsert_forecast_results,
 )
+from app.repositories.benchmark_series import BenchmarkNavPoint
 from app.repositories.fund_sync import TUSHARE_SOURCE_CODE
+from app.services.benchmark_registry import (
+    get_stock_benchmark_readiness,
+    load_active_stock_benchmark_points,
+)
 from app.services.stock_feature_snapshot import STOCK_FEATURE_VERSION
 
 logger = get_logger(__name__)
@@ -48,6 +53,7 @@ DEFAULT_TEST_DATES = 60
 DEFAULT_ROLLING_STEP_DATES = 60
 DEFAULT_MIN_TEST_SAMPLES = 100
 DEFAULT_MIN_HIT_RATE = Decimal("0.5000")
+DEFAULT_MIN_BENCHMARK_COVERAGE = Decimal("0.9500")
 _PROBABILITY_QUANTUM = Decimal("0.0001")
 _DRAWDOWN_QUANTUM = Decimal("0.000001")
 _ANALYSIS_SCORE_LOCK_KEY = 7_089_123_101
@@ -116,6 +122,7 @@ class RollingBacktestConfig:
     min_test_samples: int = DEFAULT_MIN_TEST_SAMPLES
     min_hit_rate: Decimal = DEFAULT_MIN_HIT_RATE
     benchmark_id: str | None = None
+    min_benchmark_coverage: Decimal = DEFAULT_MIN_BENCHMARK_COVERAGE
 
     def validate(self) -> None:
         """校验时间、费用和门槛，避免构造无法解释的回测。"""
@@ -135,6 +142,8 @@ class RollingBacktestConfig:
             raise ValueError("fee_rate must be in [0, 1)")
         if self.min_hit_rate < 0 or self.min_hit_rate > 1:
             raise ValueError("min_hit_rate must be in [0, 1]")
+        if self.min_benchmark_coverage <= 0 or self.min_benchmark_coverage > 1:
+            raise ValueError("min_benchmark_coverage must be in (0, 1]")
 
     @property
     def config_hash(self) -> str:
@@ -156,6 +165,7 @@ class RollingBacktestConfig:
                 "min_test_samples": self.min_test_samples,
                 "min_hit_rate": str(self.min_hit_rate),
                 "benchmark_id": self.benchmark_id,
+                "min_benchmark_coverage": str(self.min_benchmark_coverage),
             }
         )
 
@@ -166,6 +176,7 @@ class BacktestObservation:
 
     fund_code: str
     signal_date: date
+    future_date: date
     signal_nav: Decimal
     future_nav: Decimal
     previous_return: Decimal
@@ -277,10 +288,15 @@ class BaselineAnalysisService:
         with _analysis_lock(engine, _ANALYSIS_BACKTEST_LOCK_KEY, "stock rolling backtest"):
             with Session(engine) as session:
                 points = list_stock_backtest_nav_points(session, source_code=config.source_code)
-            try:
-                evaluation = evaluate_stock_rolling_backtest(points, config)
-            except ValueError as error:
-                evaluation = _failed_backtest_evaluation(points, str(error))
+            benchmark_readiness = get_stock_benchmark_readiness(config.benchmark_id)
+            if benchmark_readiness is not None:
+                evaluation = _failed_backtest_evaluation(points, benchmark_readiness, config)
+            else:
+                benchmark_points = load_active_stock_benchmark_points(config.benchmark_id)
+                try:
+                    evaluation = evaluate_stock_rolling_backtest(points, config, benchmark_points)
+                except ValueError as error:
+                    evaluation = _failed_backtest_evaluation(points, str(error), config)
 
             with Session(engine) as session:
                 now = datetime.now(UTC)
@@ -497,6 +513,7 @@ def score_stock_feature_snapshot(
 def evaluate_stock_rolling_backtest(
     points: tuple[BacktestNavPoint, ...],
     config: RollingBacktestConfig,
+    benchmark_points: tuple[BenchmarkNavPoint, ...] = (),
 ) -> RollingBacktestEvaluation:
     """使用扩展训练、验证和独立测试窗口评估固定动量基线，不读取未来输入。"""
     config.validate()
@@ -509,6 +526,7 @@ def evaluate_stock_rolling_backtest(
 
     fold_metrics: list[dict[str, float]] = []
     baseline_results: list[dict[str, float]] = []
+    benchmark_values_by_date = {point.nav_date: point.closing_value for point in benchmark_points}
     all_test_samples = 0
     for fold in folds:
         test_observations = tuple(
@@ -519,7 +537,7 @@ def evaluate_stock_rolling_backtest(
         if not test_observations:
             continue
         fold_metrics.append(_evaluate_test_observations(test_observations, config))
-        baseline_results.append(_evaluate_baselines(test_observations))
+        baseline_results.append(_evaluate_baselines(test_observations, benchmark_values_by_date))
         all_test_samples += len(test_observations)
     if not fold_metrics:
         raise ValueError("NO_TEST_OBSERVATIONS_IN_ROLLING_SPLIT")
@@ -580,6 +598,7 @@ def _build_backtest_observations(
                 BacktestObservation(
                     fund_code=fund_code,
                     signal_date=ordered[index].nav_date,
+                    future_date=ordered[index + horizon].nav_date,
                     signal_nav=signal_value,
                     future_nav=future_value,
                     previous_return=previous_return,
@@ -647,13 +666,17 @@ def _evaluate_test_observations(
     }
 
 
-def _evaluate_baselines(observations: tuple[BacktestObservation, ...]) -> dict[str, float]:
-    """以同一独立测试窗口记录长期持有和等额分期投入的对照结果。"""
+def _evaluate_baselines(
+    observations: tuple[BacktestObservation, ...],
+    benchmark_values_by_date: dict[date, Decimal],
+) -> dict[str, float]:
+    """以同一独立测试窗口记录长期持有、定投和同日期业绩基准对照。"""
     by_fund: dict[str, list[BacktestObservation]] = defaultdict(list)
     for observation in observations:
         by_fund[observation.fund_code].append(observation)
     long_hold_returns: list[float] = []
     dca_returns: list[float] = []
+    benchmark_returns: list[float] = []
     for fund_observations in by_fund.values():
         ordered = sorted(fund_observations, key=lambda observation: observation.signal_date)
         start_value = ordered[0].signal_nav
@@ -667,11 +690,17 @@ def _evaluate_baselines(observations: tuple[BacktestObservation, ...]) -> dict[s
             )
             if contribution_returns:
                 dca_returns.append(fmean(contribution_returns))
-    if not long_hold_returns or not dca_returns:
-        return {"long_hold_result": math.nan, "dca_result": math.nan}
+    for observation in observations:
+        benchmark_start = benchmark_values_by_date.get(observation.signal_date)
+        benchmark_end = benchmark_values_by_date.get(observation.future_date)
+        if benchmark_start is not None and benchmark_end is not None and benchmark_start > 0 and benchmark_end > 0:
+            benchmark_returns.append(float(benchmark_end / benchmark_start - Decimal("1")))
     return {
-        "long_hold_result": fmean(long_hold_returns),
-        "dca_result": fmean(dca_returns),
+        "long_hold_result": fmean(long_hold_returns) if long_hold_returns else math.nan,
+        "dca_result": fmean(dca_returns) if dca_returns else math.nan,
+        "benchmark_result": fmean(benchmark_returns) if benchmark_returns else math.nan,
+        "benchmark_sample_count": float(len(benchmark_returns)),
+        "benchmark_expected_sample_count": float(len(observations)),
     }
 
 
@@ -690,13 +719,31 @@ def _aggregate_baseline_sets(
     """合并对照结果；缺少已授权基准时保留明确的不可准入标记。"""
     long_hold_values = [item["long_hold_result"] for item in baseline_sets if math.isfinite(item["long_hold_result"])]
     dca_values = [item["dca_result"] for item in baseline_sets if math.isfinite(item["dca_result"])]
+    benchmark_values = [item["benchmark_result"] for item in baseline_sets if math.isfinite(item["benchmark_result"])]
+    benchmark_sample_count = sum(item["benchmark_sample_count"] for item in baseline_sets)
+    benchmark_expected_sample_count = sum(item["benchmark_expected_sample_count"] for item in baseline_sets)
+    benchmark_coverage = (
+        benchmark_sample_count / benchmark_expected_sample_count if benchmark_expected_sample_count else 0.0
+    )
+    benchmark_status = "NOT_CONFIGURED"
+    if config.benchmark_id is not None:
+        benchmark_status = (
+            "AVAILABLE"
+            if benchmark_values and benchmark_coverage >= float(config.min_benchmark_coverage)
+            else "DATA_INSUFFICIENT"
+        )
     return {
         "benchmark_id": config.benchmark_id,
-        "benchmark_result": None,
-        "benchmark_status": "AVAILABLE" if config.benchmark_id else "NOT_CONFIGURED",
+        "benchmark_result": _json_number(fmean(benchmark_values)) if benchmark_status == "AVAILABLE" else None,
+        "benchmark_status": benchmark_status,
+        "benchmark_coverage": _json_number(benchmark_coverage),
+        "benchmark_sample_count": int(benchmark_sample_count),
+        "benchmark_expected_sample_count": int(benchmark_expected_sample_count),
         "long_hold_result": _json_number(fmean(long_hold_values)) if long_hold_values else None,
         "dca_result": _json_number(fmean(dca_values)) if dca_values else None,
-        "comparison_basis": "独立测试窗口内各基金等权汇总；长期持有和定投均为实验对照，不代表个人持仓。",
+        "comparison_basis": (
+            "独立测试窗口内各基金等权汇总；长期持有、定投和同日期业绩基准均为实验对照，不代表个人持仓。"
+        ),
     }
 
 
@@ -712,22 +759,26 @@ def _publication_failure_reasons(
     strategy_return = _as_float(metrics["annualized_return"])
     long_hold_return = _as_float(baselines["long_hold_result"])
     dca_return = _as_float(baselines["dca_result"])
+    benchmark_return = _as_float(baselines["benchmark_result"])
     if sample_count < config.min_test_samples:
         reasons.append(f"TEST_SAMPLE_SHORTAGE: observed={sample_count}, required={config.min_test_samples}")
-    if baselines["benchmark_status"] != "AVAILABLE":
+    if baselines["benchmark_status"] == "NOT_CONFIGURED":
         reasons.append("BENCHMARK_NOT_CONFIGURED")
+    elif baselines["benchmark_status"] != "AVAILABLE":
+        reasons.append("BENCHMARK_DATA_INSUFFICIENT")
     if hit_rate is None or hit_rate < float(config.min_hit_rate):
         reasons.append(f"HIT_RATE_BELOW_THRESHOLD: required={_decimal_text(config.min_hit_rate)}")
-    if strategy_return is None or long_hold_return is None or dca_return is None:
+    if strategy_return is None or long_hold_return is None or dca_return is None or benchmark_return is None:
         reasons.append("BASELINE_METRICS_UNAVAILABLE")
-    elif strategy_return <= max(long_hold_return, dca_return):
-        reasons.append("STRATEGY_NOT_BETTER_THAN_LOCAL_BASELINES")
+    elif strategy_return <= max(long_hold_return, dca_return, benchmark_return):
+        reasons.append("STRATEGY_NOT_BETTER_THAN_BASELINES")
     return tuple(reasons)
 
 
 def _failed_backtest_evaluation(
     points: tuple[BacktestNavPoint, ...],
     failure_reason: str,
+    config: RollingBacktestConfig,
 ) -> RollingBacktestEvaluation:
     """数据不足等可预期失败也写入可追溯 INELIGIBLE 回测记录。"""
     available_dates = sorted({point.nav_date for point in points})
@@ -753,9 +804,12 @@ def _failed_backtest_evaluation(
             "data_cutoff": window_end.isoformat(),
         },
         baselines={
-            "benchmark_id": None,
+            "benchmark_id": config.benchmark_id,
             "benchmark_result": None,
-            "benchmark_status": "NOT_CONFIGURED",
+            "benchmark_status": "NOT_CONFIGURED" if config.benchmark_id is None else "DATA_INSUFFICIENT",
+            "benchmark_coverage": None,
+            "benchmark_sample_count": 0,
+            "benchmark_expected_sample_count": 0,
             "long_hold_result": None,
             "dca_result": None,
         },

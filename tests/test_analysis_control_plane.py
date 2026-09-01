@@ -191,3 +191,47 @@ def test_fund_analysis_summary_is_service_only_and_hides_unpublished_models(monk
     assert authorized.json()["model"] is None
     assert authorized.json()["backtest"] is None
     get_settings.cache_clear()
+
+
+def test_benchmark_registry_list_is_service_only_and_uses_internal_field_contract(monkeypatch) -> None:
+    """基准摘要只允许 Java 读取，且字段保持供 Java 映射的蛇形内部契约。"""
+    monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
+    get_settings.cache_clear()
+
+    from app.api.routes import analysis
+    from app.main import create_application
+    from app.repositories.benchmark_series import BenchmarkSeriesCoverage
+
+    monkeypatch.setattr(
+        analysis,
+        "list_stock_benchmarks",
+        lambda: (
+            BenchmarkSeriesCoverage(
+                benchmark_code="CSI300.MANUAL.V1",
+                display_name="人工核验基准",
+                fund_type="STOCK",
+                source_code="MANUAL_PUBLISHER_VERIFIED_SAMPLE",
+                source_enabled=False,
+                status="DRAFT",
+                license_reference="已登记依据",
+                point_count=0,
+                first_nav_date=None,
+                last_nav_date=None,
+            ),
+        ),
+    )
+
+    with TestClient(create_application()) as client:
+        anonymous = client.get("/internal/v1/analysis/benchmarks")
+        browser = client.get(
+            "/internal/v1/analysis/benchmarks",
+            headers={**_headers(), "Origin": "http://localhost:5173"},
+        )
+        authorized = client.get("/internal/v1/analysis/benchmarks", headers=_headers())
+
+    assert anonymous.status_code == 403
+    assert browser.status_code == 403
+    assert authorized.status_code == 200
+    assert authorized.json()[0]["benchmark_code"] == "CSI300.MANUAL.V1"
+    assert authorized.json()[0]["source_enabled"] is False
+    get_settings.cache_clear()

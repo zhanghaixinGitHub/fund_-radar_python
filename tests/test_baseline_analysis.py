@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from app.models.analysis import AnalysisModelRelease, FeatureSnapshot
 from app.repositories.analysis_execution import BacktestNavPoint
+from app.repositories.benchmark_series import BenchmarkNavPoint
 from app.services.baseline_analysis import (
     RollingBacktestConfig,
     _build_backtest_observations,
@@ -71,6 +72,21 @@ def _nav_points(*, changed_future_value: Decimal | None = None) -> tuple[Backtes
                 )
             )
     return tuple(records)
+
+
+def _benchmark_points(*, include_every_date: bool = True) -> tuple[BenchmarkNavPoint, ...]:
+    """构造与测试窗口对齐的本地基准序列，不依赖外部行情。"""
+    start = date(2020, 1, 1)
+    return tuple(
+        BenchmarkNavPoint(
+            nav_date=start + timedelta(days=index),
+            closing_value=Decimal("3000") + Decimal(index) * Decimal("0.5"),
+            source_published_at=None,
+            row_hash=f"benchmark-{index}",
+        )
+        for index in range(520)
+        if include_every_date or index % 5 == 0
+    )
 
 
 def test_scorable_feature_without_active_release_is_explicitly_model_rejected() -> None:
@@ -152,3 +168,46 @@ def test_rolling_backtest_uses_strict_time_order_and_blocks_missing_benchmark() 
     assert evaluation.publication_status == "INELIGIBLE"
     assert evaluation.failure_reason is not None
     assert "BENCHMARK_NOT_CONFIGURED" in evaluation.failure_reason
+
+
+def test_rolling_backtest_compares_registered_benchmark_on_matching_dates() -> None:
+    """基准只使用信号日和未来标签日均存在的点，并写入覆盖率与收益。"""
+    evaluation = evaluate_stock_rolling_backtest(
+        _nav_points(),
+        RollingBacktestConfig(
+            benchmark_id="CSI300.MANUAL.V1",
+            min_train_dates=180,
+            validation_dates=60,
+            test_dates=60,
+            rolling_step_dates=60,
+            min_test_samples=10,
+        ),
+        _benchmark_points(),
+    )
+
+    assert evaluation.baselines["benchmark_status"] == "AVAILABLE"
+    assert evaluation.baselines["benchmark_coverage"] == 1.0
+    assert evaluation.baselines["benchmark_result"] is not None
+    assert evaluation.failure_reason is None or "BENCHMARK" not in evaluation.failure_reason
+
+
+def test_rolling_backtest_blocks_incomplete_benchmark_coverage() -> None:
+    """基准日期覆盖不足时不得以任意少量样本冒充可发布基准。"""
+    evaluation = evaluate_stock_rolling_backtest(
+        _nav_points(),
+        RollingBacktestConfig(
+            benchmark_id="CSI300.MANUAL.V1",
+            min_train_dates=180,
+            validation_dates=60,
+            test_dates=60,
+            rolling_step_dates=60,
+            min_test_samples=10,
+        ),
+        _benchmark_points(include_every_date=False),
+    )
+
+    assert evaluation.baselines["benchmark_status"] == "DATA_INSUFFICIENT"
+    assert evaluation.baselines["benchmark_result"] is None
+    assert evaluation.publication_status == "INELIGIBLE"
+    assert evaluation.failure_reason is not None
+    assert "BENCHMARK_DATA_INSUFFICIENT" in evaluation.failure_reason

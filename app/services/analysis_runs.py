@@ -30,9 +30,14 @@ class AnalysisRunNotFoundError(LookupError):
     """请求的持久分析任务不存在时抛出。"""
 
 
-def start_stock_rolling_backtest(*, fee_rate: Decimal, trace_id: str) -> InternalAnalysisRunStatus:
-    """创建并提交股票型滚动回测；不补充未授权的基准数据。"""
-    config = RollingBacktestConfig(fee_rate=fee_rate)
+def start_stock_rolling_backtest(
+    *,
+    fee_rate: Decimal,
+    benchmark_code: str | None,
+    trace_id: str,
+) -> InternalAnalysisRunStatus:
+    """创建并提交股票型滚动回测；基准不可用时任务保留可追溯失败结果。"""
+    config = RollingBacktestConfig(fee_rate=fee_rate, benchmark_id=benchmark_code)
     config.validate()
     engine = get_engine()
     with Session(engine) as session:
@@ -49,7 +54,7 @@ def start_stock_rolling_backtest(*, fee_rate: Decimal, trace_id: str) -> Interna
             status="QUEUED",
             fund_type=STOCK_FUND_TYPE,
             config_hash=config.config_hash,
-            request_payload={"fee_rate": str(config.fee_rate), "benchmark_id": None},
+            request_payload={"fee_rate": str(config.fee_rate), "benchmark_id": config.benchmark_id},
             trace_id=trace_id,
         )
         session.add(run)
@@ -97,10 +102,15 @@ def execute_stock_rolling_backtest(analysis_run_id: UUID) -> dict[str, str | Non
         run.status = "RUNNING"
         run.started_at = datetime.now(UTC)
         fee_rate = Decimal(str(run.request_payload["fee_rate"]))
+        benchmark_id = run.request_payload.get("benchmark_id")
+        if benchmark_id is not None and not isinstance(benchmark_id, str):
+            raise RuntimeError("analysis run benchmark_id is invalid")
         session.commit()
 
     try:
-        summary = BaselineAnalysisService().run_rolling_backtest(RollingBacktestConfig(fee_rate=fee_rate))
+        summary = BaselineAnalysisService().run_rolling_backtest(
+            RollingBacktestConfig(fee_rate=fee_rate, benchmark_id=benchmark_id)
+        )
     except Exception:
         _mark_failed(analysis_run_id, "rolling backtest execution failed")
         logger.exception(
