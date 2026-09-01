@@ -14,6 +14,8 @@ from app.schemas.fund import (
     InternalFundDetail,
     InternalFundNavHistory,
     InternalFundPage,
+    InternalFundSameTypeComparison,
+    InternalFundShareHistory,
     InternalFundSummary,
     InternalFundWatchlistDetail,
     InternalSyncJobLastSuccess,
@@ -22,6 +24,8 @@ from app.schemas.fund import (
 from app.services.fund_catalog_read import (
     get_fund,
     get_fund_nav_history,
+    get_fund_same_type_comparison,
+    get_fund_share_history,
     get_fund_watchlist_detail,
     get_funds_by_codes,
     list_funds,
@@ -305,6 +309,68 @@ async def get_internal_fund_nav_history(
             detail={"code": "FUND_NOT_FOUND", "message": "Fund is not available."},
         )
     return history
+
+
+@router.get(
+    "/{fund_code}/share-history",
+    response_model=InternalFundShareHistory,
+    dependencies=[Depends(require_service_token)],
+)
+async def get_internal_fund_share_history(
+    fund_code: Annotated[str, Path(min_length=6, max_length=6, pattern=r"^\d{6}$")],
+    start_date: Annotated[date, Query(alias="startDate")],
+    end_date: Annotated[date, Query(alias="endDate")],
+) -> InternalFundShareHistory:
+    """返回已落库的份额规模历史；调用方必须先完成当前用户关注关系校验。"""
+    if start_date > end_date:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="startDate must not be after endDate",
+        )
+    if (end_date - start_date).days > 5_000:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="requested share history window is too large",
+        )
+    logger.info(
+        "funds.get_internal_fund_share_history >>> persisted share history requested, "
+        "trace_id=%s, fund_code=%s, start=%s, end=%s",
+        get_trace_id(),
+        fund_code,
+        start_date,
+        end_date,
+    )
+    history = get_fund_share_history(fund_code, start_date, end_date)
+    if history is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "FUND_NOT_FOUND", "message": "Fund is not available."},
+        )
+    return history
+
+
+@router.get(
+    "/{fund_code}/same-type-comparison",
+    response_model=InternalFundSameTypeComparison,
+    dependencies=[Depends(require_service_token)],
+)
+async def get_internal_fund_same_type_comparison(
+    fund_code: Annotated[str, Path(min_length=6, max_length=6, pattern=r"^\d{6}$")],
+) -> InternalFundSameTypeComparison:
+    """返回受控当前基金市场样本内的同类比较，不触发同步或全市场检索。"""
+    logger.info(
+        "funds.get_internal_fund_same_type_comparison >>> current-market comparison requested, "
+        "trace_id=%s, fund_code=%s",
+        get_trace_id(),
+        fund_code,
+    )
+    comparison = get_fund_same_type_comparison(fund_code)
+    if comparison is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "FUND_NOT_FOUND", "message": "Fund is not available."},
+        )
+    return comparison
 
 
 @router.get("/{fund_code}", response_model=InternalFundDetail, dependencies=[Depends(require_service_token)])

@@ -278,6 +278,136 @@ def test_internal_fund_nav_history_requires_service_token_and_returns_snapshot(m
     monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
     get_settings.cache_clear()
 
+    from app.api.routes import funds
+    from app.main import create_application
+    from app.schemas.fund import InternalFundNavHistory, InternalFundNavPoint
+
+    monkeypatch.setattr(
+        funds,
+        "get_fund_nav_history",
+        lambda _fund_code, _start_date, _end_date: InternalFundNavHistory(
+            fund_code="002112",
+            items=(
+                InternalFundNavPoint(
+                    nav_date=datetime(2026, 8, 25, tzinfo=UTC).date(),
+                    unit_nav=Decimal("4.8936"),
+                    accumulated_nav=Decimal("5.0416"),
+                ),
+            ),
+        ),
+    )
+
+    with TestClient(create_application()) as client:
+        unauthenticated = client.get(
+            "/internal/v1/funds/002112/nav-history?startDate=2026-08-01&endDate=2026-08-25"
+        )
+        response = client.get(
+            "/internal/v1/funds/002112/nav-history?startDate=2026-08-01&endDate=2026-08-25",
+            headers={"X-Service-Token": "test-service-token"},
+        )
+
+    assert unauthenticated.status_code == 403
+    assert response.status_code == 200
+    assert response.json() == {
+        "fund_code": "002112",
+        "items": [{"nav_date": "2026-08-25", "unit_nav": "4.8936", "accumulated_nav": "5.0416"}],
+    }
+    get_settings.cache_clear()
+
+
+def test_internal_fund_share_history_requires_service_token_and_returns_status(monkeypatch) -> None:
+    """份额规模历史仅对 Java 服务身份开放，且未同步状态必须如实返回。"""
+    monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
+    get_settings.cache_clear()
+
+    from app.api.routes import funds
+    from app.main import create_application
+    from app.schemas.fund import InternalFundShareHistory, InternalFundShareSnapshot
+
+    monkeypatch.setattr(
+        funds,
+        "get_fund_share_history",
+        lambda _fund_code, _start_date, _end_date: InternalFundShareHistory(
+            fund_code="002112",
+            status="SYNCED",
+            items=(
+                InternalFundShareSnapshot(
+                    trade_date=date(2026, 8, 25),
+                    fund_share=Decimal("123.4567"),
+                    data_source="TUSHARE_PRO_FUND",
+                ),
+            ),
+        ),
+    )
+
+    with TestClient(create_application()) as client:
+        unauthenticated = client.get(
+            "/internal/v1/funds/002112/share-history?startDate=2026-08-01&endDate=2026-08-25"
+        )
+        response = client.get(
+            "/internal/v1/funds/002112/share-history?startDate=2026-08-01&endDate=2026-08-25",
+            headers={"X-Service-Token": "test-service-token"},
+        )
+
+    assert unauthenticated.status_code == 403
+    assert response.status_code == 200
+    assert response.json() == {
+        "fund_code": "002112",
+        "status": "SYNCED",
+        "items": [
+            {"trade_date": "2026-08-25", "fund_share": "123.4567", "data_source": "TUSHARE_PRO_FUND"}
+        ],
+    }
+    get_settings.cache_clear()
+
+
+def test_internal_same_type_comparison_requires_service_token_and_keeps_scope(monkeypatch) -> None:
+    """同类型比较使用受控样本范围，接口不向浏览器直接开放。"""
+    monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
+    get_settings.cache_clear()
+
+    from app.api.routes import funds
+    from app.main import create_application
+    from app.schemas.fund import InternalFundSameTypeComparison, InternalFundSameTypeComparisonItem
+
+    monkeypatch.setattr(
+        funds,
+        "get_fund_same_type_comparison",
+        lambda _fund_code: InternalFundSameTypeComparison(
+            fund_code="002112",
+            fund_type="MIXED",
+            scope="CURRENT_MARKET_ACTIVE_TUSHARE_PRO_FUND",
+            status="SYNCED",
+            as_of_date=date(2026, 8, 25),
+            target_rank=2,
+            comparable_count=3,
+            items=(
+                InternalFundSameTypeComparisonItem(
+                    rank=1,
+                    fund_code="010710",
+                    fund_name="样本基金",
+                    fund_type="MIXED",
+                    as_of_date=date(2026, 8, 25),
+                    month_change_rate=Decimal("0.0123"),
+                    data_source="TUSHARE_PRO_FUND",
+                ),
+            ),
+        ),
+    )
+
+    with TestClient(create_application()) as client:
+        unauthenticated = client.get("/internal/v1/funds/002112/same-type-comparison")
+        response = client.get(
+            "/internal/v1/funds/002112/same-type-comparison",
+            headers={"X-Service-Token": "test-service-token"},
+        )
+
+    assert unauthenticated.status_code == 403
+    assert response.status_code == 200
+    assert response.json()["scope"] == "CURRENT_MARKET_ACTIVE_TUSHARE_PRO_FUND"
+    assert response.json()["target_rank"] == 2
+    get_settings.cache_clear()
+
 
 def test_internal_market_nav_sync_job_requires_service_token_and_returns_progress(monkeypatch) -> None:
     """页面只能经 Java 创建任务，并能轮询安全的进度摘要。"""
@@ -489,42 +619,6 @@ def test_internal_market_detail_sync_job_returns_progress_and_last_success(monke
         {"job_type": "MARKET_NAV_INCREMENTAL", "last_successful_at": None},
         {"job_type": "MARKET_DETAIL", "last_successful_at": "2026-08-27T12:00:00Z"},
     ]
-    get_settings.cache_clear()
-
-    from app.api.routes import funds
-    from app.main import create_application
-    from app.schemas.fund import InternalFundNavHistory, InternalFundNavPoint
-
-    monkeypatch.setattr(
-        funds,
-        "get_fund_nav_history",
-        lambda _fund_code, _start_date, _end_date: InternalFundNavHistory(
-            fund_code="002112",
-            items=(
-                InternalFundNavPoint(
-                    nav_date=datetime(2026, 8, 25, tzinfo=UTC).date(),
-                    unit_nav=Decimal("4.8936"),
-                    accumulated_nav=Decimal("5.0416"),
-                ),
-            ),
-        ),
-    )
-
-    with TestClient(create_application()) as client:
-        unauthenticated = client.get(
-            "/internal/v1/funds/002112/nav-history?startDate=2026-08-01&endDate=2026-08-25"
-        )
-        response = client.get(
-            "/internal/v1/funds/002112/nav-history?startDate=2026-08-01&endDate=2026-08-25",
-            headers={"X-Service-Token": "test-service-token"},
-        )
-
-    assert unauthenticated.status_code == 403
-    assert response.status_code == 200
-    assert response.json() == {
-        "fund_code": "002112",
-        "items": [{"nav_date": "2026-08-25", "unit_nav": "4.8936", "accumulated_nav": "5.0416"}],
-    }
     get_settings.cache_clear()
 
 def test_internal_source_diagnostics_requires_service_token(monkeypatch) -> None:

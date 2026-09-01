@@ -143,6 +143,45 @@ class InternalFundNavHistory(BaseModel):
     items: tuple[InternalFundNavPoint, ...]
 
 
+class InternalFundShareHistory(BaseModel):
+    """关注后可读取的份额规模历史；状态用于阻止未同步数据被误作完整趋势。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    fund_code: str
+    status: str
+    items: tuple[InternalFundShareSnapshot, ...]
+
+
+class InternalFundSameTypeComparisonItem(BaseModel):
+    """当前基金市场内、同基金类型的一条事实比较项。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    rank: int
+    fund_code: str
+    fund_name: str
+    fund_type: str
+    as_of_date: date
+    month_change_rate: Decimal
+    data_source: str
+
+
+class InternalFundSameTypeComparison(BaseModel):
+    """受控样本的同类型比较；不得解释为全市场排名。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    fund_code: str
+    fund_type: str
+    scope: str
+    status: str
+    as_of_date: date | None = None
+    target_rank: int | None = None
+    comparable_count: int = 0
+    items: tuple[InternalFundSameTypeComparisonItem, ...] = ()
+
+
 class InternalSyncJobStatus(BaseModel):
     """同步中心任务的安全状态摘要，不返回 Token 或外部原始响应。"""
 

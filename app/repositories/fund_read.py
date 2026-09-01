@@ -91,6 +91,31 @@ class FundNavHistorySnapshot:
 
 
 @dataclass(frozen=True)
+class FundShareHistorySnapshot:
+    """一条按来源稳定去重后的基金份额规模历史投影。"""
+
+    trade_date: date
+    fund_share: Decimal
+    source_code: str
+
+
+@dataclass(frozen=True)
+class FundSameTypeComparisonSnapshot:
+    """同类比较的一只基金摘要及其最新净值来源。"""
+
+    summary: FundSummarySnapshot
+    data_source: str | None
+
+
+@dataclass(frozen=True)
+class FundSameTypeComparisonResult:
+    """受控当前基金市场范围内的同类型比较原始结果。"""
+
+    target: FundSummarySnapshot
+    items: tuple[FundSameTypeComparisonSnapshot, ...]
+
+
+@dataclass(frozen=True)
 class FundSummaryPage:
     """基金目录分页查询的数据库结果，包含与筛选条件一致的总记录数。"""
 
@@ -127,6 +152,7 @@ _FUND_TYPE_SORT_ORDER = {
     "OTHER": 80,
 }
 _PERFORMANCE_LOOKBACK_DAYS = 45
+_CURRENT_MARKET_SOURCE_CODE = "TUSHARE_PRO_FUND"
 
 
 def list_fund_summaries(
@@ -389,6 +415,84 @@ def list_fund_nav_history(
     )
 
 
+def list_fund_share_history(
+    session: Session, fund_code: str, start_date: date, end_date: date
+) -> tuple[FundShareHistorySnapshot, ...]:
+    """按日期正序读取份额规模历史；同日多来源按来源代码稳定取一条。"""
+    ranked_shares = (
+        select(
+            FundShareSnapshot.trade_date.label("trade_date"),
+            FundShareSnapshot.fund_share.label("fund_share"),
+            SourceRegistry.source_code.label("source_code"),
+            func.row_number()
+            .over(partition_by=FundShareSnapshot.trade_date, order_by=SourceRegistry.source_code.asc())
+            .label("source_rank"),
+        )
+        .select_from(FundShareSnapshot)
+        .join(SourceRegistry, SourceRegistry.source_id == FundShareSnapshot.source_id)
+        .where(
+            FundShareSnapshot.fund_code == fund_code,
+            FundShareSnapshot.trade_date >= start_date,
+            FundShareSnapshot.trade_date <= end_date,
+        )
+        .subquery()
+    )
+    rows = session.execute(
+        select(ranked_shares.c.trade_date, ranked_shares.c.fund_share, ranked_shares.c.source_code)
+        .where(ranked_shares.c.source_rank == 1)
+        .order_by(ranked_shares.c.trade_date.asc())
+    ).all()
+    return tuple(
+        FundShareHistorySnapshot(trade_date=trade_date, fund_share=fund_share, source_code=source_code)
+        for trade_date, fund_share, source_code in rows
+    )
+
+
+def get_current_market_same_type_comparison(
+    session: Session, fund_code: str
+) -> FundSameTypeComparisonResult | None:
+    """读取受控当前市场样本的同类型比较，不把结果包装成全市场排名。"""
+    target_rows = list_fund_summaries_by_codes(session, (fund_code,))
+    if not target_rows:
+        return None
+    target = target_rows[0]
+    if target.fund.status != "ACTIVE" or target.fund.source_code != _CURRENT_MARKET_SOURCE_CODE:
+        return FundSameTypeComparisonResult(target=target, items=())
+
+    latest_nav = _latest_nav_date_subquery()
+    rows = tuple(
+        session.execute(
+            select(FundShareClass, latest_nav.c.latest_nav_date)
+            .outerjoin(latest_nav, latest_nav.c.fund_code == FundShareClass.fund_code)
+            .where(
+                FundShareClass.fund_type == target.fund.fund_type,
+                FundShareClass.status == "ACTIVE",
+                FundShareClass.source_code == _CURRENT_MARKET_SOURCE_CODE,
+            )
+            .order_by(FundShareClass.fund_code.asc())
+        ).all()
+    )
+    summaries = _attach_performance(session, rows)
+    source_by_code = _list_latest_nav_sources(
+        session,
+        {
+            summary.fund.fund_code: summary.nav_date
+            for summary in summaries
+            if summary.nav_date is not None
+        },
+    )
+    return FundSameTypeComparisonResult(
+        target=target,
+        items=tuple(
+            FundSameTypeComparisonSnapshot(
+                summary=summary,
+                data_source=source_by_code.get(summary.fund.fund_code),
+            )
+            for summary in summaries
+        ),
+    )
+
+
 def _latest_nav_date_subquery():
     """返回每只基金的最近净值日期；净值数值另按来源确定性规则读取。"""
     return (
@@ -475,6 +579,36 @@ def _list_recent_nav_points(
             )
         )
     return {fund_code: tuple(points) for fund_code, points in points_by_code.items()}
+
+
+def _list_latest_nav_sources(session: Session, latest_date_by_code: dict[str, date]) -> dict[str, str]:
+    """批量读取指定最新净值行的稳定来源代码，避免同类比较按行查询。"""
+    if not latest_date_by_code:
+        return {}
+    conditions = tuple(
+        and_(NavDaily.fund_code == fund_code, NavDaily.nav_date == nav_date)
+        for fund_code, nav_date in latest_date_by_code.items()
+    )
+    ranked_sources = (
+        select(
+            NavDaily.fund_code.label("fund_code"),
+            SourceRegistry.source_code.label("source_code"),
+            func.row_number()
+            .over(partition_by=NavDaily.fund_code, order_by=SourceRegistry.source_code.asc())
+            .label("source_rank"),
+        )
+        .select_from(NavDaily)
+        .join(SourceRegistry, SourceRegistry.source_id == NavDaily.source_id)
+        .where(or_(*conditions))
+        .subquery()
+    )
+    return {
+        fund_code: source_code
+        for fund_code, source_code in session.execute(
+            select(ranked_sources.c.fund_code, ranked_sources.c.source_code)
+            .where(ranked_sources.c.source_rank == 1)
+        ).all()
+    }
 
 
 def _build_performance(points: tuple[FundNavHistorySnapshot, ...]) -> FundPerformanceSnapshot:

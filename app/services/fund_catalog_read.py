@@ -2,17 +2,20 @@
 
 from datetime import date
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_engine
-from app.models.fund import FundShareClass
+from app.models.fund import FundShareClass, SourceSyncRun
 from app.repositories.fund_read import (
     FundDetailSnapshot,
     FundProfileSnapshot,
     FundSummarySnapshot,
+    get_current_market_same_type_comparison,
     get_fund_profile_snapshot,
     get_fund_summary,
     list_fund_nav_history,
+    list_fund_share_history,
     list_fund_summaries,
     list_fund_summaries_by_codes,
 )
@@ -26,6 +29,9 @@ from app.schemas.fund import (
     InternalFundNavHistory,
     InternalFundNavPoint,
     InternalFundPage,
+    InternalFundSameTypeComparison,
+    InternalFundSameTypeComparisonItem,
+    InternalFundShareHistory,
     InternalFundShareSnapshot,
     InternalFundSummary,
     InternalFundWatchlistDetail,
@@ -155,6 +161,106 @@ def get_fund_nav_history(fund_code: str, start_date: date, end_date: date) -> In
                 accumulated_nav=row.accumulated_nav,
             )
             for row in rows
+        ),
+    )
+
+
+def get_fund_share_history(fund_code: str, start_date: date, end_date: date) -> InternalFundShareHistory | None:
+    """读取关注后份额规模历史；只读本地快照且不触发完整资料同步。"""
+    with Session(get_engine()) as session:
+        fund = session.get(FundShareClass, fund_code)
+        if fund is None:
+            return None
+        synced = session.scalar(
+            select(SourceSyncRun.sync_run_id)
+            .where(
+                SourceSyncRun.status == "SUCCEEDED",
+                SourceSyncRun.sync_type == "MARKET_DETAIL_SHARE",
+            )
+            .limit(1)
+        ) is not None
+        rows = list_fund_share_history(session, fund_code, start_date, end_date) if synced else ()
+    return InternalFundShareHistory(
+        fund_code=fund_code,
+        status="SYNCED" if synced else "NOT_SYNCED",
+        items=tuple(
+            InternalFundShareSnapshot(
+                trade_date=row.trade_date,
+                fund_share=row.fund_share,
+                data_source=row.source_code,
+            )
+            for row in rows
+        ),
+    )
+
+
+def get_fund_same_type_comparison(fund_code: str) -> InternalFundSameTypeComparison | None:
+    """返回当前基金市场范围内同类型、同净值日期的一月涨跌事实比较。"""
+    with Session(get_engine()) as session:
+        result = get_current_market_same_type_comparison(session, fund_code)
+    if result is None:
+        return None
+    target = result.target
+    if target.fund.status != "ACTIVE" or target.fund.source_code != "TUSHARE_PRO_FUND":
+        return InternalFundSameTypeComparison(
+            fund_code=fund_code,
+            fund_type=target.fund.fund_type,
+            scope="CURRENT_MARKET_ACTIVE_TUSHARE_PRO_FUND",
+            status="OUT_OF_SCOPE",
+            as_of_date=target.nav_date,
+        )
+    if target.nav_date is None or target.performance.month_change_rate is None:
+        return InternalFundSameTypeComparison(
+            fund_code=fund_code,
+            fund_type=target.fund.fund_type,
+            scope="CURRENT_MARKET_ACTIVE_TUSHARE_PRO_FUND",
+            status="DATA_INSUFFICIENT",
+            as_of_date=target.nav_date,
+        )
+    comparable = sorted(
+        (
+            item for item in result.items
+            if item.summary.nav_date == target.nav_date
+            and item.summary.performance.month_change_rate is not None
+            and item.data_source is not None
+        ),
+        key=lambda item: (-item.summary.performance.month_change_rate, item.summary.fund.fund_code),
+    )
+    target_rank = next(
+        (
+            index
+            for index, item in enumerate(comparable, start=1)
+            if item.summary.fund.fund_code == fund_code
+        ),
+        None,
+    )
+    if target_rank is None:
+        return InternalFundSameTypeComparison(
+            fund_code=fund_code,
+            fund_type=target.fund.fund_type,
+            scope="CURRENT_MARKET_ACTIVE_TUSHARE_PRO_FUND",
+            status="DATA_INSUFFICIENT",
+            as_of_date=target.nav_date,
+        )
+    return InternalFundSameTypeComparison(
+        fund_code=fund_code,
+        fund_type=target.fund.fund_type,
+        scope="CURRENT_MARKET_ACTIVE_TUSHARE_PRO_FUND",
+        status="SYNCED",
+        as_of_date=target.nav_date,
+        target_rank=target_rank,
+        comparable_count=len(comparable),
+        items=tuple(
+            InternalFundSameTypeComparisonItem(
+                rank=index,
+                fund_code=item.summary.fund.fund_code,
+                fund_name=item.summary.fund.fund_name,
+                fund_type=item.summary.fund.fund_type,
+                as_of_date=item.summary.nav_date,
+                month_change_rate=item.summary.performance.month_change_rate,
+                data_source=item.data_source,
+            )
+            for index, item in enumerate(comparable, start=1)
         ),
     )
 
