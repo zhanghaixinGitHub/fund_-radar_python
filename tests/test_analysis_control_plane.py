@@ -6,6 +6,7 @@ from uuid import UUID
 
 from app.core.config import get_settings
 from app.schemas.analysis_run import InternalAnalysisRunStatus, InternalModelReleaseStatus
+from app.schemas.analysis_summary import InternalFundAnalysisSummary
 from app.schemas.signal import InternalSignalChange, InternalSignalChangePage
 from fastapi.testclient import TestClient
 
@@ -151,4 +152,42 @@ def test_model_release_transition_requires_service_token(monkeypatch) -> None:
     assert anonymous.status_code == 403
     assert authorized.status_code == 200
     assert authorized.json()["release_status"] == "ACTIVE"
+    get_settings.cache_clear()
+
+
+def test_fund_analysis_summary_is_service_only_and_hides_unpublished_models(monkeypatch) -> None:
+    """基金摘要仅由 Java 读取，未发布模型只返回明确状态而非候选版本或回测详情。"""
+    monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token")
+    get_settings.cache_clear()
+
+    from app.api.routes import analysis
+    from app.main import create_application
+
+    monkeypatch.setattr(
+        analysis,
+        "get_fund_analysis_summary",
+        lambda _fund_code: InternalFundAnalysisSummary(
+            fund_code="000001",
+            fund_type="STOCK",
+            availability_status="MODEL_UNAVAILABLE",
+            message="当前没有已发布且可用于该基金类型的模型。",
+            model=None,
+            backtest=None,
+        ),
+    )
+
+    with TestClient(create_application()) as client:
+        anonymous = client.get("/internal/v1/analysis/fund-summary?fundCode=000001")
+        browser = client.get(
+            "/internal/v1/analysis/fund-summary?fundCode=000001",
+            headers={**_headers(), "Origin": "http://localhost:5173"},
+        )
+        authorized = client.get("/internal/v1/analysis/fund-summary?fundCode=000001", headers=_headers())
+
+    assert anonymous.status_code == 403
+    assert browser.status_code == 403
+    assert authorized.status_code == 200
+    assert authorized.json()["availability_status"] == "MODEL_UNAVAILABLE"
+    assert authorized.json()["model"] is None
+    assert authorized.json()["backtest"] is None
     get_settings.cache_clear()

@@ -1,8 +1,9 @@
 """M3-05 仅供 Java 管理端调用的受控分析与模型发布内部接口。"""
 
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.api.dependencies import require_service_token
 from app.core.logging import get_logger
@@ -13,6 +14,7 @@ from app.schemas.analysis_run import (
     InternalModelReleaseTransitionRequest,
     InternalRollingBacktestRequest,
 )
+from app.schemas.analysis_summary import InternalFundAnalysisSummary
 from app.services.analysis_runs import (
     AnalysisRunInProgressError,
     AnalysisRunNotFoundError,
@@ -21,10 +23,31 @@ from app.services.analysis_runs import (
     start_stock_rolling_backtest,
     suspend_model_release,
 )
+from app.services.analysis_summary import get_fund_analysis_summary
 from app.services.baseline_analysis import ModelReleaseTransitionError
 
 router = APIRouter()
 logger = get_logger(__name__)
+
+
+@router.get(
+    "/fund-summary",
+    response_model=InternalFundAnalysisSummary,
+    dependencies=[Depends(require_service_token)],
+)
+def get_internal_fund_analysis_summary(
+    fund_code: Annotated[str, Query(alias="fundCode", min_length=6, max_length=6, pattern=r"^\d{6}$")],
+) -> InternalFundAnalysisSummary:
+    """返回已发布模型及回测摘要；读取不会泄露候选版本或启动任何分析任务。"""
+    payload = get_fund_analysis_summary(fund_code)
+    logger.info(
+        "analysis.get_internal_fund_analysis_summary >>> returned published summary, "
+        "trace_id=%s, fund_code=%s, status=%s",
+        get_trace_id(),
+        fund_code,
+        payload.availability_status,
+    )
+    return payload
 
 
 @router.post(
