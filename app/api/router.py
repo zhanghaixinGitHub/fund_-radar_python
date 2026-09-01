@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter
 
+from app.api.routes.analysis import router as analysis_router
 from app.api.routes.events import router as events_router
 from app.api.routes.features import router as features_router
 from app.api.routes.funds import router as funds_router
@@ -16,4 +17,5 @@ api_router.include_router(funds_router, prefix="/funds", tags=["funds"])
 api_router.include_router(events_router, prefix="/events", tags=["events"])
 api_router.include_router(features_router, prefix="/features", tags=["features"])
 api_router.include_router(signals_router, prefix="/signals", tags=["signals"])
+api_router.include_router(analysis_router, prefix="/analysis", tags=["analysis"])
 api_router.include_router(sources_router, prefix="/sources", tags=["sources"])

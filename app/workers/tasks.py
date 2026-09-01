@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from app.core.logging import get_logger
 from app.integrations.tushare import TushareIntegrationError
+from app.services.analysis_runs import execute_stock_rolling_backtest
 from app.services.baseline_analysis import BaselineAnalysisService, RollingBacktestConfig
 from app.services.stock_feature_snapshot import FeatureSnapshotBuildInProgressError, StockFeatureSnapshotService
 from app.services.tushare_fund_sync import SyncOutcome, TushareFundSyncService
@@ -125,3 +126,11 @@ def run_stock_rolling_backtest(
     """运行股票型固定基线回测；缺少已授权基准时结果明确保持不可发布。"""
     config = RollingBacktestConfig(fee_rate=Decimal(fee_rate), benchmark_id=benchmark_id)
     return BaselineAnalysisService().run_rolling_backtest(config).to_payload()
+
+
+@celery_app.task(name="fund_ai.analysis.run_stock_rolling_backtest_controlled")
+def run_controlled_stock_rolling_backtest(analysis_run_id: str) -> dict[str, str | None]:
+    """执行已由内部控制面持久化的回测，不接受浏览器或外部来源直接触发。"""
+    from uuid import UUID
+
+    return execute_stock_rolling_backtest(UUID(analysis_run_id))

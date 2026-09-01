@@ -93,6 +93,35 @@ class AnalysisModelRelease(Base):
     )
 
 
+class AnalysisRun(Base):
+    """M3-05 受控分析任务的持久状态，供 Java 管理端安全查询。"""
+
+    __tablename__ = "analysis_run"
+    __table_args__ = (
+        CheckConstraint("run_type IN ('ROLLING_BACKTEST')", name="ck_analysis_run_type"),
+        CheckConstraint("status IN ('QUEUED', 'RUNNING', 'COMPLETED', 'FAILED')", name="ck_analysis_run_status"),
+        Index("ix_analysis_run_status_requested", "status", "requested_at"),
+        Index("ix_analysis_run_task_id", "task_id"),
+    )
+
+    analysis_run_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4)
+    run_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="QUEUED", server_default="QUEUED")
+    fund_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    config_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    task_id: Mapped[str | None] = mapped_column(String(128))
+    backtest_run_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("backtest_run.run_id")
+    )
+    result_payload: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    failure_reason: Mapped[str | None] = mapped_column(Text)
+    trace_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class ForecastResult(Base):
     """可复现的 M3 评分结果；数据不足或不适用时不得产生方向结论。"""
 
