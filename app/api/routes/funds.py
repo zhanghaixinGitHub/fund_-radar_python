@@ -32,6 +32,7 @@ from app.services.fund_catalog_read import (
 )
 from app.services.sync_jobs import (
     MARKET_DETAIL_JOB_TYPE,
+    MARKET_FREE_DATA_COMPLETION_JOB_TYPE,
     MARKET_NAV_INCREMENTAL_JOB_TYPE,
     STOCK_FEATURE_SNAPSHOT_JOB_TYPE,
     SyncJobInProgressError,
@@ -169,6 +170,42 @@ def start_internal_market_detail_job() -> InternalSyncJobStatus:
 
 
 @router.post(
+    "/sync-jobs/market-free-data-completion",
+    response_model=InternalSyncJobStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_service_token)],
+)
+def start_internal_market_free_data_completion_job() -> InternalSyncJobStatus:
+    """创建已验权免费数据补齐任务；仅由 Java 管理员同步入口触发。"""
+    try:
+        logger.info(
+            "funds.start_internal_market_free_data_completion_job >>> manual free data completion requested, "
+            "trace_id=%s",
+            get_trace_id(),
+        )
+        snapshot = get_sync_job_manager().start_market_free_data_completion()
+    except SyncJobInProgressError as error:
+        logger.warning(
+            "funds.start_internal_market_free_data_completion_job >>> duplicate sync rejected, trace_id=%s",
+            get_trace_id(),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "FREE_DATA_SYNC_IN_PROGRESS", "message": "已有免费数据补齐任务正在执行，请稍后重试。"},
+        ) from error
+    except ValueError as error:
+        logger.error(
+            "funds.start_internal_market_free_data_completion_job >>> invalid configuration, trace_id=%s",
+            get_trace_id(),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "FREE_DATA_SYNC_UNAVAILABLE", "message": "免费数据补齐服务尚未完成配置。"},
+        ) from error
+    return _to_internal_sync_job_status(snapshot)
+
+
+@router.post(
     "/sync-jobs/stock-feature-snapshots",
     response_model=InternalSyncJobStatus,
     status_code=status.HTTP_202_ACCEPTED,
@@ -226,6 +263,17 @@ def get_latest_internal_market_detail_job() -> InternalSyncJobStatus | None:
 
 
 @router.get(
+    "/sync-jobs/market-free-data-completion/latest",
+    response_model=InternalSyncJobStatus | None,
+    dependencies=[Depends(require_service_token)],
+)
+def get_latest_internal_market_free_data_completion_job() -> InternalSyncJobStatus | None:
+    """读取当前 Python 进程最近一次免费数据补齐任务，不触发任何外部调用。"""
+    snapshot = get_sync_job_manager().get_latest_job(MARKET_FREE_DATA_COMPLETION_JOB_TYPE)
+    return _to_internal_sync_job_status(snapshot) if snapshot else None
+
+
+@router.get(
     "/sync-jobs/stock-feature-snapshots/latest",
     response_model=InternalSyncJobStatus | None,
     dependencies=[Depends(require_service_token)],
@@ -242,7 +290,7 @@ def get_latest_internal_stock_feature_snapshot_job() -> InternalSyncJobStatus | 
     dependencies=[Depends(require_service_token)],
 )
 def get_internal_sync_job_last_success_times() -> tuple[InternalSyncJobLastSuccess, ...]:
-    """读取两类任务最近一次完整成功时间；不触发外部数据请求。"""
+    """读取各类任务最近一次完整成功时间；不触发外部数据请求。"""
     manager = get_sync_job_manager()
     return (
         InternalSyncJobLastSuccess(
@@ -252,6 +300,10 @@ def get_internal_sync_job_last_success_times() -> tuple[InternalSyncJobLastSucce
         InternalSyncJobLastSuccess(
             job_type=MARKET_DETAIL_JOB_TYPE,
             last_successful_at=manager.get_last_successful_time(MARKET_DETAIL_JOB_TYPE),
+        ),
+        InternalSyncJobLastSuccess(
+            job_type=MARKET_FREE_DATA_COMPLETION_JOB_TYPE,
+            last_successful_at=manager.get_last_successful_time(MARKET_FREE_DATA_COMPLETION_JOB_TYPE),
         ),
     )
 

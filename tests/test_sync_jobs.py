@@ -6,7 +6,13 @@ from time import sleep
 from uuid import UUID
 
 from app.services.stock_feature_snapshot import FeatureSnapshotBuildInProgressError, StockFeatureBuildSummary
-from app.services.sync_jobs import MARKET_DETAIL_JOB_TYPE, STOCK_FEATURE_SNAPSHOT_JOB_TYPE, LocalSyncJobManager
+from app.services.sync_jobs import (
+    MARKET_DETAIL_JOB_TYPE,
+    MARKET_FREE_DATA_COMPLETION_JOB_TYPE,
+    STOCK_FEATURE_SNAPSHOT_JOB_TYPE,
+    LocalSyncJobManager,
+)
+from app.services.tushare_free_data_completion import FreeDataCompletionResult
 from app.services.tushare_fund_sync import MarketDetailSyncResult, SyncOutcome
 
 
@@ -197,3 +203,42 @@ def test_local_sync_job_manager_reports_market_detail_stage_progress() -> None:
     assert result.progress_message == "同步完成"
     assert result.sync_run_id == UUID("00000000-0000-0000-0000-000000000304")
     assert (result.fetched_count, result.created_count, result.updated_count, result.skipped_count) == (12, 7, 3, 2)
+
+
+def test_free_data_completion_job_reports_parent_run_summary() -> None:
+    """免费数据补齐必须以独立父运行回传汇总，仍受同步中心单并发控制。"""
+    completed = Event()
+
+    class StubFreeDataCompletionService:
+        def sync(self, *, progress_reporter):
+            progress_reporter(1, 2, "510300.SH", "正在同步场内基金日线")
+            progress_reporter(2, 2, None, "当前免费数据补齐完成")
+            outcome = SyncOutcome(
+                sync_run_id=UUID("00000000-0000-0000-0000-000000000306"),
+                sync_type=MARKET_FREE_DATA_COMPLETION_JOB_TYPE,
+                requested_nav_date=date(2026, 9, 2),
+                fetched_count=10,
+                created_count=7,
+                updated_count=2,
+                skipped_count=1,
+            )
+            return FreeDataCompletionResult(overall_outcome=outcome, outcomes=(outcome,))
+
+        def close(self) -> None:
+            completed.set()
+
+    manager = LocalSyncJobManager(free_data_completion_service_factory=StubFreeDataCompletionService)
+    started = manager.start_market_free_data_completion()
+
+    assert started.job_type == MARKET_FREE_DATA_COMPLETION_JOB_TYPE
+    assert completed.wait(timeout=1)
+    result = manager.get_job(started.job_id)
+    manager.close()
+
+    assert result is not None
+    assert result.status == "SUCCEEDED"
+    assert result.progress_current == 2
+    assert result.progress_total == 2
+    assert result.progress_message == "当前 2000 积分已授权数据补齐完成"
+    assert result.sync_run_id == UUID("00000000-0000-0000-0000-000000000306")
+    assert (result.fetched_count, result.created_count, result.updated_count, result.skipped_count) == (10, 7, 2, 1)

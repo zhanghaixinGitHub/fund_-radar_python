@@ -571,6 +571,19 @@ def _optional_decimal(value: Any, field_name: str, api_name: str) -> Decimal | N
     return parsed
 
 
+def _optional_signed_decimal(value: Any, field_name: str, api_name: str) -> Decimal | None:
+    """解析可正可负的有限十进制数，适用于涨跌额和涨跌幅等方向性字段。"""
+    if value is None or value == "":
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError) as error:
+        raise TushareIntegrationError(api_name, f"field {field_name} is not decimal") from error
+    if not parsed.is_finite():
+        raise TushareIntegrationError(api_name, f"field {field_name} must be a finite decimal")
+    return parsed
+
+
 def _safe_error_summary(error: object) -> str:
     """将外部错误压缩为不包含请求体和 Token 的短摘要。"""
     text = str(error or "unknown error").replace("\n", " ").replace("\r", " ")

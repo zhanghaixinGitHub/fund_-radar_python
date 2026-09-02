@@ -19,7 +19,9 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -43,6 +45,13 @@ class SourceRegistry(Base):
     rate_limit_per_minute: Mapped[int] = mapped_column(Integer, nullable=False)
     retention_days: Mapped[int] = mapped_column(Integer, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    authorized_api_names: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    )
+    authorization_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error_summary: Mapped[str | None] = mapped_column(String(512))
@@ -268,8 +277,14 @@ class SourceSyncRun(Base):
     source_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), ForeignKey("source_registry.source_id"), nullable=False
     )
+    parent_sync_run_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("source_sync_run.sync_run_id")
+    )
     sync_type: Mapped[str] = mapped_column(String(32), nullable=False)
     requested_nav_date: Mapped[date | None] = mapped_column(Date)
+    requested_window_start: Mapped[date | None] = mapped_column(Date)
+    requested_window_end: Mapped[date | None] = mapped_column(Date)
+    data_as_of_date: Mapped[date | None] = mapped_column(Date)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     fetched_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     created_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
@@ -278,3 +293,31 @@ class SourceSyncRun(Base):
     error_summary: Mapped[str | None] = mapped_column(String(512))
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SourceSyncCursor(Base):
+    """一个来源、数据域和实体的最后成功水位与失败摘要。"""
+
+    __tablename__ = "source_sync_cursor"
+    __table_args__ = (
+        CheckConstraint("consecutive_failure_count >= 0", name="ck_source_sync_cursor_failure_count_nonnegative"),
+        Index("ix_source_sync_cursor_dataset_updated", "dataset_code", "updated_at"),
+    )
+
+    source_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("source_registry.source_id"), primary_key=True
+    )
+    dataset_code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    entity_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    last_successful_data_date: Mapped[date | None] = mapped_column(Date)
+    last_successful_published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_sync_run_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("source_sync_run.sync_run_id")
+    )
+    consecutive_failure_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    last_error_summary: Mapped[str | None] = mapped_column(String(512))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )

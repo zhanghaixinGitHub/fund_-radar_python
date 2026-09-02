@@ -26,10 +26,27 @@ TUSHARE_SOURCE_CODE = "TUSHARE_PRO_FUND"
 TUSHARE_SOURCE_DISPLAY_NAME = "Tushare Pro 公募基金数据"
 TUSHARE_SOURCE_KIND = "MARKET_DATA"
 TUSHARE_SOURCE_LICENSE_SCOPE = (
-    "用户已授权的个人 Tushare 积分范围内 fund_company、fund_basic、fund_nav；仅供本机基金雷达使用。"
+    "已最小验权的个人 Tushare 2000 积分接口：fund_company、fund_basic、fund_nav、fund_manager、"
+    "fund_share、fund_div、fund_daily、daily、daily_basic、index_basic、index_classify、index_daily、"
+    "index_weight；仅供本机基金雷达使用，不含 fund_portfolio、fund_adj、新闻或公告。"
 )
 TUSHARE_SOURCE_RATE_LIMIT_PER_MINUTE = 200
 TUSHARE_SOURCE_RETENTION_DAYS = 365
+TUSHARE_AUTHORIZED_API_NAMES: tuple[str, ...] = (
+    "fund_company",
+    "fund_basic",
+    "fund_nav",
+    "fund_manager",
+    "fund_share",
+    "fund_div",
+    "fund_daily",
+    "daily",
+    "daily_basic",
+    "index_basic",
+    "index_classify",
+    "index_daily",
+    "index_weight",
+)
 
 
 @dataclass(frozen=True)
@@ -177,6 +194,8 @@ def ensure_tushare_source(session: Session) -> SourceRegistry:
             rate_limit_per_minute=TUSHARE_SOURCE_RATE_LIMIT_PER_MINUTE,
             retention_days=TUSHARE_SOURCE_RETENTION_DAYS,
             enabled=True,
+            authorized_api_names=list(TUSHARE_AUTHORIZED_API_NAMES),
+            authorization_verified_at=datetime.now(UTC),
         )
         session.add(source)
         session.flush()
@@ -188,22 +207,45 @@ def ensure_tushare_source(session: Session) -> SourceRegistry:
     source.rate_limit_per_minute = TUSHARE_SOURCE_RATE_LIMIT_PER_MINUTE
     source.retention_days = TUSHARE_SOURCE_RETENTION_DAYS
     source.enabled = True
+    source.authorized_api_names = list(TUSHARE_AUTHORIZED_API_NAMES)
+    source.authorization_verified_at = datetime.now(UTC)
     return source
 
 
 def create_sync_run(
-    session: Session, *, source_id: UUID, sync_type: str, requested_nav_date: date | None
+    session: Session,
+    *,
+    source_id: UUID,
+    sync_type: str,
+    requested_nav_date: date | None,
+    parent_sync_run_id: UUID | None = None,
+    requested_window_start: date | None = None,
+    requested_window_end: date | None = None,
+    data_as_of_date: date | None = None,
 ) -> SourceSyncRun:
     """创建 RUNNING 状态的同步记录并返回已持久化的运行标识。"""
     run = SourceSyncRun(
         source_id=source_id,
+        parent_sync_run_id=parent_sync_run_id,
         sync_type=sync_type,
         requested_nav_date=requested_nav_date,
+        requested_window_start=requested_window_start,
+        requested_window_end=requested_window_end,
+        data_as_of_date=data_as_of_date,
         status="RUNNING",
     )
     session.add(run)
     session.flush()
     return run
+
+
+def link_sync_run_to_parent(session: Session, *, sync_run_id: UUID, parent_sync_run_id: UUID) -> None:
+    """为既有子运行补充父运行关联，保留原同步类型和统计。"""
+    run = _get_sync_run(session, sync_run_id)
+    parent = _get_sync_run(session, parent_sync_run_id)
+    if run.source_id != parent.source_id:
+        raise ValueError("sync run parent must use the same source")
+    run.parent_sync_run_id = parent_sync_run_id
 
 
 def complete_sync_run(

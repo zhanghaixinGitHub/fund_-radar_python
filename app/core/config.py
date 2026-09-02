@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     tushare_sync_batch_size: int = Field(default=500, ge=1, le=2_000)
     tushare_catalog_max_rows_per_query: int = Field(default=15_000, ge=1, le=100_000)
     tushare_market_nav_max_rows_per_query: int = Field(default=10_000, ge=1, le=100_000)
+    tushare_market_reference_max_rows_per_query: int = Field(default=8_000, ge=1, le=100_000)
+    # CSI 当前最小探测正好达到来源 8,000 行上限，默认不纳入目录同步，防止误写截断结果。
+    tushare_index_catalog_markets: str = "SSE,SZSE,SW,CICC,MSCI,OTH"
     tushare_market_incremental_enabled: bool = True
     tushare_market_incremental_hour: int = Field(default=20, ge=0, le=23)
     tushare_market_incremental_minute: int = Field(default=0, ge=0, le=59)

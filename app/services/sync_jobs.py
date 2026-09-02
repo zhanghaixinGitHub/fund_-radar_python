@@ -19,10 +19,15 @@ from app.core.logging import get_logger
 from app.db.session import get_engine
 from app.integrations.tushare import TushareIntegrationError
 from app.repositories.fund_sync import get_latest_successful_sync_time
+from app.repositories.market_reference_sync import SourceCapabilityError
 from app.services.stock_feature_snapshot import (
     FeatureSnapshotBuildInProgressError,
     StockFeatureBuildSummary,
     StockFeatureSnapshotService,
+)
+from app.services.tushare_free_data_completion import (
+    FreeDataCompletionResult,
+    TushareFreeDataCompletionService,
 )
 from app.services.tushare_fund_sync import (
     MarketDetailSyncResult,
@@ -31,16 +36,19 @@ from app.services.tushare_fund_sync import (
     SyncOutcome,
     TushareFundSyncService,
 )
+from app.services.tushare_market_reference_sync import MarketReferenceSyncInProgressError
 
 logger = get_logger(__name__)
 
 MARKET_NAV_INCREMENTAL_JOB_TYPE = "MARKET_NAV_INCREMENTAL"
 MARKET_DETAIL_JOB_TYPE = "MARKET_DETAIL"
 STOCK_FEATURE_SNAPSHOT_JOB_TYPE = "STOCK_FEATURE_SNAPSHOT"
+MARKET_FREE_DATA_COMPLETION_JOB_TYPE = "MARKET_FREE_DATA_COMPLETION"
 _ACTIVE_STATUSES = frozenset({"QUEUED", "RUNNING"})
 _SYNC_TYPES_BY_JOB_TYPE = {
     MARKET_NAV_INCREMENTAL_JOB_TYPE: ("MARKET_NAV_INCREMENTAL",),
     MARKET_DETAIL_JOB_TYPE: ("MARKET_DETAIL",),
+    MARKET_FREE_DATA_COMPLETION_JOB_TYPE: ("MARKET_FREE_DATA_COMPLETION",),
 }
 
 
@@ -83,6 +91,7 @@ class SyncJobSnapshot:
 
 SyncServiceFactory = Callable[[], TushareFundSyncService]
 FeatureServiceFactory = Callable[[], StockFeatureSnapshotService]
+FreeDataCompletionServiceFactory = Callable[[], TushareFreeDataCompletionService]
 
 
 class LocalSyncJobManager:
@@ -92,9 +101,11 @@ class LocalSyncJobManager:
         self,
         service_factory: SyncServiceFactory = TushareFundSyncService,
         feature_service_factory: FeatureServiceFactory = StockFeatureSnapshotService,
+        free_data_completion_service_factory: FreeDataCompletionServiceFactory = TushareFreeDataCompletionService,
     ) -> None:
         self._service_factory = service_factory
         self._feature_service_factory = feature_service_factory
+        self._free_data_completion_service_factory = free_data_completion_service_factory
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fund-sync-job")
         self._jobs: dict[UUID, SyncJobSnapshot] = {}
         self._latest_job_ids: dict[str, UUID] = {}
@@ -205,6 +216,41 @@ class LocalSyncJobManager:
             self._latest_job_ids[STOCK_FEATURE_SNAPSHOT_JOB_TYPE] = snapshot.job_id
             self._active_job_id = snapshot.job_id
             self._executor.submit(self._run_stock_feature_snapshots, snapshot.job_id)
+            return snapshot
+
+    def start_market_free_data_completion(self) -> SyncJobSnapshot:
+        """创建 2000 积分已授权数据补齐任务；只允许管理员通过同步中心显式提交。"""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("sync job manager is stopped")
+            if self._active_job_id is not None:
+                active = self._jobs.get(self._active_job_id)
+                if active is not None and active.status in _ACTIVE_STATUSES:
+                    raise SyncJobInProgressError("a local sync job is already running")
+            snapshot = SyncJobSnapshot(
+                job_id=uuid4(),
+                job_type=MARKET_FREE_DATA_COMPLETION_JOB_TYPE,
+                status="QUEUED",
+                requested_nav_date=date.today(),
+                fund_codes=(),
+                progress_current=0,
+                progress_total=0,
+                current_fund_code=None,
+                progress_message="任务已创建，等待管理员补齐当前已授权免费数据",
+                sync_run_id=None,
+                fetched_count=0,
+                created_count=0,
+                updated_count=0,
+                skipped_count=0,
+                error_code=None,
+                error_message=None,
+                started_at=None,
+                finished_at=None,
+            )
+            self._jobs[snapshot.job_id] = snapshot
+            self._latest_job_ids[MARKET_FREE_DATA_COMPLETION_JOB_TYPE] = snapshot.job_id
+            self._active_job_id = snapshot.job_id
+            self._executor.submit(self._run_market_free_data_completion, snapshot.job_id)
             return snapshot
 
     def get_job(self, job_id: UUID) -> SyncJobSnapshot | None:
@@ -357,6 +403,56 @@ class LocalSyncJobManager:
         except Exception:
             logger.exception("sync_jobs._run_market_details >>> unexpected task failure, job_id=%s", job_id)
             self._fail_job(job_id, "MARKET_DETAIL_SYNC_FAILED", "基金完整资料同步未完成，请稍后重试。")
+        finally:
+            if service is not None:
+                service.close()
+            with self._lock:
+                if self._active_job_id == job_id:
+                    self._active_job_id = None
+
+    def _run_market_free_data_completion(self, job_id: UUID) -> None:
+        """执行一次已验权数据补齐，并将父运行汇总映射为同步中心状态。"""
+        service: TushareFreeDataCompletionService | None = None
+        self._replace_job(job_id, status="RUNNING", started_at=datetime.now(UTC), progress_message="正在校验数据源权限")
+        try:
+            service = self._free_data_completion_service_factory()
+            result: FreeDataCompletionResult = service.sync(
+                progress_reporter=lambda current, total, fund_code, message: self._update_progress(
+                    job_id, current, total, fund_code, message
+                )
+            )
+            self._complete_job(
+                job_id,
+                result.overall_outcome,
+                completion_message="当前 2000 积分已授权数据补齐完成",
+            )
+            logger.info(
+                "sync_jobs._run_market_free_data_completion >>> completed job_id=%s, sync_run_id=%s, "
+                "fetched=%s, created=%s, updated=%s",
+                job_id,
+                result.overall_outcome.sync_run_id,
+                result.overall_outcome.fetched_count,
+                result.overall_outcome.created_count,
+                result.overall_outcome.updated_count,
+            )
+        except MarketReferenceSyncInProgressError:
+            self._fail_job(job_id, "FREE_DATA_SYNC_IN_PROGRESS", "已有免费数据补齐正在执行，请稍后重试。")
+        except SourceCapabilityError:
+            self._fail_job(
+                job_id,
+                "FREE_DATA_SYNC_CAPABILITY_DENIED",
+                "当前来源未完成接口授权核验，请先核对数据源能力登记。",
+            )
+        except TushareIntegrationError:
+            self._fail_job(job_id, "FREE_DATA_SYNC_FAILED", "免费数据补齐未完成，请检查来源限额或稍后重试。")
+        except ValueError:
+            self._fail_job(job_id, "FREE_DATA_SYNC_UNAVAILABLE", "数据源权限或本地配置尚未完成校验。")
+        except Exception:
+            logger.exception(
+                "sync_jobs._run_market_free_data_completion >>> unexpected task failure, job_id=%s",
+                job_id,
+            )
+            self._fail_job(job_id, "FREE_DATA_SYNC_FAILED", "免费数据补齐未完成，请稍后重试。")
         finally:
             if service is not None:
                 service.close()

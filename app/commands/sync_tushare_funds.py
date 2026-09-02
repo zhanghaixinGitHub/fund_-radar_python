@@ -8,6 +8,7 @@ import sys
 from collections.abc import Sequence
 from datetime import date
 
+from app.services.tushare_free_data_completion import TushareFreeDataCompletionService
 from app.services.tushare_fund_sync import TushareFundSyncService
 
 
@@ -44,9 +45,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     detail_parser.add_argument(
         "--end-date", type=date.fromisoformat, help="history end date; defaults to local current date"
     )
+    free_data_parser = subparsers.add_parser(
+        "free-data-completion",
+        help="manually complete currently authorized 2000-credit free fund and market data",
+    )
+    free_data_parser.add_argument(
+        "--as-of-date",
+        type=date.fromisoformat,
+        help="latest data date to request, defaults to local current date",
+    )
     arguments = parser.parse_args(argv)
 
-    service = TushareFundSyncService()
+    service: TushareFundSyncService | TushareFreeDataCompletionService
+    if arguments.command == "free-data-completion":
+        service = TushareFreeDataCompletionService()
+    else:
+        service = TushareFundSyncService()
     try:
         if arguments.command == "catalog":
             payload: object = service.sync_catalog().to_payload()
@@ -72,6 +86,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     outcome.to_payload()
                     for outcome in detail_result.outcomes
                 ]
+            }
+        elif arguments.command == "free-data-completion":
+            completion = service.sync(as_of_date=arguments.as_of_date)
+            payload = {
+                "overall": completion.overall_outcome.to_payload(),
+                "outcomes": [outcome.to_payload() for outcome in completion.outcomes],
             }
         else:
             payload = service.sync_market_nav_incremental(as_of_date=arguments.as_of_date).to_payload()

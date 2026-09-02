@@ -17,7 +17,14 @@ from app.models.fund import (
     FundShareSnapshot,
     NavDaily,
     SourceRegistry,
+    SourceSyncCursor,
     SourceSyncRun,
+)
+from app.models.market_reference import (
+    FundExchangeDaily,
+    IndexWeightSnapshot,
+    MarketIndexCatalog,
+    MarketIndexClassification,
 )
 
 __all__ = [
@@ -29,15 +36,20 @@ __all__ = [
     "FeatureSnapshot",
     "ForecastResult",
     "FundDividend",
+    "FundExchangeDaily",
     "FundManagerAssignment",
     "FundMaster",
     "FundProfile",
     "FundShareClass",
     "FundShareSnapshot",
     "MarketEvent",
+    "MarketIndexCatalog",
+    "MarketIndexClassification",
     "NavDaily",
     "NewsItem",
     "NewsSourceReference",
     "SourceRegistry",
+    "SourceSyncCursor",
     "SourceSyncRun",
+    "IndexWeightSnapshot",
 ]
