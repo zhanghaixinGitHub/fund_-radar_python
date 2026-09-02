@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     服务令牌和外部数据源凭据使用 SecretStr 保存，日志或接口中不得输出其实际值。
     """
 
-    model_config = SettingsConfigDict(env_file=(".env", ".env.deepseek"), env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_environment: str = "local"
     app_host: str = "127.0.0.1"
@@ -33,14 +33,6 @@ class Settings(BaseSettings):
     tushare_market_incremental_enabled: bool = True
     tushare_market_incremental_hour: int = Field(default=20, ge=0, le=23)
     tushare_market_incremental_minute: int = Field(default=0, ge=0, le=59)
-    deepseek_enabled: bool = False
-    deepseek_api_key: SecretStr = SecretStr("")
-    deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_model: str = "deepseek-v4-pro"
-    deepseek_connect_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
-    deepseek_read_timeout_seconds: float = Field(default=45.0, gt=0, le=120)
-    deepseek_max_retries: int = Field(default=1, ge=0, le=2)
-    deepseek_max_tokens: int = Field(default=900, ge=200, le=2_000)
 
 
 @lru_cache

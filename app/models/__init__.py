@@ -1,9 +1,7 @@
 """由 AI 服务维护的 SQLAlchemy 领域模型。"""
 
 from app.models.analysis import (
-    AnalysisExplanationSnapshot,
     AnalysisModelRelease,
-    AnalysisRun,
     BacktestRun,
     FeatureSnapshot,
     ForecastResult,
@@ -27,8 +25,6 @@ __all__ = [
     "BenchmarkNavDaily",
     "BenchmarkSeries",
     "AnalysisModelRelease",
-    "AnalysisExplanationSnapshot",
-    "AnalysisRun",
     "EventRelation",
     "FeatureSnapshot",
     "ForecastResult",

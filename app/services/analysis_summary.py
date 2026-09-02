@@ -17,7 +17,6 @@ from app.schemas.analysis_summary import (
     InternalFundAnalysisSummary,
     InternalModelAnalysisSummary,
 )
-from app.services.analysis_explanation import get_published_fund_explanation
 
 
 def get_fund_analysis_summary(fund_code: str) -> InternalFundAnalysisSummary:
@@ -94,9 +93,6 @@ def _published_summary(
             suspended_at=release.suspended_at,
         ),
         backtest=_to_backtest_summary(backtest) if backtest is not None else None,
-        explanation=get_published_fund_explanation(
-            session, fund_code=fund_code, model_release_id=release.model_release_id
-        ),
     )
 
 
@@ -109,7 +105,6 @@ def _unavailable(fund_code: str, fund_type: str | None, message: str) -> Interna
         message=message,
         model=None,
         backtest=None,
-        explanation=None,
     )
 
 
