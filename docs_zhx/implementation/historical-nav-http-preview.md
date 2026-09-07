@@ -2,8 +2,8 @@
 
 现在直接传基金代码和日期，服务会读取数据库已有净值，返回“当时已知条件”和“后来答案”。不需要导入文件、填写净值列表或提交Body。预览不保存结果、不触发补数、不训练模型；`SCORABLE`只表示样本满足计算条件。
 
-关联：Vue文档仓 `docs_zhx/design/free-data-prediction-v1.md` v1.2–v1.4 和
-`docs_zhx/testcase/free-data-prediction-v1.md` TC-FDP-09–TC-FDP-11。
+关联：Vue文档仓 `docs_zhx/design/free-data-prediction-v1.md` v1.2–v1.5 和
+`docs_zhx/testcase/free-data-prediction-v1.md` TC-FDP-09–TC-FDP-12。
 
 单日查询看第0节；批量制作历史练习题看第6节。两者都不是模型预测。
 
@@ -227,3 +227,63 @@ Headers沿用原接口的`X-Service-Token`；Body留空，不传`Origin`。
 
 **学习停顿点：** 看懂“起点日期范围”“每份样本自己的窗口”“pageSize只影响批次”后再决定下一步。
 本轮不扩展到所有基金、全历史离线任务、样本持久化或模型训练。
+
+## 7. 出题前检查：这条净值是不是已经过时了
+
+### 7.1 规则与两个新名字
+
+“出题日”仍是起点净值的公告日，按当天结束后可见解释。如果当时同基金、同来源已有业务日期更晚的净值公布，旧起点就不能用。
+不设“晚3天/7天就异常”的阈值，也不把公告日改成净值日加一天。20日仍是从起点向后数第20条净值，不是从公告日另加20天。
+
+- `STALE_NAV_AT_CUTOFF`：出题时已有更新净值公布，起点已过时。它放在既有`unavailable_reason`里，不是服务器报错。
+- `sample_rule_version`：本次新增的响应字段，当前为`HISTORICAL_NAV_SAMPLE_RULE_V2`，表示采用新版样本筛选规则。不是模型版本，不参与特征哈希；没有该字段的旧响应属于原规则V1。
+
+收益公式版本和标签版本未改；正常样本仅多了上述版本字段，原有内容不变。过时样本还没进入公式阶段，故口径为`UNDETERMINED`，特征指标和标签都为空，而不是伪造为0。
+
+### 7.2 直接调用现有GET验收
+
+先让运行Python的IDE或终端重载代码；无需修改数据库或启动同步。Headers仍用现有`X-Service-Token`，Body留空。
+
+```text
+GET http://127.0.0.1:8000/internal/v1/features/historical-nav-samples/preview?fundCode=008888&asOfDate=2025-03-31
+```
+
+当前数据库把这条净值的公告记为2025-04-22，而那时已经有更新净值公布。响应关键字段应为：
+
+```json
+{
+  "as_of_date": "2025-03-31",
+  "available_at": "2025-04-22",
+  "nav_value_basis": "UNDETERMINED",
+  "eligibility_status": "DATA_INSUFFICIENT",
+  "unavailable_reason": "STALE_NAV_AT_CUTOFF",
+  "offline_label": null,
+  "sample_rule_version": "HISTORICAL_NAV_SAMPLE_RULE_V2"
+}
+```
+
+这是响应节选；`feature_payload.metrics`也应为null。源数据若发生修订，需要重新核对，不能硬编码日期结果。
+再把`asOfDate`改回熟悉的`2025-08-07`：其原有指标、答案和哈希应与修改前一致，仍不是模型预测。
+
+批量验收改查`2025-03-01`至`2025-03-31`，分别设`pageSize=1/10/30`。3月31日不能被丢掉，必须与单日GET完整JSON相同；新原因计入`unavailable_reasons`，全部items及质量统计不受分页影响。
+
+### 7.3 这几段代码分别负责什么
+
+| 位置 | 通俗解释 |
+| --- | --- |
+| `historical_nav.py` → `_has_newer_announced_nav` | 对每个起点问数据库：同基金、同来源有没有更新净值在当时已公告？`EXISTS`只返回是/否，不把全历史取回来。 |
+| `HistoricalNavSampleInput.stale_anchor_dates` | 把数据库确认过时的起点日期交给构建器。`frozenset`表示不可增删的集合。它是内部事实，不是新增HTTP参数或模型特征。 |
+| `historical_nav_samples.py` → `_find_stale_anchor_dates` | 对已提供的序列从后往前检查一次；记住后面最早的有效公告日，因此不会只盯住第20条。 |
+| `_build_one_sample` | 先检查起点日期，再检查起点是否过时；拒收时保留原日期并返回原因，正常时继续使用原指标公式。 |
+
+GET的数据库检查不受后20条、当前页或请求日期范围限制；净值计算资料仍最多81条，批量每个非空页仍最多2条净值SQL。
+POST不查数据库，只能检查你提交的记录，不能证明遗漏的记录不存在。已公告的判断只认可有效公告日期；缺失或公告早于净值日的记录不能充当证据。
+
+**边界与停顿点：** 这一步只排除旧起点，不恢复历史修订、不证明`ann_date`一定是首次可得日。先看懂这道检查，再讨论保存训练样本；本步不训练、不发布。
+
+### 7.4 本次验收结果（2026-09-07）
+
+102项相关测试及Ruff通过。真实数据库中，三只基金七个固定月份的429份正常样本，除新增规则版本字段外原有内容全部保持一致；
+21条季度末滞后起点均返回`STALE_NAV_AT_CUTOFF`，核对的原始数据未变。
+008888的2025年3月：21份样本中20份可用、1份过时；分页1/10/30的items与统计一致，3月31日与单日完整JSON一致。
+新代码通过真实数据库的只读事务和进程内HTTP验证；现有8000服务仍返回旧版本，手工验收前需要在启动它的IDE或终端重载，本轮未自动重启。

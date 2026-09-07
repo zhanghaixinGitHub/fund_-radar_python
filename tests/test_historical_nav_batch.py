@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from datetime import date, timedelta
 from decimal import Decimal
 from math import ceil
+from uuid import UUID
 
 import pytest
 from app.models.fund import NavDaily
@@ -103,6 +104,36 @@ def test_pages_issue_bounded_queries_not_one_roundtrip_per_sample(reader):
     assert len(statements) == 2 + 2 * result.page_count
     assert sum("UNION ALL" in sql for sql in statements) == result.page_count
     assert exits == [True]
+
+
+def test_stale_anchor_is_kept_in_batch_and_reason_count(reader):
+    """第79条是夹具内的迟公告起点；它必须保留在原日期，并计入不可用数量。"""
+    result = batch(78, 80, 1)
+    sample = result.items[1]
+    assert sample.as_of_date == START + timedelta(days=79)
+    assert sample.unavailable_reason == "STALE_NAV_AT_CUTOFF"
+    assert sample.feature_payload["metrics"] is None
+    assert sample.offline_label is None
+    assert result.sample_count == 3
+    assert result.data_insufficient_count == 1
+    assert result.unavailable_reasons == {"STALE_NAV_AT_CUTOFF": 1}
+
+
+def test_out_of_window_announcement_has_identical_single_and_batch_results(reader, session):
+    """更新公告在当前页、请求日期段和后20条之外，仍应跨页一致地拒收旧起点。"""
+    target = START + timedelta(days=80)
+    session.execute(update(NavDaily).where(
+        NavDaily.source_id == UUID(int=1), NavDaily.nav_date == target,
+    ).values(ann_date=START + timedelta(days=102)))
+    session.execute(update(NavDaily).where(
+        NavDaily.source_id == UUID(int=1), NavDaily.nav_date > target,
+        NavDaily.nav_date <= START + timedelta(days=100),
+    ).values(ann_date=START + timedelta(days=130)))
+    expected = preview.preview_stored_historical_nav_sample(fund_code="008888", as_of_date=target)
+    assert expected.unavailable_reason == "STALE_NAV_AT_CUTOFF"
+    results = [batch(80, 82, size) for size in (1, 10, 30)]
+    assert all(result.items[0] == expected for result in results)
+    assert results[0].items == results[1].items == results[2].items
 
 
 def test_timeout_releases_session_and_does_not_return_partial_success(reader, monkeypatch):

@@ -1,6 +1,6 @@
 """从数据库准备一道历史练习题需要的数据，不计算收益，也不自动补数。
 
-读取顺序：基金身份 → 可用来源 → 指定起点 → 起点前最多60条已知净值 → 起点后20条净值。
+读取顺序：基金身份 → 可用来源 → 起点及是否过时 → 起点前最多60条已知净值 → 起点后20条净值。
 “最多81条”是本次读取的净值记录上限，不包括前面检查基金、来源时读取的元数据。
 批量读取对每份题目保持同样的81条上限；按起点日期分页，每页合并查询计算资料。
 """
@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from datetime import date
 
 from sqlalchemy import literal, select, union_all
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.models.fund import FundShareClass, NavDaily
 from app.repositories.feature_snapshot import FeatureSourceReadiness, get_enabled_feature_source
@@ -52,6 +53,30 @@ def read_historical_nav_source(session: Session, *, fund_code: str) -> FeatureSo
     return source
 
 
+def _has_newer_announced_nav() -> ColumnElement[bool]:
+    """给起点查询附带一个是/否：同基金、同来源是否已有更新净值在该截止日公布。
+
+    aliased给同一张表起另一个查询名字；外层是正在出题的起点，内层是寻找的更新记录。
+    EXISTS只检查是否存在，不取出全部记录，也不额外为每个样本发送一次数据库请求。
+    """
+    newer = aliased(NavDaily)
+    return (
+        select(literal(1))
+        .where(
+            newer.fund_code == NavDaily.fund_code,
+            newer.source_id == NavDaily.source_id,
+            newer.nav_date > NavDaily.nav_date,
+            # 有效公告不能早于净值所属日，所以搜索日期只需到起点公告日，避免扫描更远未来。
+            newer.nav_date <= NavDaily.ann_date,
+            newer.ann_date >= newer.nav_date,
+            newer.ann_date <= NavDaily.ann_date,
+        )
+        .correlate(NavDaily)
+        .exists()
+        .label("has_newer_announced_nav")
+    )
+
+
 def read_historical_nav_sample_input(
     session: Session, *, fund_code: str, as_of_date: date
 ) -> HistoricalNavSampleInput:
@@ -72,13 +97,15 @@ def read_historical_nav_sample_input(
     nav_query = select(NavDaily.nav_date, NavDaily.ann_date, NavDaily.unit_nav, NavDaily.accumulated_nav).where(
         NavDaily.fund_code == fund_code, NavDaily.source_id == source.source_id
     )
-    anchor = session.execute(nav_query.where(NavDaily.nav_date == as_of_date)).one_or_none()
+    anchor = session.execute(
+        nav_query.add_columns(_has_newer_announced_nav()).where(NavDaily.nav_date == as_of_date)
+    ).one_or_none()
     if anchor is None:
         raise HistoricalNavPreviewReadError("NAV_NOT_FOUND", "数据库中没有该基金在指定日期的净值，请换一个净值日。")
 
-    # *anchor将四列展开为对象参数；末尾逗号表示这是“只有一条记录的tuple”，不是普通括号。
+    # 前四列才是净值，新增的是/否列不混进数值对象；末尾逗号表示只有一条记录的tuple。
     # 公告缺失/异常时只返回起点，让计算层统一输出DATA_INSUFFICIENT，不猜测公告日期。
-    points = (HistoricalNavPoint(*anchor),)
+    points = (HistoricalNavPoint(*anchor[:4]),)
     if anchor.ann_date is not None and anchor.ann_date >= anchor.nav_date:
         # 4. 只筛选当时可见的历史：业务日早于起点，公告不早于业务日，且不晚于起点公告日。
         # 先按日期倒序LIMIT 60，拿到最近的60条；后面再反转成计算需要的时间正序。
@@ -112,6 +139,7 @@ def read_historical_nav_sample_input(
         source_code=source.source_code,
         source_sync_run_id=source.source_sync_run_id,
         nav_points=points,
+        stale_anchor_dates=frozenset({as_of_date}) if anchor.has_newer_announced_nav else frozenset(),
     )
 
 
@@ -147,15 +175,17 @@ def read_historical_nav_input_page(
     nav_query = select(NavDaily.nav_date, NavDaily.ann_date, NavDaily.unit_nav, NavDaily.accumulated_nav).where(
         NavDaily.fund_code == fund_code, NavDaily.source_id == source.source_id
     )
-    anchor_query = nav_query.where(NavDaily.nav_date >= start_date, NavDaily.nav_date <= end_date)
+    anchor_query = nav_query.add_columns(_has_newer_announced_nav()).where(
+        NavDaily.nav_date >= start_date, NavDaily.nav_date <= end_date
+    )
     if after_date is not None:
         anchor_query = anchor_query.where(NavDaily.nav_date > after_date)
-    # 第一条 SQL：只取这一页的起点，不一次读完一只基金的所有历史。
+    # 第一条 SQL：只取这一页的起点及过时标记。EXISTS不受页边界或未来20条窗口限制。
     anchors = session.execute(anchor_query.order_by(NavDaily.nav_date).limit(page_size)).all()
     if not anchors:
         return ()
 
-    points_by_date = {row.nav_date: [HistoricalNavPoint(*row)] for row in anchors}
+    points_by_date = {row.nav_date: [HistoricalNavPoint(*row[:4])] for row in anchors}
     window_queries = []
     for anchor in anchors:
         # 与单日 GET 一致：起点公告无效时只保留起点，让构建器解释原因。
@@ -196,6 +226,10 @@ def read_historical_nav_input_page(
                 source_code=source.source_code,
                 source_sync_run_id=source.source_sync_run_id,
                 nav_points=tuple(sorted(points_by_date[anchor.nav_date], key=lambda point: point.nav_date)),
+                # 标记只对应本份资料的目标日，不能误把它传给同一窗口中的辅助日期。
+                stale_anchor_dates=(
+                    frozenset({anchor.nav_date}) if anchor.has_newer_announced_nav else frozenset()
+                ),
             ),
         )
         for anchor in anchors

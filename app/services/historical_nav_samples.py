@@ -25,6 +25,9 @@ STOCK_FUND_TYPE = "STOCK"
 HISTORICAL_NAV_FEATURE_VERSION = "M3_STOCK_HISTORICAL_NAV_FEATURE_V2"
 # 标签规则版本：后第20条净值相对起点上涨记1，否则记0。
 HISTORICAL_NAV_LABEL_VERSION = "FUTURE_UP_20D_V1"
+# 样本筛选规则单独编号：V2拒收“公告时已有更新净值”的旧起点；旧响应无此字段视为V1。
+# 指标公式和标签算法未改，不升级它们的版本，也不改变正常样本的特征哈希。
+HISTORICAL_NAV_SAMPLE_RULE_VERSION = "HISTORICAL_NAV_SAMPLE_RULE_V2"
 # 按净值序列向后数20条，而不是把日历日期直接加20天。
 HORIZON_TRADING_DAYS = 20
 # 特征分别回看5、20、60个净值区间；一个区间由相邻的两个净值点构成。
@@ -68,6 +71,10 @@ class HistoricalNavSampleInput:
     source_sync_run_id: UUID | None
     # 同一基金、同一来源的净值序列。可同时包含题目所需历史和答案所需未来，构建时会分开。
     nav_points: tuple[HistoricalNavPoint, ...]
+    # 读库时额外确认已过时的起点日期；frozenset是不可增删的集合，默认空集合。
+    # GET只取81条计算资料，更新的已公告净值可能在窗口之外，仓储层因此单独提供这个事实。
+    # 这不是HTTP参数或模型特征。POST不读库，由构建器检查所提交的完整序列。
+    stale_anchor_dates: frozenset[date] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -116,6 +123,9 @@ class HistoricalNavSample:
     feature_hash: str
     # 单独存放的后来答案；无答案时为None。标签不可用时，已有的合格特征仍可能保留。
     offline_label: OfflineDirectionLabel | None
+    # 这份样本按哪一版“能否出题”的规则筛选；与指标公式版本、模型版本区分开。
+    # 放在特征内容包之外，因此规则版本本身不会改变正常样本的输入或特征哈希。
+    sample_rule_version: str = HISTORICAL_NAV_SAMPLE_RULE_VERSION
 
 
 def build_historical_nav_samples(input_record: HistoricalNavSampleInput) -> tuple[HistoricalNavSample, ...]:
@@ -135,15 +145,38 @@ def build_historical_nav_samples(input_record: HistoricalNavSampleInput) -> tupl
     if input_record.fund_type != STOCK_FUND_TYPE:
         raise ValueError(f"unsupported V1 fund_type={input_record.fund_type}")
     _validate_nav_dates(input_record.nav_points)
+    # 先检查所给序列，再合并仓储层对窗口之外的检查结果；只传递“起点过时”这一事实。
+    stale_anchor_dates = _find_stale_anchor_dates(input_record.nav_points) | input_record.stale_anchor_dates
     # 第二步：把每条记录轮流当起点。anchor_index是起点在序列中的位置，从0开始。
     # 此处保留不足样本及原因，不会默默丢掉；GET调用方稍后只挑用户指定的那一天返回。
     return tuple(
         _build_one_sample(
             input_record=input_record,
             anchor_index=anchor_index,
+            stale_anchor_dates=stale_anchor_dates,
         )
         for anchor_index in range(len(input_record.nav_points))
     )
+
+
+def _find_stale_anchor_dates(nav_points: tuple[HistoricalNavPoint, ...]) -> frozenset[date]:
+    """在所给序列内找出公告时已被更新净值替代的起点，不访问数据库。
+
+    从后向前只走一遍，记住“日期更晚记录中最早的有效公告日”。若它不晚于当前起点公告日，
+    就证明出题时已有更新净值。不能只检查第20条，也不能按相隔几个自然日猜测是否过时。
+    """
+    stale_dates: set[date] = set()
+    earliest_later_announcement: date | None = None
+    for point in reversed(nav_points):
+        # 缺公告日或公告早于净值日，不能作为“当时已公布”的证据；该记录自身另报日期错误。
+        if point.ann_date is None or point.ann_date < point.nav_date:
+            continue
+        # 先判断再更新，避免把当前记录自己算成“更晚的一条”。同日公告按日终可得处理。
+        if earliest_later_announcement is not None and earliest_later_announcement <= point.ann_date:
+            stale_dates.add(point.nav_date)
+        if earliest_later_announcement is None or point.ann_date < earliest_later_announcement:
+            earliest_later_announcement = point.ann_date
+    return frozenset(stale_dates)
 
 
 def _validate_nav_dates(nav_points: tuple[HistoricalNavPoint, ...]) -> None:
@@ -170,6 +203,7 @@ def _build_one_sample(
     *,
     input_record: HistoricalNavSampleInput,
     anchor_index: int,
+    stale_anchor_dates: frozenset[date],
 ) -> HistoricalNavSample:
     """围绕一个起点依次检查公告、筛选历史、计算特征，最后尝试补上答案。"""
     points = input_record.nav_points
@@ -193,7 +227,19 @@ def _build_one_sample(
             reason="ANNOUNCEMENT_BEFORE_NAV_DATE",
         )
 
-    # 2. 只看业务日在起点及之前、且到起点公告日已经公布的记录。
+    # 2. 日期本身有效后，再检查起点是否过时。例如3月31日净值4月22日才公告，
+    # 但4月其他净值已公布，就不能拿3月31日当时的旧起点制作新的20日预测练习题。
+    # 保留请求日期及原始净值；不偷偷换起点、不改公告日，也不为这份题目生成输入或答案。
+    if anchor.nav_date in stale_anchor_dates:
+        return _unavailable_sample(
+            input_record=input_record,
+            anchor=anchor,
+            nav_value_basis=nav_value_basis,
+            status="DATA_INSUFFICIENT",
+            reason="STALE_NAV_AT_CUTOFF",
+        )
+
+    # 3. 只看业务日在起点及之前、且到起点公告日已经公布的记录。
     # 业务日虽然更早但公告更晚的记录，此时仍不可见。切片的+1是为了包含起点本身。
     known_points = tuple(
         point
@@ -216,7 +262,7 @@ def _build_one_sample(
             ),
         )
 
-    # 3. 日期筛选通过后，再按已固定的口径取数。找出第一条非法值，把日期写进拒绝原因。
+    # 4. 日期筛选通过后，再按已固定的口径取数。找出第一条非法值，把日期写进拒绝原因。
     feature_values = tuple(_nav_value(point, nav_value_basis) for point in feature_points)
     invalid_feature_point = next(
         (point for point, value in zip(feature_points, feature_values, strict=True) if not _is_positive_nav(value)),
@@ -242,7 +288,7 @@ def _build_one_sample(
             reason="NAV_POSITION_UNDEFINED: flat_60d_window",
         )
 
-    # 4. 特征先定稿；未来标签缺失、修订或补齐，均不得改写这个payload和哈希。
+    # 5. 特征先定稿；截止日之后才可得的标签数据变化，不得改写这个payload和哈希。
     feature_payload = _scorable_feature_payload(
         input_record=input_record,
         anchor=anchor,
@@ -262,7 +308,7 @@ def _build_one_sample(
         feature_hash=_feature_hash(feature_payload),
         offline_label=None,
     )
-    # 5. 切片包含起点+未来20条，共21条；Python切片右边界不包含在结果中，所以需要+1。
+    # 6. 切片包含起点+未来20条，共21条；Python切片右边界不包含在结果中，所以需要+1。
     return _attach_offline_label(sample, points[anchor_index : anchor_index + HORIZON_TRADING_DAYS + 1])
 
 
@@ -299,7 +345,7 @@ def _attach_offline_label(
                 unavailable_reason=f"INVALID_LABEL_NAV_VALUE: nav_date={point.nav_date.isoformat()}",
             )
     label_end = label_points[-1]
-    # 若起点公告严重滞后，以至终点已公告，这条题目的答案在当时已经揭晓，必须拒收。
+    # 保留终点已知的防御检查；公共构建入口现在更早用STALE_NAV_AT_CUTOFF拒收过时起点。
     if label_end.ann_date <= sample.available_at:
         return replace(
             sample, eligibility_status="DATA_INSUFFICIENT", unavailable_reason="LABEL_ALREADY_KNOWN_AT_CUTOFF"

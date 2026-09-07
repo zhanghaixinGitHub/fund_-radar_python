@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 from app.core.config import get_settings
 from fastapi.testclient import TestClient
+from tests.test_historical_nav_batch import reader as reader  # noqa: F401
+from tests.test_historical_nav_repository import session as session  # noqa: F401
 
 PREVIEW_PATH = "/internal/v1/features/historical-nav-samples/preview"
 # 下面的示例文件仅供 POST 手工传数据的测试；平时用 GET 查库无需导入它。
@@ -128,6 +130,31 @@ def test_preview_reports_missing_announcement_as_normal_data_status(client, payl
     sample = response.json()["items"][0]
     assert sample["eligibility_status"] == "DATA_INSUFFICIENT"
     assert sample["unavailable_reason"] == "MISSING_NAV_ANNOUNCEMENT_DATE"
+
+
+def test_post_preview_rejects_stale_anchor_without_reading_database(client, payload) -> None:
+    """自备数据使用同一条旧起点规则；只变公告日，不改净值和请求业务日。"""
+    payload["nav_points"][60]["ann_date"] = payload["nav_points"][61]["ann_date"]
+    response = client.post(PREVIEW_PATH, json=payload, headers=HEADERS)
+    assert response.status_code == 200
+    sample = response.json()["items"][0]
+    assert sample["as_of_date"] == payload["as_of_date"]
+    assert sample["unavailable_reason"] == "STALE_NAV_AT_CUTOFF"
+    assert sample["feature_payload"]["metrics"] is None
+    assert sample["offline_label"] is None
+    assert sample["sample_rule_version"] == "HISTORICAL_NAV_SAMPLE_RULE_V2"
+
+
+def test_get_and_batch_report_same_stale_sample_through_real_test_reader(client, reader) -> None:
+    """接通HTTP、服务、仓储和构建器，仅数据库换为内存库；完整JSON应一致。"""
+    single = client.get(PREVIEW_PATH, params={"fundCode": "008888", "asOfDate": "2025-03-21"}, headers=HEADERS)
+    batch_response = client.get(BATCH_PATH, params={
+        "fundCode": "008888", "startDate": "2025-03-20", "endDate": "2025-03-22", "pageSize": 1,
+    }, headers=HEADERS)
+    assert single.status_code == batch_response.status_code == 200
+    assert single.json()["unavailable_reason"] == "STALE_NAV_AT_CUTOFF"
+    assert single.json() == batch_response.json()["items"][1]
+    assert batch_response.json()["unavailable_reasons"] == {"STALE_NAV_AT_CUTOFF": 1}
 
 
 def test_preview_future_missing_accumulated_nav_keeps_past_features(client, payload) -> None:

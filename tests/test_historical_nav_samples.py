@@ -11,6 +11,7 @@ from uuid import UUID
 
 import pytest
 from app.services.historical_nav_samples import (
+    HISTORICAL_NAV_SAMPLE_RULE_VERSION,
     MIN_FEATURE_NAV_OBSERVATIONS,
     HistoricalNavPoint,
     HistoricalNavSampleInput,
@@ -204,7 +205,7 @@ def test_a_label_already_known_at_anchor_announcement_is_rejected() -> None:
     sample = build_historical_nav_samples(_input_with_points(tuple(points)))[60]
 
     assert sample.eligibility_status == "DATA_INSUFFICIENT"
-    assert sample.unavailable_reason == "LABEL_ALREADY_KNOWN_AT_CUTOFF"
+    assert sample.unavailable_reason == "STALE_NAV_AT_CUTOFF"
     assert sample.offline_label is None
 
 
@@ -219,3 +220,91 @@ def test_invalid_future_nav_does_not_move_the_twentieth_observation(value: Decim
     assert sample.eligibility_status == "DATA_INSUFFICIENT"
     assert sample.offline_label is None
     assert sample.unavailable_reason.startswith("INVALID_LABEL_NAV_VALUE")
+
+
+@pytest.mark.parametrize("cutoff", [date(2025, 8, 9), date(2025, 8, 15)])
+def test_partially_announced_future_rejects_stale_anchor(cutoff: date) -> None:
+    """哪怕只公布了第一条后续净值，旧起点也已过时，不必等第20条答案揭晓。"""
+    points = list(_stage_one_points())
+    points[60] = replace(points[60], ann_date=cutoff)
+    sample = build_historical_nav_samples(_input_with_points(tuple(points)))[60]
+
+    assert points[-1].ann_date > cutoff
+    assert sample.eligibility_status == "DATA_INSUFFICIENT"
+    assert sample.unavailable_reason == "STALE_NAV_AT_CUTOFF"
+    assert sample.as_of_date == date(2025, 8, 7)
+    assert sample.available_at == cutoff
+    assert sample.nav_value_basis == "UNDETERMINED"
+    assert sample.feature_payload["metrics"] is None
+    assert sample.feature_payload["quality"]["issues"] == ["STALE_NAV_AT_CUTOFF"]
+    assert sample.offline_label is None
+    assert sample.sample_rule_version == HISTORICAL_NAV_SAMPLE_RULE_VERSION
+
+
+def test_stale_check_runs_before_label_history_shortage() -> None:
+    """未来不足20条也不能掩盖旧起点：这里仅有1条后续净值，但它在截止日已经公布。"""
+    points = list(_stage_one_points()[:62])
+    points[60] = replace(points[60], ann_date=points[61].ann_date)
+    sample = build_historical_nav_samples(_input_with_points(tuple(points)))[60]
+    assert sample.eligibility_status == "DATA_INSUFFICIENT"
+    assert sample.unavailable_reason == "STALE_NAV_AT_CUTOFF"
+
+
+def test_stale_check_searches_beyond_the_twentieth_future_point() -> None:
+    """前20条公告都较晚，但第21条先公布了；不能只看标签窗口而漏过旧起点。"""
+    points = list(_stage_one_points())
+    points[60] = replace(points[60], ann_date=date(2025, 9, 6))
+    points[61:] = [replace(point, ann_date=date(2025, 9, 10)) for point in points[61:]]
+    points.append(HistoricalNavPoint(date(2025, 9, 5), date(2025, 9, 6), Decimal("1.3"), Decimal("1.3")))
+    sample = build_historical_nav_samples(_input_with_points(tuple(points)))[60]
+    assert sample.unavailable_reason == "STALE_NAV_AT_CUTOFF"
+    assert sample.offline_label is None
+
+
+def test_long_announcement_gap_without_newer_known_nav_is_not_stale() -> None:
+    """模拟长间隔但没有更新公告；不设置拍脑袋的自然日阈值，也不把终点改为公告日加20天。"""
+    points = list(_stage_one_points())
+    points[60] = replace(points[60], ann_date=date(2025, 8, 18))
+    points[61:] = [replace(point, ann_date=max(point.ann_date, date(2025, 8, 20))) for point in points[61:]]
+    sample = build_historical_nav_samples(_input_with_points(tuple(points)))[60]
+    assert sample.eligibility_status == "SCORABLE"
+    assert sample.offline_label.label_end_date == date(2025, 9, 4)
+
+
+@pytest.mark.parametrize("announcement,reason", [
+    (date(2025, 8, 8), "STALE_NAV_AT_CUTOFF"),
+    (date(2025, 8, 9), None),
+    (None, "MISSING_LABEL_ANNOUNCEMENT_DATE"),
+    (date(2025, 8, 7), "INVALID_LABEL_ANNOUNCEMENT_DATE"),
+])
+def test_newer_announcement_boundary_and_invalid_dates(announcement, reason) -> None:
+    """同日公告算已知，次日不算；缺失或早于净值日的公告不能充当已知证据。"""
+    points = list(_stage_one_points())
+    points[61] = replace(points[61], ann_date=announcement)
+    sample = build_historical_nav_samples(_input_with_points(tuple(points)))[60]
+    assert sample.unavailable_reason == reason
+
+
+def test_repository_stale_fact_only_applies_to_its_own_anchor() -> None:
+    """读库补充的过时日期不能误伤同一资料包里的其他辅助日期，也不能混入模型特征。"""
+    input_record = _input_with_points(_stage_one_points())
+    original = build_historical_nav_samples(input_record)
+    marked = replace(input_record, stale_anchor_dates=frozenset({date(2025, 8, 7)}))
+    changed = build_historical_nav_samples(marked)
+    assert changed[60].unavailable_reason == "STALE_NAV_AT_CUTOFF"
+    assert changed[:60] == original[:60]
+    assert changed[61:] == original[61:]
+    assert "stale_anchor_dates" not in changed[60].feature_payload
+    assert "sample_rule_version" not in original[60].feature_payload
+
+
+@pytest.mark.parametrize("announcement,reason", [
+    (None, "MISSING_NAV_ANNOUNCEMENT_DATE"),
+    (date(2025, 8, 6), "ANNOUNCEMENT_BEFORE_NAV_DATE"),
+])
+def test_invalid_anchor_date_has_priority_over_stale_fact(announcement, reason) -> None:
+    """先说明起点自身日期错误，不用额外过时标记盖掉更基础的问题。"""
+    points = list(_stage_one_points())
+    points[60] = replace(points[60], ann_date=announcement)
+    input_record = replace(_input_with_points(tuple(points)), stale_anchor_dates=frozenset({date(2025, 8, 7)}))
+    assert build_historical_nav_samples(input_record)[60].unavailable_reason == reason

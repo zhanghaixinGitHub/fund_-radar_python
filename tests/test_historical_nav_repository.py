@@ -9,16 +9,20 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from app.models.fund import NavDaily
 from app.repositories.feature_snapshot import FeatureSourceReadiness
 from app.repositories.historical_nav import HistoricalNavPreviewReadError, read_historical_nav_sample_input
-from sqlalchemy import Column, Date, DateTime, MetaData, Numeric, String, Table, Uuid, create_engine, insert
+from app.services.historical_nav_samples import build_historical_nav_samples
+from sqlalchemy import Column, Date, DateTime, MetaData, Numeric, String, Table, Uuid, create_engine, insert, update
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 
 @pytest.fixture
 def session(monkeypatch):
     """准备最少的表和人工净值，测试结束后释放内存数据库。"""
-    engine = create_engine("sqlite://")
+    # HTTP测试在线程中调用服务；StaticPool让串行请求共用这份内存库，不会连到真实数据库。
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     metadata = MetaData()
     funds = Table("fund_share_class", metadata, Column("fund_code", String), Column("fund_type", String),
                   Column("status", String), Column("source_code", String))
@@ -62,6 +66,7 @@ def test_reader_bounds_history_and_future_and_never_mixes_sources(session) -> No
     assert result.nav_points[60].nav_date == start + timedelta(days=80)
     assert result.nav_points[-1].nav_date == start + timedelta(days=100)
     assert all(p.accumulated_nav != Decimal("999") for p in result.nav_points)
+    assert result.stale_anchor_dates == frozenset()
 
 
 def test_reader_does_not_fall_back_when_target_nav_date_is_missing(session) -> None:
@@ -84,3 +89,38 @@ def test_reader_rejects_disabled_source(session, monkeypatch) -> None:
     with pytest.raises(HistoricalNavPreviewReadError) as error:
         read_historical_nav_sample_input(session, fund_code="008888", as_of_date=date(2025, 1, 1))
     assert error.value.code == "SOURCE_NOT_READY"
+
+
+def test_reader_checks_newer_announcements_outside_returned_window(session) -> None:
+    """第21条先于前20条公告，仓储仍能发现；只传递过时事实，不扩大81条计算窗口。"""
+    start = date(2025, 1, 1)
+    target = start + timedelta(days=80)
+    session.execute(update(NavDaily).where(
+        NavDaily.source_id == UUID(int=1), NavDaily.nav_date == target,
+    ).values(ann_date=start + timedelta(days=102)))
+    session.execute(update(NavDaily).where(
+        NavDaily.source_id == UUID(int=1), NavDaily.nav_date > target,
+        NavDaily.nav_date <= start + timedelta(days=100),
+    ).values(ann_date=start + timedelta(days=130)))
+
+    result = read_historical_nav_sample_input(session, fund_code="008888", as_of_date=target)
+    assert len(result.nav_points) == 81
+    assert result.nav_points[-1].nav_date == start + timedelta(days=100)
+    assert result.stale_anchor_dates == frozenset({target})
+    sample = next(s for s in build_historical_nav_samples(result) if s.as_of_date == target)
+    assert sample.unavailable_reason == "STALE_NAV_AT_CUTOFF"
+
+
+@pytest.mark.parametrize("other_fund", [False, True])
+def test_newer_announcement_cannot_come_from_another_source_or_fund(session, other_fund) -> None:
+    """其他来源或其他基金的同日公告，不得把当前基金的起点判成过时。"""
+    start = date(2025, 1, 1)
+    target = start + timedelta(days=80)
+    values = {"ann_date": target + timedelta(days=1)}
+    if other_fund:
+        values.update(fund_code="999999", source_id=UUID(int=1))
+    session.execute(update(NavDaily).where(
+        NavDaily.source_id == UUID(int=2), NavDaily.nav_date == target + timedelta(days=1),
+    ).values(**values))
+    result = read_historical_nav_sample_input(session, fund_code="008888", as_of_date=target)
+    assert result.stale_anchor_dates == frozenset()
