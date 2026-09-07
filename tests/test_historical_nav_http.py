@@ -210,3 +210,84 @@ def test_get_preview_auth_rejects_before_database_read(client, monkeypatch, head
 
     monkeypatch.setattr(features, "preview_stored_historical_nav_sample", forbidden_read)
     assert client.get(PREVIEW_PATH + "?fundCode=008888&asOfDate=2025-08-07", headers=headers).status_code == 403
+
+
+BATCH_PATH = "/internal/v1/features/historical-nav-samples/dry-run"
+BATCH_PARAMS = {"fundCode": "008888", "startDate": "2025-08-01", "endDate": "2025-08-31"}
+
+
+def test_batch_get_parses_query_and_returns_all_items(client, monkeypatch):
+    """批量入口不需要 Body；pageSize 是读取批次，响应明确标记只读试跑。"""
+    from app.api.routes import features
+    from app.schemas.historical_nav import HistoricalNavBatchPreviewResponse
+
+    def fake_batch(request):
+        assert request.fund_code == "008888"
+        assert request.page_size == 10
+        return HistoricalNavBatchPreviewResponse(
+            fund_code=request.fund_code, start_date=request.start_date, end_date=request.end_date,
+            page_size=request.page_size, page_count=0, sample_count=0, scorable_count=0,
+            data_insufficient_count=0, label_not_matured_count=0, unavailable_reasons={}, items=(),
+        )
+
+    monkeypatch.setattr(features, "preview_stored_historical_nav_batch", fake_batch)
+    response = client.get(BATCH_PATH, params=BATCH_PARAMS, headers=HEADERS)
+    assert response.status_code == 200
+    assert response.json()["mode"] == "DRY_RUN"
+    assert response.json()["items"] == []
+
+
+@pytest.mark.parametrize("change", [
+    {"fundCode": "8888"}, {"startDate": "bad-date"}, {"startDate": "2025-09-01"},
+    {"endDate": "2025-09-01"}, {"pageSize": "0"}, {"pageSize": "31"},
+    {"pageSize": "1.5"}, {"unknown": "field"},
+])
+def test_batch_invalid_query_never_reads_database(client, monkeypatch, change):
+    """反向范围、超过31天、非法页大小等，在读库之前返回422。"""
+    from app.api.routes import features
+
+    monkeypatch.setattr(features, "preview_stored_historical_nav_batch", lambda *_: pytest.fail("must not read"))
+    response = client.get(BATCH_PATH, params={**BATCH_PARAMS, **change}, headers=HEADERS)
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("headers", [{}, {"X-Service-Token": "wrong"}, {**HEADERS, "Origin": "http://localhost"}])
+def test_batch_auth_precedes_reading(client, monkeypatch, headers):
+    """批量入口不能因多了一个路径就绕过原有内部认证。"""
+    from app.api.routes import features
+
+    monkeypatch.setattr(features, "preview_stored_historical_nav_batch", lambda *_: pytest.fail("must not read"))
+    assert client.get(BATCH_PATH, params=BATCH_PARAMS, headers=headers).status_code == 403
+
+
+@pytest.mark.parametrize("code,expected", [("FUND_NOT_FOUND", 404), ("NOT_APPLICABLE", 409), ("SOURCE_NOT_READY", 409)])
+def test_batch_business_errors_have_clear_status(client, monkeypatch, code, expected):
+    """基金不存在与品类/来源不适用分别使用404和409。"""
+    from app.api.routes import features
+    from app.repositories.historical_nav import HistoricalNavPreviewReadError
+
+    def fail(_request):
+        raise HistoricalNavPreviewReadError(code, "当前基金不可用。")
+
+    monkeypatch.setattr(features, "preview_stored_historical_nav_batch", fail)
+    response = client.get(BATCH_PATH, params=BATCH_PARAMS, headers=HEADERS)
+    assert response.status_code == expected
+    assert response.json()["detail"]["code"] == code
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_batch_database_and_timeout_errors_do_not_expose_partial_items(client, monkeypatch, timeout):
+    """数据库故障和超时均受控失败，不返回部分题目或数据库内部细节。"""
+    from app.api.routes import features
+    from app.services.historical_nav_preview import HistoricalNavBatchTimeoutError
+    from sqlalchemy.exc import SQLAlchemyError
+
+    def fail(_request):
+        error_type = HistoricalNavBatchTimeoutError if timeout else SQLAlchemyError
+        raise error_type("internal-connection-details")
+
+    monkeypatch.setattr(features, "preview_stored_historical_nav_batch", fail)
+    response = client.get(BATCH_PATH, params=BATCH_PARAMS, headers=HEADERS)
+    assert response.status_code == 503
+    assert "items" not in response.json()
+    assert "internal-connection-details" not in response.text

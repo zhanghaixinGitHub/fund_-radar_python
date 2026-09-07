@@ -2,15 +2,17 @@
 
 读取顺序：基金身份 → 可用来源 → 指定起点 → 起点前最多60条已知净值 → 起点后20条净值。
 “最多81条”是本次读取的净值记录上限，不包括前面检查基金、来源时读取的元数据。
+批量读取对每份题目保持同样的81条上限；按起点日期分页，每页合并查询计算资料。
 """
 
+from dataclasses import dataclass
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import literal, select, union_all
 from sqlalchemy.orm import Session
 
 from app.models.fund import FundShareClass, NavDaily
-from app.repositories.feature_snapshot import get_enabled_feature_source
+from app.repositories.feature_snapshot import FeatureSourceReadiness, get_enabled_feature_source
 from app.services.historical_nav_samples import (
     HORIZON_TRADING_DAYS,
     MIN_FEATURE_NAV_OBSERVATIONS,
@@ -30,19 +32,8 @@ class HistoricalNavPreviewReadError(RuntimeError):
         self.code = code
 
 
-def read_historical_nav_sample_input(
-    session: Session, *, fund_code: str, as_of_date: date
-) -> HistoricalNavSampleInput:
-    """读取同一启用来源的最多60条已知历史、1条起点和20条未来净值。
-
-    Args:
-        session: 调用者持有的只读、一致性事务。
-        fund_code: 基金份额代码。
-        as_of_date: 必须精确匹配的起点净值业务日，不向相邻日期回退。
-
-    Raises:
-        HistoricalNavPreviewReadError: 基金/净值不存在、基金不适用或来源未就绪。
-    """
+def read_historical_nav_source(session: Session, *, fund_code: str) -> FeatureSourceReadiness:
+    """单日和批量共用的入口检查；批量请求只检查一次，不在每页重新选来源。"""
     # 1. 从基金目录读真实品类、启用状态和来源，不能仅凭调用方自称“股票型”就接受。
     # select只取需要的字段；one_or_none表示期望唯一一行，没有则为None。
     fund = session.execute(
@@ -58,6 +49,23 @@ def read_historical_nav_sample_input(
     source = get_enabled_feature_source(session, fund.source_code)
     if source is None:
         raise HistoricalNavPreviewReadError("SOURCE_NOT_READY", "该基金的净值来源未启用或尚无成功同步记录。")
+    return source
+
+
+def read_historical_nav_sample_input(
+    session: Session, *, fund_code: str, as_of_date: date
+) -> HistoricalNavSampleInput:
+    """读取同一启用来源的最多60条已知历史、1条起点和20条未来净值。
+
+    Args:
+        session: 调用者持有的只读、一致性事务。
+        fund_code: 基金份额代码。
+        as_of_date: 必须精确匹配的起点净值业务日，不向相邻日期回退。
+
+    Raises:
+        HistoricalNavPreviewReadError: 基金/净值不存在、基金不适用或来源未就绪。
+    """
+    source = read_historical_nav_source(session, fund_code=fund_code)
 
     # 3. 起点、历史、未来都复用相同基金+来源条件，避免把两家来源的净值拼成一条序列。
     # 此处只是组装SQL，还没查询；四列顺序与HistoricalNavPoint的四个构造参数一致。
@@ -100,8 +108,95 @@ def read_historical_nav_sample_input(
     # 6. 把数据库结果装成纯数据对象。计算层接收它即可，不需要了解SQL或数据库连接。
     return HistoricalNavSampleInput(
         fund_code=fund_code,
-        fund_type=fund.fund_type,
+        fund_type="STOCK",
         source_code=source.source_code,
         source_sync_run_id=source.source_sync_run_id,
         nav_points=points,
+    )
+
+
+@dataclass(frozen=True)
+class HistoricalNavSampleWindow:
+    """一份练习题的完整计算资料；不是数据库表，也不是已经计算完的答案。"""
+
+    # 本份资料要计算哪一天；它不一定是 nav_points 的第一天。
+    as_of_date: date
+    # 包含最多 60 条历史、1 条起点和20条未来；不足时原样交给构建器报告原因。
+    input_record: HistoricalNavSampleInput
+
+
+def read_historical_nav_input_page(
+    session: Session,
+    *,
+    fund_code: str,
+    source: FeatureSourceReadiness,
+    start_date: date,
+    end_date: date,
+    after_date: date | None,
+    page_size: int,
+) -> tuple[HistoricalNavSampleWindow, ...]:
+    """读取一页样本起点及各自的完整窗口，非空页最多执行两条净值查询。
+
+    start_date/end_date 均包含，限制的是“要出题的日期”，不是计算资料的日期。
+    after_date 是上一页最后一天（游标）；下一页严格从它之后开始，不用 OFFSET 跳行。
+    page_size 只控制每页起点数量，不能改变某个起点的计算窗口。
+    """
+    # 仓储层也保留硬上限，避免内部调用绕过 HTTP 校验后构造过大的合并查询。
+    if not 1 <= page_size <= 30 or not 0 <= (end_date - start_date).days < 31:
+        raise ValueError("批量预览最多31个自然日，每页1至30个样本起点。")
+    nav_query = select(NavDaily.nav_date, NavDaily.ann_date, NavDaily.unit_nav, NavDaily.accumulated_nav).where(
+        NavDaily.fund_code == fund_code, NavDaily.source_id == source.source_id
+    )
+    anchor_query = nav_query.where(NavDaily.nav_date >= start_date, NavDaily.nav_date <= end_date)
+    if after_date is not None:
+        anchor_query = anchor_query.where(NavDaily.nav_date > after_date)
+    # 第一条 SQL：只取这一页的起点，不一次读完一只基金的所有历史。
+    anchors = session.execute(anchor_query.order_by(NavDaily.nav_date).limit(page_size)).all()
+    if not anchors:
+        return ()
+
+    points_by_date = {row.nav_date: [HistoricalNavPoint(*row)] for row in anchors}
+    window_queries = []
+    for anchor in anchors:
+        # 与单日 GET 一致：起点公告无效时只保留起点，让构建器解释原因。
+        if anchor.ann_date is None or anchor.ann_date < anchor.nav_date:
+            continue
+        # 给查询结果贴上“属于哪份题目”的日期标签。同一条净值可以服务于不同题目。
+        tagged_query = nav_query.add_columns(literal(anchor.nav_date).label("sample_date"))
+        history = (
+            tagged_query.where(
+                NavDaily.nav_date < anchor.nav_date,
+                NavDaily.ann_date >= NavDaily.nav_date,
+                NavDaily.ann_date <= anchor.ann_date,
+            )
+            .order_by(NavDaily.nav_date.desc())
+            .limit(MIN_FEATURE_NAV_OBSERVATIONS - 1)
+            .subquery()
+        )
+        future = (
+            tagged_query.where(NavDaily.nav_date > anchor.nav_date)
+            .order_by(NavDaily.nav_date)
+            .limit(HORIZON_TRADING_DAYS)
+            .subquery()
+        )
+        # 这里仅组装 SQL，还没访问数据库。每个小查询先独立取最近60/后20条，再合并。
+        # 未来不按公告日或数值筛掉坏记录，否则可能把第21条错当成第20条。
+        window_queries.extend((select(history), select(future)))
+    if window_queries:
+        # 第二条 SQL：UNION ALL 把本页所有窗口合并返回，最多 page_size × 80 行。
+        # 不去重：同一净值在不同样本中的用途不同；组内之后按日期恢复计算顺序。
+        for row in session.execute(union_all(*window_queries)):
+            points_by_date[row.sample_date].append(HistoricalNavPoint(*row[:4]))
+    return tuple(
+        HistoricalNavSampleWindow(
+            as_of_date=anchor.nav_date,
+            input_record=HistoricalNavSampleInput(
+                fund_code=fund_code,
+                fund_type="STOCK",
+                source_code=source.source_code,
+                source_sync_run_id=source.source_sync_run_id,
+                nav_points=tuple(sorted(points_by_date[anchor.nav_date], key=lambda point: point.nav_date)),
+            ),
+        )
+        for anchor in anchors
     )

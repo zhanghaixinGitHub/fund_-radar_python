@@ -11,7 +11,7 @@ from uuid import UUID
 import pytest
 from app.repositories.feature_snapshot import FeatureSourceReadiness
 from app.repositories.historical_nav import HistoricalNavPreviewReadError, read_historical_nav_sample_input
-from sqlalchemy import Column, Date, MetaData, Numeric, String, Table, Uuid, create_engine, insert
+from sqlalchemy import Column, Date, DateTime, MetaData, Numeric, String, Table, Uuid, create_engine, insert
 from sqlalchemy.orm import Session
 
 
@@ -24,7 +24,8 @@ def session(monkeypatch):
                   Column("status", String), Column("source_code", String))
     nav = Table("nav_daily", metadata, Column("fund_code", String), Column("source_id", Uuid),
                 Column("nav_date", Date), Column("ann_date", Date), Column("unit_nav", Numeric),
-                Column("accumulated_nav", Numeric))
+                Column("accumulated_nav", Numeric), Column("updated_at", DateTime))
+    # updated_at 供异常场景测试修改净值时使用；ORM 会自动更新它，实际项目表本来就有此列。
     metadata.create_all(engine)
     # 暂时把来源检查替换为“来源已就绪”，让这些用例专注检验净值读取规则。
     source = FeatureSourceReadiness(UUID(int=1), "TEST_SOURCE", UUID(int=3), datetime(2026, 1, 1, tzinfo=UTC))

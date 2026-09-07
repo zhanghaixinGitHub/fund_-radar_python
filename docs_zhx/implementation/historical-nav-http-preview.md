@@ -2,7 +2,10 @@
 
 现在直接传基金代码和日期，服务会读取数据库已有净值，返回“当时已知条件”和“后来答案”。不需要导入文件、填写净值列表或提交Body。预览不保存结果、不触发补数、不训练模型；`SCORABLE`只表示样本满足计算条件。
 
-关联：Vue文档仓 `docs_zhx/design/free-data-prediction-v1.md` v1.2 和 `docs_zhx/testcase/free-data-prediction-v1.md` TC-FDP-09。
+关联：Vue文档仓 `docs_zhx/design/free-data-prediction-v1.md` v1.2–v1.4 和
+`docs_zhx/testcase/free-data-prediction-v1.md` TC-FDP-09–TC-FDP-11。
+
+单日查询看第0节；批量制作历史练习题看第6节。两者都不是模型预测。
 
 ## 0. 推荐：直接读取数据库
 
@@ -116,10 +119,111 @@ app/schemas/historical_nav.py：检查输入格式、数量和顺序
 app/services/historical_nav_samples.py → build_historical_nav_samples：先算特征，再附加离线标签
 ```
 
-重复相同请求得到相同特征哈希，没有数据库写入。日志记录TraceID、基金代码、数量和耗时，不打印Token或整组净值。512条上限用于控制预览开销，正式历史样本分页读库和持久化仍需单独实施。
+重复相同请求得到相同特征哈希，没有数据库写入。日志记录TraceID、基金代码、数量和耗时，不打印Token或整组净值。
+512条上限仅用于POST预览；小范围分页读库见第6节。全历史离线批处理、持久化、训练仍未实施。
 
 自动验证：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/test_historical_nav_samples.py tests/test_historical_nav_http.py tests/test_stock_feature_snapshot.py -q
 ```
+
+## 6. 批量制作练习题：只读 dry-run
+
+### 6.1 这一步做了什么
+
+原GET回答“这只基金在某一天的练习题是什么”。新GET回答“这只基金在一段日期内，每一天的练习题是什么”。
+数据库里存的是净值；服务现场计算特征和后来真实发生的结果，组成样本，返回后不保存样本。
+
+dry-run就是“试着完整跑一遍，但不把计算结果保存到数据库”。仍然没有模型训练或未来预测。
+
+### 6.2 在你现有的接口工具中这样填
+
+如果服务是在改代码之前启动的，先在IDE中重启Python服务，让新路由生效。没有重载的新进程会返回404，
+这不代表日期范围没有数据。继续使用你自己的8000端口，不必导入集合或另开一个端口。
+
+方法：GET。地址：
+
+```text
+http://127.0.0.1:8000/internal/v1/features/historical-nav-samples/dry-run
+```
+
+Params填写：
+
+| 参数名 | 先填这个值 | 通俗解释 |
+| --- | --- | --- |
+| `fundCode` | `008888` | 要制作哪只基金的练习题。 |
+| `startDate` | `2025-08-01` | 从哪天开始出题，包含当天。 |
+| `endDate` | `2025-08-31` | 到哪天结束，包含当天。 |
+| `pageSize` | `10` | 程序每一批处理几个起点；省略默认10，允许1–30。 |
+
+Headers沿用原接口的`X-Service-Token`；Body留空，不传`Origin`。
+一次请求会在服务内部读完所有页，然后返回整个日期范围的结果，不需要你手动请求“第2页”。
+首版含首尾最多31个自然日，超出返回422。它不是“预测31天”，也不保证有31条净值。
+
+### 6.3 返回值怎么看
+
+本轮用当前数据库实际读到：008888在2025年8月有21个净值日，21条样本均为SCORABLE。
+这只是这一数据版本的验收例子，来源后续修订时应重新核对。
+
+| 返回字段 | 本例值 | 意思 |
+| --- | --- | --- |
+| `mode` | `DRY_RUN` | 只读试跑，结果未保存。 |
+| `fund_code`、`start_date`、`end_date` | 与请求对应 | 这次正在看哪个基金、哪段日期。 |
+| `page_size` | `10` | 每批起点数量。 |
+| `page_count` | `3` | 实际处理3个非空批次：10份、10份、1份。 |
+| `sample_count` | `21` | 整段日期共返回21份练习题。 |
+| `scorable_count` | `21` | 特征和历史答案都符合当前计算条件，不代表预测正确21次。 |
+| `data_insufficient_count` | `0` | 因历史或标签数据不合格而无法使用的数量。 |
+| `label_not_matured_count` | `0` | 已有特征但未来记录/公告还不齐的数量。 |
+| `unavailable_reasons` | `{}` | 各不可用原因及数量；本例没有。 |
+| `items` | 21个对象 | 按日期排序的全部样本，每项与单日GET的返回结构一致。 |
+
+后三种样本状态数量相加等于`sample_count`，它又等于`items`的长度。
+没有净值的日期不会补一份“零收益样本”；整个范围都没净值时正常返回200、0份样本、0页。
+
+### 6.4 怎么验收“分页不改变结果”
+
+1. 先调用原单日GET，`fundCode=008888`、`asOfDate=2025-08-07`，保存完整返回JSON。
+2. 调用上述批量GET，在`items`里找`as_of_date=2025-08-07`的对象。
+3. 这一对象应与第1步的完整JSON相同，包括`feature_payload`、`offline_label`、状态、净值口径和`feature_hash`。
+4. 把批量请求的`pageSize`从10改为30，再发一次；两次`items`应逐项完全相同，样本总数及质量统计也相同。
+5. `page_size`和`page_count`本来就会改变，不要求这两个字段相同。本例分别为10/3与30/1。
+
+比较前提：净值、公告日期、来源同步运行记录及计算版本没有变化。来源运行ID也在特征内容里，
+如果同步任务在两次请求之间发生，应重新在同一数据状态下对比，不能把正常数据更新误判为分页错误。
+单看HTTP 200或SCORABLE不能代替上述内容比对；哈希也不包含单独存放的标签，所以还要比较`offline_label`。
+
+### 6.5 程序内部怎么做
+
+1. 核验基金和来源一次，整次请求使用同一个只读数据库快照。
+2. 按日期取一页起点。“游标”就是记住上一页最后一天，下一页从它后面继续，不重复读取起点。
+3. 给每个起点查找它自己的最多60条已知历史和后20条净值；这些资料可以在请求日期范围之外。
+   公告迟到的历史记录不能提前使用；未来缺公告或坏值的记录不能跳过，否则会偷换第20日终点。
+4. 每一页的窗口使用`UNION ALL`合并成一次数据库请求。它只是“把多个有界查询的结果放在一起”，
+   不会把不同样本混成一条长序列。每个非空页最多2条净值SQL，没有逐日网络查库。
+5. 每份完整资料交给原构建器，再取出对应日期的样本，最后汇总最多31份结果。
+
+只读连接池仍为2个连接，连接等待/建连/单SQL各5秒限制。批量另有15秒页间耗时预算，
+不是精确到15秒强制中断；正在执行的一页仍受单SQL超时约束。中途异常或超时整次返回失败，
+不把前几页冒充完整结果。日志只有整次摘要和异常堆栈，不打印逐日净值或Token。
+
+基金不存在404；基金不是启用股票型或来源未就绪409；非法参数422；数据库异常或批量超时503。
+没有新表、DDL、DML或外部采集调用。它仍不具备历史修订版本回放，也不能检测来源整日漏数。
+
+阅读代码顺序：`app/api/routes/features.py` 的 `dry_run_historical_nav_samples` →
+`app/schemas/historical_nav.py` 的两个 Batch 类 → `app/services/historical_nav_preview.py` 的批量函数 →
+`app/repositories/historical_nav.py` 的 `read_historical_nav_input_page`。现有收益公式未改。
+
+自动测试（临时内存库，不改项目数据库）：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_historical_nav_batch.py tests/test_historical_nav_repository.py tests/test_historical_nav_http.py tests/test_historical_nav_samples.py tests/test_stock_feature_snapshot.py tests/test_feature_read.py -q
+```
+
+本轮验证：83项自动测试通过；真实数据库中每页1/10/30的21份样本一致，并逐日与单日服务完整对照；
+24个真实事务核验为只读、可重复读。新代码的接口测试客户端未替换数据库依赖，实际验证了200、403、422、
+空范围返回0及单日JSON一致。上述接口验证运行在独立进程内，不表示现有8000/8001进程已重载新路由。
+
+**学习停顿点：** 看懂“起点日期范围”“每份样本自己的窗口”“pageSize只影响批次”后再决定下一步。
+本轮不扩展到所有基金、全历史离线任务、样本持久化或模型训练。

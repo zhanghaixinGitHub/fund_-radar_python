@@ -36,6 +36,10 @@ Linux 部署的并发池应按任务类型和容量另行评估；不要直接�
 带现有`X-Service-Token`，Body留空，服务自己读取数据库已有净值并计算。参见[调用说明](docs_zhx/implementation/historical-nav-http-preview.md)。
 同路径POST仍支持自备净值的纯计算测试；普通验收不需要导入文件。两种预览均不保存结果、不触发同步、不训练或发布。
 
+小范围批量制作样本使用 `GET /internal/v1/features/historical-nav-samples/dry-run`，传 `fundCode`、`startDate`、
+`endDate`、可选 `pageSize`（默认10，1–30）。含首尾最多31个自然日，返回全部样本和统计，仍然只读不保存。
+逐步验收见[批量调用说明](docs_zhx/implementation/historical-nav-http-preview.md#6-批量制作练习题只读-dry-run)。
+
 ```powershell
 .\.venv\Scripts\ruff.exe check .
 .\.venv\Scripts\pytest.exe

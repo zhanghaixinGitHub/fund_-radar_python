@@ -16,9 +16,18 @@ from app.core.logging import get_logger
 from app.core.middleware import get_trace_id
 from app.repositories.historical_nav import HistoricalNavPreviewReadError
 from app.schemas.feature import InternalFeatureStatus
-from app.schemas.historical_nav import HistoricalNavPreviewRequest, HistoricalNavPreviewResponse
+from app.schemas.historical_nav import (
+    HistoricalNavBatchPreviewRequest,
+    HistoricalNavBatchPreviewResponse,
+    HistoricalNavPreviewRequest,
+    HistoricalNavPreviewResponse,
+)
 from app.services.feature_read import get_latest_stock_feature_status
-from app.services.historical_nav_preview import preview_stored_historical_nav_sample
+from app.services.historical_nav_preview import (
+    HistoricalNavBatchTimeoutError,
+    preview_stored_historical_nav_batch,
+    preview_stored_historical_nav_sample,
+)
 from app.services.historical_nav_samples import (
     HistoricalNavPoint,
     HistoricalNavSample,
@@ -99,6 +108,53 @@ def preview_stored_historical_nav(
     # FastAPI按response_model输出JSON：date成为日期字符串，Decimal成为小数字符串。
     # HTTP 200只表示请求已处理；样本是否可用还要看eligibility_status。
     return sample
+
+
+@router.get(
+    "/historical-nav-samples/dry-run",
+    response_model=HistoricalNavBatchPreviewResponse,
+    dependencies=[Depends(require_service_token)],
+)
+def dry_run_historical_nav_samples(
+    # Query() 表示从 URL 读取四个参数；不需要 JSON 请求体，字段解释见这个请求类。
+    request: Annotated[HistoricalNavBatchPreviewRequest, Query()],
+) -> HistoricalNavBatchPreviewResponse:
+    """批量 GET：一只基金、一小段日期的只读试跑；pageSize 控制内部读取批次。"""
+    started_at = perf_counter()
+    try:
+        result = preview_stored_historical_nav_batch(request)
+    except HistoricalNavPreviewReadError as error:
+        logger.warning(
+            "features.dry_run_historical_nav_samples >>> unavailable, trace_id=%s, fund_code=%s, code=%s",
+            get_trace_id(), request.fund_code, error.code,
+        )
+        status_code = 404 if error.code == "FUND_NOT_FOUND" else 409
+        raise HTTPException(status_code=status_code, detail={"code": error.code, "message": str(error)}) from error
+    except (SQLAlchemyError, HistoricalNavBatchTimeoutError) as error:
+        # 查询故障或超时均整次失败，不返回已经算好的一部分来冒充完整结果。
+        logger.exception(
+            "features.dry_run_historical_nav_samples >>> read failed, trace_id=%s, fund_code=%s, "
+            "start_date=%s, end_date=%s, page_size=%s, elapsed_ms=%.2f",
+            get_trace_id(), request.fund_code, request.start_date, request.end_date, request.page_size,
+            (perf_counter() - started_at) * 1000,
+        )
+        raise HTTPException(status_code=503, detail="批量预览暂时不可用或超时，请缩短日期范围后重试。") from error
+    except (ValueError, ArithmeticError) as error:
+        logger.exception(
+            "features.dry_run_historical_nav_samples >>> invalid NAV, trace_id=%s, fund_code=%s",
+            get_trace_id(), request.fund_code,
+        )
+        raise HTTPException(status_code=422, detail="该范围净值无法计算，请检查数据质量。") from error
+    # 一次请求只记一条完成摘要，不逐日打印 INFO，不记录净值明细或服务 Token。
+    logger.info(
+        "features.dry_run_historical_nav_samples >>> completed, trace_id=%s, fund_code=%s, "
+        "start_date=%s, end_date=%s, page_size=%s, page_count=%s, samples=%s, "
+        "scorable=%s, insufficient=%s, pending=%s, elapsed_ms=%.2f",
+        get_trace_id(), request.fund_code, request.start_date, request.end_date, result.page_size,
+        result.page_count, result.sample_count, result.scorable_count, result.data_insufficient_count,
+        result.label_not_matured_count, (perf_counter() - started_at) * 1000,
+    )
+    return result
 
 
 @router.post(

@@ -1,7 +1,8 @@
-"""POST自备净值预览的请求/响应格式；普通GET读库调用不需要手填这些对象。
+"""历史净值预览的接口格式：POST 自备数据，以及 GET 批量读库的查询参数和响应。
 
 这里的类是接口数据结构，不是数据库实体。FastAPI先用Pydantic检查请求能否装进这些结构，
-格式不合要求就返回422，检查通过才进入计算函数。GET直接返回HistoricalNavSample。
+格式不合要求就返回422，检查通过才进入计算函数。
+单日GET直接返回HistoricalNavSample；批量GET则将多条样本放在items内，并附上统计。
 """
 
 from datetime import date
@@ -83,4 +84,56 @@ class HistoricalNavPreviewResponse(BaseModel):
     # 返回样本中，已能算特征但未来20条净值/公告还不齐的条数。
     label_not_matured_count: int
     # 样本列表，每个对象的详细字段见HistoricalNavSample；上面三种状态计数之和等于sample_count。
+    items: tuple[HistoricalNavSample, ...]
+
+
+class HistoricalNavBatchPreviewRequest(BaseModel):
+    """批量 GET 的四个 URL 参数；没有请求体，不需要手工提供净值。"""
+
+    # alias 为 HTTP 参数名，populate_by_name 也允许 Python 代码使用 snake_case 构造对象。
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
+    # 要制作练习题的基金代码；具体品类和来源由数据库核验。
+    fund_code: str = Field(alias="fundCode", pattern=r"^[0-9]{6}$", min_length=6, max_length=6)
+    # 第一份样本的日期范围起点，包含当天；无净值日不会伪造样本。
+    start_date: date = Field(alias="startDate")
+    # 日期范围终点，也包含当天；历史和标签所需的净值可以在此范围之外。
+    end_date: date = Field(alias="endDate")
+    # 每一批处理多少个样本起点；不是只返回这一页，也不是预测多少天。
+    page_size: int = Field(default=10, alias="pageSize", ge=1, le=30)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> Self:
+        """首版限制为一个小窗口；在查数据库之前拒绝反向日期和超量请求。"""
+        if not 0 <= (self.end_date - self.start_date).days < 31:
+            raise ValueError("startDate不能晚于endDate，且含首尾最多31个自然日。")
+        return self
+
+
+class HistoricalNavBatchPreviewResponse(BaseModel):
+    """整段日期的只读试跑结果；所有页完成才返回，不把半成品当作成功。"""
+
+    # 固定 DRY_RUN：已经计算，但没有保存样本、训练模型或发布预测。
+    mode: Literal["DRY_RUN"] = "DRY_RUN"
+    # 本次试跑的基金。
+    fund_code: str
+    # 请求的日期起点（含当天）。
+    start_date: date
+    # 请求的日期终点（含当天）。
+    end_date: date
+    # 本次内部读取的每页大小；改变它不应改变 items。
+    page_size: int
+    # 实际处理的非空页数；例如21份样本、每页10份时为3，空结果时为0。
+    page_count: int
+    # 整段日期内实际生成的样本数，等于 len(items)，本版最多31份。
+    sample_count: int
+    # 已有合格特征和完整历史答案的样本数；不是预测正确数量。
+    scorable_count: int
+    # 历史或标签数据不符合计算要求的样本数。
+    data_insufficient_count: int
+    # 特征已算出，但未来20条记录或公告还不齐的样本数。
+    label_not_matured_count: int
+    # 不可用原因及对应数量；可用样本不计入。日期等细节保留在原因中。
+    unavailable_reasons: dict[str, int]
+    # 全部页汇总的样本，按日期递增；每项结构与原单日 GET 完全相同。
     items: tuple[HistoricalNavSample, ...]

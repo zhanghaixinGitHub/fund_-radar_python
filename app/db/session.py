@@ -15,7 +15,7 @@ def get_engine() -> Engine:
 
 @lru_cache
 def get_nav_preview_engine() -> Engine:
-    """为单条历史样本预览提供独立的小连接池和5秒建连/查询超时。"""
+    """为单日与小范围批量历史样本预览提供独立的小连接池和5秒建连/查询超时。"""
     # lru_cache让本进程的后续请求复用同一连接池；创建引擎本身不会立即读取任何净值。
     # 这里只配置连接与超时；真正的READ ONLY限制在historical_nav_preview服务的事务中设置。
     return create_engine(
