@@ -20,6 +20,11 @@ from app.models.fund import (
     SourceSyncCursor,
     SourceSyncRun,
 )
+from app.models.historical_nav_sample import (
+    HistoricalNavSampleBatch,
+    HistoricalNavSampleLabel,
+    HistoricalNavSampleRecord,
+)
 from app.models.market_reference import (
     FundExchangeDaily,
     IndexWeightSnapshot,
@@ -42,6 +47,9 @@ __all__ = [
     "FundProfile",
     "FundShareClass",
     "FundShareSnapshot",
+    "HistoricalNavSampleBatch",
+    "HistoricalNavSampleLabel",
+    "HistoricalNavSampleRecord",
     "MarketEvent",
     "MarketIndexCatalog",
     "MarketIndexClassification",
