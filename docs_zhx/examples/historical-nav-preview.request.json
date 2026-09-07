@@ -1,0 +1,495 @@
+{
+  "fund_code": "000001",
+  "fund_type": "STOCK",
+  "source_code": "SYNTHETIC_DEMO",
+  "source_sync_run_id": null,
+  "as_of_date": "2025-03-26",
+  "nav_points": [
+    {
+      "nav_date": "2025-01-01",
+      "ann_date": "2025-01-02",
+      "unit_nav": "1.00",
+      "accumulated_nav": "1.00"
+    },
+    {
+      "nav_date": "2025-01-02",
+      "ann_date": "2025-01-03",
+      "unit_nav": "1.01",
+      "accumulated_nav": "1.01"
+    },
+    {
+      "nav_date": "2025-01-03",
+      "ann_date": "2025-01-04",
+      "unit_nav": "1.02",
+      "accumulated_nav": "1.02"
+    },
+    {
+      "nav_date": "2025-01-06",
+      "ann_date": "2025-01-07",
+      "unit_nav": "1.03",
+      "accumulated_nav": "1.03"
+    },
+    {
+      "nav_date": "2025-01-07",
+      "ann_date": "2025-01-08",
+      "unit_nav": "1.04",
+      "accumulated_nav": "1.04"
+    },
+    {
+      "nav_date": "2025-01-08",
+      "ann_date": "2025-01-09",
+      "unit_nav": "1.05",
+      "accumulated_nav": "1.05"
+    },
+    {
+      "nav_date": "2025-01-09",
+      "ann_date": "2025-01-10",
+      "unit_nav": "1.06",
+      "accumulated_nav": "1.06"
+    },
+    {
+      "nav_date": "2025-01-10",
+      "ann_date": "2025-01-11",
+      "unit_nav": "1.07",
+      "accumulated_nav": "1.07"
+    },
+    {
+      "nav_date": "2025-01-13",
+      "ann_date": "2025-01-14",
+      "unit_nav": "1.08",
+      "accumulated_nav": "1.08"
+    },
+    {
+      "nav_date": "2025-01-14",
+      "ann_date": "2025-01-15",
+      "unit_nav": "1.09",
+      "accumulated_nav": "1.09"
+    },
+    {
+      "nav_date": "2025-01-15",
+      "ann_date": "2025-01-16",
+      "unit_nav": "1.10",
+      "accumulated_nav": "1.10"
+    },
+    {
+      "nav_date": "2025-01-16",
+      "ann_date": "2025-01-17",
+      "unit_nav": "1.11",
+      "accumulated_nav": "1.11"
+    },
+    {
+      "nav_date": "2025-01-17",
+      "ann_date": "2025-01-18",
+      "unit_nav": "1.12",
+      "accumulated_nav": "1.12"
+    },
+    {
+      "nav_date": "2025-01-20",
+      "ann_date": "2025-01-21",
+      "unit_nav": "1.13",
+      "accumulated_nav": "1.13"
+    },
+    {
+      "nav_date": "2025-01-21",
+      "ann_date": "2025-01-22",
+      "unit_nav": "1.14",
+      "accumulated_nav": "1.14"
+    },
+    {
+      "nav_date": "2025-01-22",
+      "ann_date": "2025-01-23",
+      "unit_nav": "1.15",
+      "accumulated_nav": "1.15"
+    },
+    {
+      "nav_date": "2025-01-23",
+      "ann_date": "2025-01-24",
+      "unit_nav": "1.16",
+      "accumulated_nav": "1.16"
+    },
+    {
+      "nav_date": "2025-01-24",
+      "ann_date": "2025-01-25",
+      "unit_nav": "1.17",
+      "accumulated_nav": "1.17"
+    },
+    {
+      "nav_date": "2025-01-27",
+      "ann_date": "2025-01-28",
+      "unit_nav": "1.18",
+      "accumulated_nav": "1.18"
+    },
+    {
+      "nav_date": "2025-01-28",
+      "ann_date": "2025-01-29",
+      "unit_nav": "1.19",
+      "accumulated_nav": "1.19"
+    },
+    {
+      "nav_date": "2025-01-29",
+      "ann_date": "2025-01-30",
+      "unit_nav": "1.20",
+      "accumulated_nav": "1.20"
+    },
+    {
+      "nav_date": "2025-01-30",
+      "ann_date": "2025-01-31",
+      "unit_nav": "1.21",
+      "accumulated_nav": "1.21"
+    },
+    {
+      "nav_date": "2025-01-31",
+      "ann_date": "2025-02-01",
+      "unit_nav": "1.22",
+      "accumulated_nav": "1.22"
+    },
+    {
+      "nav_date": "2025-02-03",
+      "ann_date": "2025-02-04",
+      "unit_nav": "1.23",
+      "accumulated_nav": "1.23"
+    },
+    {
+      "nav_date": "2025-02-04",
+      "ann_date": "2025-02-05",
+      "unit_nav": "1.24",
+      "accumulated_nav": "1.24"
+    },
+    {
+      "nav_date": "2025-02-05",
+      "ann_date": "2025-02-06",
+      "unit_nav": "1.25",
+      "accumulated_nav": "1.25"
+    },
+    {
+      "nav_date": "2025-02-06",
+      "ann_date": "2025-02-07",
+      "unit_nav": "1.26",
+      "accumulated_nav": "1.26"
+    },
+    {
+      "nav_date": "2025-02-07",
+      "ann_date": "2025-02-08",
+      "unit_nav": "1.27",
+      "accumulated_nav": "1.27"
+    },
+    {
+      "nav_date": "2025-02-10",
+      "ann_date": "2025-02-11",
+      "unit_nav": "1.28",
+      "accumulated_nav": "1.28"
+    },
+    {
+      "nav_date": "2025-02-11",
+      "ann_date": "2025-02-12",
+      "unit_nav": "1.29",
+      "accumulated_nav": "1.29"
+    },
+    {
+      "nav_date": "2025-02-12",
+      "ann_date": "2025-02-13",
+      "unit_nav": "1.30",
+      "accumulated_nav": "1.30"
+    },
+    {
+      "nav_date": "2025-02-13",
+      "ann_date": "2025-02-14",
+      "unit_nav": "1.31",
+      "accumulated_nav": "1.31"
+    },
+    {
+      "nav_date": "2025-02-14",
+      "ann_date": "2025-02-15",
+      "unit_nav": "1.32",
+      "accumulated_nav": "1.32"
+    },
+    {
+      "nav_date": "2025-02-17",
+      "ann_date": "2025-02-18",
+      "unit_nav": "1.33",
+      "accumulated_nav": "1.33"
+    },
+    {
+      "nav_date": "2025-02-18",
+      "ann_date": "2025-02-19",
+      "unit_nav": "1.34",
+      "accumulated_nav": "1.34"
+    },
+    {
+      "nav_date": "2025-02-19",
+      "ann_date": "2025-02-20",
+      "unit_nav": "1.35",
+      "accumulated_nav": "1.35"
+    },
+    {
+      "nav_date": "2025-02-20",
+      "ann_date": "2025-02-21",
+      "unit_nav": "1.36",
+      "accumulated_nav": "1.36"
+    },
+    {
+      "nav_date": "2025-02-21",
+      "ann_date": "2025-02-22",
+      "unit_nav": "1.37",
+      "accumulated_nav": "1.37"
+    },
+    {
+      "nav_date": "2025-02-24",
+      "ann_date": "2025-02-25",
+      "unit_nav": "1.38",
+      "accumulated_nav": "1.38"
+    },
+    {
+      "nav_date": "2025-02-25",
+      "ann_date": "2025-02-26",
+      "unit_nav": "1.39",
+      "accumulated_nav": "1.39"
+    },
+    {
+      "nav_date": "2025-02-26",
+      "ann_date": "2025-02-27",
+      "unit_nav": "1.40",
+      "accumulated_nav": "1.40"
+    },
+    {
+      "nav_date": "2025-02-27",
+      "ann_date": "2025-02-28",
+      "unit_nav": "1.41",
+      "accumulated_nav": "1.41"
+    },
+    {
+      "nav_date": "2025-02-28",
+      "ann_date": "2025-03-01",
+      "unit_nav": "1.42",
+      "accumulated_nav": "1.42"
+    },
+    {
+      "nav_date": "2025-03-03",
+      "ann_date": "2025-03-04",
+      "unit_nav": "1.43",
+      "accumulated_nav": "1.43"
+    },
+    {
+      "nav_date": "2025-03-04",
+      "ann_date": "2025-03-05",
+      "unit_nav": "1.44",
+      "accumulated_nav": "1.44"
+    },
+    {
+      "nav_date": "2025-03-05",
+      "ann_date": "2025-03-06",
+      "unit_nav": "1.45",
+      "accumulated_nav": "1.45"
+    },
+    {
+      "nav_date": "2025-03-06",
+      "ann_date": "2025-03-07",
+      "unit_nav": "1.46",
+      "accumulated_nav": "1.46"
+    },
+    {
+      "nav_date": "2025-03-07",
+      "ann_date": "2025-03-08",
+      "unit_nav": "1.47",
+      "accumulated_nav": "1.47"
+    },
+    {
+      "nav_date": "2025-03-10",
+      "ann_date": "2025-03-11",
+      "unit_nav": "1.48",
+      "accumulated_nav": "1.48"
+    },
+    {
+      "nav_date": "2025-03-11",
+      "ann_date": "2025-03-12",
+      "unit_nav": "1.49",
+      "accumulated_nav": "1.49"
+    },
+    {
+      "nav_date": "2025-03-12",
+      "ann_date": "2025-03-13",
+      "unit_nav": "1.50",
+      "accumulated_nav": "1.50"
+    },
+    {
+      "nav_date": "2025-03-13",
+      "ann_date": "2025-03-14",
+      "unit_nav": "1.51",
+      "accumulated_nav": "1.51"
+    },
+    {
+      "nav_date": "2025-03-14",
+      "ann_date": "2025-03-15",
+      "unit_nav": "1.52",
+      "accumulated_nav": "1.52"
+    },
+    {
+      "nav_date": "2025-03-17",
+      "ann_date": "2025-03-18",
+      "unit_nav": "1.53",
+      "accumulated_nav": "1.53"
+    },
+    {
+      "nav_date": "2025-03-18",
+      "ann_date": "2025-03-19",
+      "unit_nav": "1.54",
+      "accumulated_nav": "1.54"
+    },
+    {
+      "nav_date": "2025-03-19",
+      "ann_date": "2025-03-20",
+      "unit_nav": "1.55",
+      "accumulated_nav": "1.55"
+    },
+    {
+      "nav_date": "2025-03-20",
+      "ann_date": "2025-03-21",
+      "unit_nav": "1.56",
+      "accumulated_nav": "1.56"
+    },
+    {
+      "nav_date": "2025-03-21",
+      "ann_date": "2025-03-22",
+      "unit_nav": "1.57",
+      "accumulated_nav": "1.57"
+    },
+    {
+      "nav_date": "2025-03-24",
+      "ann_date": "2025-03-25",
+      "unit_nav": "1.58",
+      "accumulated_nav": "1.58"
+    },
+    {
+      "nav_date": "2025-03-25",
+      "ann_date": "2025-03-26",
+      "unit_nav": "1.59",
+      "accumulated_nav": "1.59"
+    },
+    {
+      "nav_date": "2025-03-26",
+      "ann_date": "2025-03-27",
+      "unit_nav": "1.60",
+      "accumulated_nav": "1.60"
+    },
+    {
+      "nav_date": "2025-03-27",
+      "ann_date": "2025-03-28",
+      "unit_nav": "1.61",
+      "accumulated_nav": "1.61"
+    },
+    {
+      "nav_date": "2025-03-28",
+      "ann_date": "2025-03-29",
+      "unit_nav": "1.62",
+      "accumulated_nav": "1.62"
+    },
+    {
+      "nav_date": "2025-03-31",
+      "ann_date": "2025-04-01",
+      "unit_nav": "1.63",
+      "accumulated_nav": "1.63"
+    },
+    {
+      "nav_date": "2025-04-01",
+      "ann_date": "2025-04-02",
+      "unit_nav": "1.64",
+      "accumulated_nav": "1.64"
+    },
+    {
+      "nav_date": "2025-04-02",
+      "ann_date": "2025-04-03",
+      "unit_nav": "1.65",
+      "accumulated_nav": "1.65"
+    },
+    {
+      "nav_date": "2025-04-03",
+      "ann_date": "2025-04-04",
+      "unit_nav": "1.66",
+      "accumulated_nav": "1.66"
+    },
+    {
+      "nav_date": "2025-04-04",
+      "ann_date": "2025-04-05",
+      "unit_nav": "1.67",
+      "accumulated_nav": "1.67"
+    },
+    {
+      "nav_date": "2025-04-07",
+      "ann_date": "2025-04-08",
+      "unit_nav": "1.68",
+      "accumulated_nav": "1.68"
+    },
+    {
+      "nav_date": "2025-04-08",
+      "ann_date": "2025-04-09",
+      "unit_nav": "1.69",
+      "accumulated_nav": "1.69"
+    },
+    {
+      "nav_date": "2025-04-09",
+      "ann_date": "2025-04-10",
+      "unit_nav": "1.70",
+      "accumulated_nav": "1.70"
+    },
+    {
+      "nav_date": "2025-04-10",
+      "ann_date": "2025-04-11",
+      "unit_nav": "1.71",
+      "accumulated_nav": "1.71"
+    },
+    {
+      "nav_date": "2025-04-11",
+      "ann_date": "2025-04-12",
+      "unit_nav": "1.72",
+      "accumulated_nav": "1.72"
+    },
+    {
+      "nav_date": "2025-04-14",
+      "ann_date": "2025-04-15",
+      "unit_nav": "1.73",
+      "accumulated_nav": "1.73"
+    },
+    {
+      "nav_date": "2025-04-15",
+      "ann_date": "2025-04-16",
+      "unit_nav": "1.74",
+      "accumulated_nav": "1.74"
+    },
+    {
+      "nav_date": "2025-04-16",
+      "ann_date": "2025-04-17",
+      "unit_nav": "1.75",
+      "accumulated_nav": "1.75"
+    },
+    {
+      "nav_date": "2025-04-17",
+      "ann_date": "2025-04-18",
+      "unit_nav": "1.76",
+      "accumulated_nav": "1.76"
+    },
+    {
+      "nav_date": "2025-04-18",
+      "ann_date": "2025-04-19",
+      "unit_nav": "1.77",
+      "accumulated_nav": "1.77"
+    },
+    {
+      "nav_date": "2025-04-21",
+      "ann_date": "2025-04-22",
+      "unit_nav": "1.78",
+      "accumulated_nav": "1.78"
+    },
+    {
+      "nav_date": "2025-04-22",
+      "ann_date": "2025-04-23",
+      "unit_nav": "1.79",
+      "accumulated_nav": "1.79"
+    },
+    {
+      "nav_date": "2025-04-23",
+      "ann_date": "2025-04-24",
+      "unit_nav": "1.80",
+      "accumulated_nav": "1.80"
+    }
+  ]
+}

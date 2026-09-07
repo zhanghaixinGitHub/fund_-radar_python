@@ -25,18 +25,25 @@ FEATURE_NAV_SYNC_TYPES = (
 class FeatureSourceReadiness:
     """已登记且启用的数据源最小元数据，不含任何外部凭据。"""
 
+    # 来源登记表主键；读nav_daily时按source_id筛选，避免混用其他来源。
     source_id: UUID
+    # 人可读的来源编码，例如TUSHARE_PRO_FUND。
     source_code: str
+    # 该来源最近一次成功净值同步的运行标识；不是每条历史净值各自的首次来源记录。
     source_sync_run_id: UUID
+    # 上述同步任务完成时间；反映本地数据来源水位，不代表历史净值公告日期。
     source_sync_finished_at: datetime
 
 
 @dataclass(frozen=True)
 class FeatureNavPoint:
-    """一条来自同一受控来源的基金日净值。"""
+    """旧版最新特征快照的净值输入，不带公告日；阶段2历史样本使用HistoricalNavPoint。"""
 
+    # 净值所属业务日期。
     nav_date: date
+    # 单位净值，用Decimal接收数据库小数。
     unit_nav: Decimal
+    # 累计净值，可缺失；是否回退由使用此对象的计算器按版本规则决定。
     accumulated_nav: Decimal | None
 
 
@@ -44,11 +51,17 @@ class FeatureNavPoint:
 class StockFeatureInput:
     """一只试点股票型基金的有限历史净值输入。"""
 
+    # 当前快照对应的基金份额代码。
     fund_code: str
+    # 基金品类，股票型试点为STOCK。
     fund_type: str
+    # 所有净值来自哪个登记来源。
     source_code: str
+    # 对应来源当前最近一次成功净值同步ID，用于追溯。
     source_sync_run_id: UUID
+    # 同步完成时刻，不是历史样本公告可得时刻。
     source_sync_finished_at: datetime
+    # 从早到晚的有限净值序列；这个旧结构只用于现有最新快照计算。
     nav_points: tuple[FeatureNavPoint, ...]
 
 
@@ -56,14 +69,23 @@ class StockFeatureInput:
 class FeatureSnapshotUpsert:
     """已完成计算、可以持久化的一条特征快照。"""
 
+    # 快照归属的基金份额代码。
     fund_code: str
+    # 当前快照使用的最后一个净值业务日。
     as_of_date: date
+    # 该基金的类型，供不同类型快照隔离处理。
     fund_type: str
+    # 生成快照的特征规则版本，与基金和业务日共同构成业务唯一键。
     feature_version: str
+    # 输入完整度，范围0到1；不是预测准确率或上涨概率。
     completeness: Decimal
+    # 特征是否满足该版本的计算门槛，如SCORABLE或DATA_INSUFFICIENT。
     eligibility_status: str
+    # 未达门槛时的原因，满足时为空。
     unavailable_reason: str | None
+    # 要保存的特征内容字典；不是模型预测结果。
     feature_payload: dict[str, object]
+    # 内容校验指纹，用于比较重跑后的快照是否真的变化。
     feature_hash: str
 
 
@@ -71,13 +93,17 @@ class FeatureSnapshotUpsert:
 class FeatureSnapshotWriteStats:
     """特征快照幂等写入统计。"""
 
+    # 本次新插入的快照数量。
     created_count: int = 0
+    # 已存在但内容发生变化、本次执行了更新的数量。
     updated_count: int = 0
+    # 内容未变而跳过写入的数量；这就是相同输入重跑不重复写的依据。
     skipped_count: int = 0
 
 
 def get_enabled_feature_source(session: Session, source_code: str) -> FeatureSourceReadiness | None:
     """只接受已登记、已启用的数据源，禁用或缺失时不允许构建新快照。"""
+    # 先确认来源仍启用；有历史净值不代表一个已禁用的来源仍可被当前功能使用。
     source_row = session.execute(
         select(SourceRegistry.source_id, SourceRegistry.source_code, SourceRegistry.last_success_at).where(
             SourceRegistry.source_code == source_code,
@@ -86,6 +112,8 @@ def get_enabled_feature_source(session: Session, source_code: str) -> FeatureSou
     ).one_or_none()
     if source_row is None:
         return None
+    # 再找最近一条已完成且成功的“净值类同步”，不能把其他类型同步成功误当成净值就绪。
+    # finished_at倒序取1条；相同时再按运行ID排序，使选择结果稳定。
     sync_row = session.execute(
         select(SourceSyncRun.sync_run_id, SourceSyncRun.finished_at)
         .where(
@@ -99,6 +127,7 @@ def get_enabled_feature_source(session: Session, source_code: str) -> FeatureSou
     ).one_or_none()
     if sync_row is None:
         return None
+    # 两项检查都通过才返回来源信息；调用方负责将None转为“来源未就绪”，不自动发起同步。
     return FeatureSourceReadiness(
         source_id=source_row.source_id,
         source_code=source_row.source_code,

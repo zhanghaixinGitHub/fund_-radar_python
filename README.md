@@ -32,6 +32,10 @@ Linux 部署的并发池应按任务类型和容量另行评估；不要直接�
 
 ## 验证
 
+阶段2净值样本直接调用 `GET /internal/v1/features/historical-nav-samples/preview?fundCode=008888&asOfDate=2025-08-07`，
+带现有`X-Service-Token`，Body留空，服务自己读取数据库已有净值并计算。参见[调用说明](docs_zhx/implementation/historical-nav-http-preview.md)。
+同路径POST仍支持自备净值的纯计算测试；普通验收不需要导入文件。两种预览均不保存结果、不触发同步、不训练或发布。
+
 ```powershell
 .\.venv\Scripts\ruff.exe check .
 .\.venv\Scripts\pytest.exe
