@@ -290,6 +290,8 @@ POST不查数据库，只能检查你提交的记录，不能证明遗漏的记�
 
 ## 8. 保存前的一小步：先定义练习册的格式（2026-09-07）
 
+本节保留建表前的设计说明；其中“未执行”“下一步”“停顿点”均为当时状态。当前已完成建表与保存，调用方法以第9节为准。
+
 **本步只准备实体和建表脚本，未在真实数据库执行迁移。** 没有保存接口，没有样本落库，没有模型训练。
 现有单日和批量GET仍然现场读取净值、计算、返回；调用它们不会写入下面三张新表。
 
@@ -379,3 +381,226 @@ historical_nav_sample_batch（封面：一只基金、日期段、规则、统�
 
 本步验证：13项新结构检查和102项原有相关测试，共115项通过；改动Python文件Ruff通过。
 有一条既有TestClient依赖弃用警告，未升级依赖。真实数据库建表、数据保存和回退执行仍未验证。
+
+## 9. 当前功能：整批保存与按批次查询（2026-09-07）
+
+已按用户要求取消逐段学习停顿，完成样本保存闭环：从已有净值制作样本、整批保存、重复请求复用、按编号读回。
+数据库`fund_ai`已执行Alembic `20260907_13`，三张表及全部33个字段的中文注释已核验。不要再重复执行原生建表SQL。
+这一步保存的是历史样本及后来发生的实际答案，**不是模型预测；尚未训练、回测或发布模型**。
+
+### 9.1 先重启Python服务，再调接口
+
+本次新代码已通过连接真实数据库的进程内HTTP验收，但原8000监听进程实测仍未加载新路由，返回404。
+请在启动它的IDE或终端重启/重载Python服务，再使用下列接口。Headers沿用现有`X-Service-Token`；不要带`Origin`。
+Token只在本地接口工具填写，不写到文档、前端或仓库。保存请求Body选择JSON，`Content-Type: application/json`。
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /internal/v1/features/historical-nav-samples/preview` | 原单日预览，实时计算、不保存。 |
+| `GET /internal/v1/features/historical-nav-samples/dry-run` | 原日期段预览，实时计算、不保存。 |
+| `POST /internal/v1/features/historical-nav-samples/batches` | 新接口：读库计算并保存一整批。不是自备净值的原POST预览。 |
+| `GET /internal/v1/features/historical-nav-samples/batches/{batch_id}` | 新接口：只查已经保存的内容，不重新计算。 |
+
+### 9.2 立即查验已保存的真实例子
+
+```text
+GET http://127.0.0.1:8000/internal/v1/features/historical-nav-samples/batches/75b8258a-7cfd-4bfc-b2e8-2b5f05d9f8b3
+```
+
+该批次是本次验收保留的`008888 / 2025-08-07`。真实三表核验为1条批次、1条样本、1条答案。
+`mode=STORED`、`purpose=LEARNING_ONLY`、`sample_count=1`、`scorable_count=1`。
+`items[0]`与保存当时的同日单日预览完整JSON一致；答案收益为`0.140096188101175632347702173`，表示后来实际上涨约14.0096%，不是预测概率。
+
+### 9.3 保存请求：只传基金、日期与请求凭证
+
+```text
+POST http://127.0.0.1:8000/internal/v1/features/historical-nav-samples/batches
+```
+
+```json
+{
+  "fundCode": "008888",
+  "startDate": "2025-08-07",
+  "endDate": "2025-08-07",
+  "pageSize": 10,
+  "requestKey": "70bd8a7d-e1d4-4fbb-9e9e-d5eeadab62aa"
+}
+```
+
+上面的凭证已经用于9.2的批次，所以直接复制会返回**200和原批次**，不会再新增。
+想新建一批，使用接口工具生成一个新UUID填入`requestKey`；日期可以换成需要的范围，含首尾最多31个自然日。
+只保存这一只基金在范围内实际存在的净值日期，不会导入全历史。没有净值的范围也会保存一条总数为0的批次，不伪造样本。
+`pageSize`为1–30的整数，默认10，只控制内部每页读取数量；无需自己传净值、特征或标签JSON。
+
+**重试和重算的区别：** 网络超时、点击重发，沿用原凭证；明确要重新用当前数据库计算，才换新凭证。
+同一凭证、相同基金/日期/规则，无论改页大小还是来源随后更新，都返回旧结果。相同凭证改日期或基金返回409。
+以后代码升级导致规则版本不同，同一凭证也会冲突；旧批次仍可按编号查询，新规则另建批次。
+
+### 9.4 返回结果与错误
+
+保存首次成功为201；相同请求重试为200；按编号GET为200。三者返回同一份批次结构，重试与GET的完整JSON相同。
+相较dry-run，增加`batch_id`、`request_key`、来源水位、三个规则版本、`purpose`和保存时间`created_at`；不保存或返回分页过程字段。
+`created_at`带`+08:00`时区；业务日期仍为`YYYY-MM-DD`。`items`沿用原样本结构，字段解释见前文。
+
+| 状态码 | 含义与处理 |
+| --- | --- |
+| 403 | 缺少/错误服务Token，或请求带Origin；不访问数据库。 |
+| 404 | 创建时基金不存在，或查询时批次编号不存在。 |
+| 409 | `REQUEST_KEY_CONFLICT`表示凭证被另一范围/规则使用；也可能是基金品类或来源不满足准入。先看`detail.code`。 |
+| 422 | UUID、日期、页大小、额外字段等不合法，或构建结果未通过保存一致性校验。 |
+| 503 | 数据库/超时等失败，不返回半批成功；保存重试沿用原凭证。若为`STORED_BATCH_INCONSISTENT`，表示已存内容校验失败，应排查，不能靠重试覆盖旧数据。 |
+
+只有`SCORABLE`样本写答案；不合格或答案未成熟的样本仍保留，但不写答案行，更不能用0冒充未知。
+批次、样本、答案处于一个事务中：全部成功才提交，任何一步失败整体回滚。服务不更新或删除旧批次。
+这是应用层“不覆盖”的约定，不是数据库层防篡改保证；本轮没有增加不可修改触发器或数据库角色权限。
+
+### 9.5 验收与代码位置
+
+- 读回9.2的批次，再重发9.3，完整JSON应一致。仅将`pageSize`改为1或30，应仍为同一`batch_id`。
+- 原凭证保持不变，将`endDate`改为`2025-08-08`，应返回409，旧结果仍可GET查询。
+- 与现场预览比较时，要求原始净值、来源水位和计算规则未变化；来源更新后保存快照不跟着变，不应强求它永远等于最新预览。
+- 数据库验收用下面只读SQL。正常业务写入由上述HTTP事务服务完成，本轮没有额外数据迁移DML，不手工拼造题目或答案。
+
+```sql
+SELECT batch_id, request_key, fund_code, start_date, end_date,
+       sample_count, scorable_count, purpose, created_at
+FROM public.historical_nav_sample_batch
+WHERE batch_id = '75b8258a-7cfd-4bfc-b2e8-2b5f05d9f8b3'::uuid;
+
+SELECT s.as_of_date, s.eligibility_status, s.unavailable_reason,
+       l.label_end_date, l.future_return_20d, l.label_up_20d
+FROM public.historical_nav_sample s
+LEFT JOIN public.historical_nav_sample_label l ON l.sample_id = s.sample_id
+WHERE s.batch_id = '75b8258a-7cfd-4bfc-b2e8-2b5f05d9f8b3'::uuid
+ORDER BY s.as_of_date;
+```
+
+| 代码位置 | 职责 |
+| --- | --- |
+| `app/api/routes/historical_nav_storage.py` | 两个HTTP入口、认证、状态码与带TraceID的摘要日志。 |
+| `app/schemas/historical_nav_storage.py` | 请求参数校验、响应字段中文说明、保存时间时区输出。 |
+| `app/services/historical_nav_storage.py` | 重试识别、调用公共构建器、整批事务、三表读回。 |
+| `app/services/historical_nav_storage_validation.py` | 基金/日期/版本/来源、哈希、字段白名单、数量及答案关系校验。 |
+| `app/repositories/historical_nav_storage.py` | 按索引读批次，批量插入明细，一次关联查询读回，最多32行用于发现非法超量。 |
+| `app/services/historical_nav_preview.py` | dry-run与保存共用的分页计算，不另写预测或收益公式。 |
+
+离线回归与显式启用的PostgreSQL测试分开运行，具体清单见跨端测试文档TC-FDP-14。
+`tests/test_historical_nav_storage_postgres.py`默认跳过；仅设置`RUN_NAV_STORAGE_PG_TESTS=1`后运行，限制本机`fund_ai`，只创建随机独立测试schema，结束清理自己创建的测试数据，不写public业务表。
+本次另用真实public净值做了上述最小保存验收，核对原始起点数据未变；没有批量保存全基金历史。
+
+建表时已核验原有168张表、2310个字段定义及注释未变；空表升级/回退和非空拒绝回退在隔离事务验证。
+现在已存在真实样本，迁移回退会按设计拒绝；需要保留数据，不能跳过保护强行删表。
+
+后续功能是训练数据准备与基线评估；当前`LEARNING_ONLY`不证明首次可得日期、历史修订和严格交易日历已补齐，不能直接发布为有效预测。
+
+## 10. 当前功能：候选训练数据准备与基线验证
+
+现已在保存闭环之上实现：选择已存批次、核对内容、去重、按时间划分X/y、隔离跨界答案、比较四种简单方法。
+**这不是逻辑回归训练，也不是模型发布。** 报告继续为`LEARNING_ONLY / MODEL_NOT_RELEASED`，`training_eligible=false`。
+本轮先给验证段打分；独立测试段只准备，不返回成绩、上涨比例或样本答案。它不是数据库权限层面的封存，维护人员仍可能直接查原始样本。
+
+### 10.1 调用新接口
+
+重启Python服务后，沿用`X-Service-Token`，不要带`Origin`。Body选择JSON：
+
+```text
+POST http://127.0.0.1:8000/internal/v1/features/historical-nav-samples/baseline-evaluation
+```
+
+接口使用POST是为了传批次清单，**全过程只读，不生成新批次、不训练、不补数据**。
+完整试点请求在本机`.local-runs/nav-baseline-2022-2025-2a87b245/evaluation.request.json`，复制其内容到Body即可；无需手填144个编号。
+这些本地请求/报告文件不含Token，已通过`.gitignore`排除，其他环境需使用自己的已存批次编号。
+
+下面的短例子只选先前保存的1条样本，可用于验收“数量不足”的响应，不是完整试点请求：
+
+```json
+{
+  "batchIds": ["75b8258a-7cfd-4bfc-b2e8-2b5f05d9f8b3"],
+  "trainStartDate": "2022-01-01",
+  "trainEndDate": "2023-12-31",
+  "validationEndDate": "2024-12-31",
+  "testEndDate": "2025-12-31",
+  "previewSize": 5
+}
+```
+
+| 参数 | 含义 |
+| --- | --- |
+| `batchIds` | 明确选择已经保存的批次，1–512个不同UUID。不自动扫描全历史或选最新批次。 |
+| `trainStartDate/trainEndDate` | 训练输入的可得日期范围，含首尾。 |
+| `validationEndDate` | 训练截止日之后至此日为验证输入段。 |
+| `testEndDate` | 验证截止日之后至此日为保留测试输入段。 |
+| `previewSize` | 返回0–20条训练/验证样本，默认5；只影响预览，不影响指纹或成绩。 |
+
+### 10.2 系统怎样准备数据
+
+1. 在一次只读一致性事务中读取批次、样本和答案；每组32个批次查询一次明细，避免逐批、逐样本查询。最多15,872条输入，不加载全部基金历史。
+2. 复用存储完整性校验，再要求来源编码和三个规则版本统一、水位存在。基金类型固定股票型。
+3. 用“基金+净值业务日”去重：完整内容（包括标签与来源水位）相同才合并，固定保留编号最小的批次作为追溯入口；内容不同返回409，不自动取最新或挑选可用答案。
+4. 只纳入`SCORABLE`且采用累计净值的样本。单位净值回退、质量不足等单独计剔除原因，不把缺值补成0。
+5. 按`available_at`（输入何时能看到）划段，不按`as_of_date`（净值属于哪天）、批次保存时间或随机比例划分。
+6. 再检查`label_available_at`：训练答案不得晚于训练截止，验证答案不得晚于验证截止，测试答案不得晚于测试截止。跨界就剔除，不能只比较标签终点，也不拿20个自然日代替净值窗口。
+
+所以，对本次试点，2023年末尚未公布答案的样本不会进入训练；2024年末同理不会进入验证。
+每只基金在这些过滤之后，至少需要训练252、验证120、测试120条样本。任何一只不足，整份报告返回`INSUFFICIENT_DATA`和缺口，`baselines=[]`；不静默丢掉不足的基金。
+这里是**可用样本数**，不是原始净值点数；比早期设计按原始点数估算更明确、保守，HTTP不能下调门槛。
+
+内部`PreparedDataset`分开保存`train/validation/test`，每行`x`只含固定7列指标，`y`单独保存历史方向。
+基金编号、日期、来源水位和标签元数据仅用于追溯，不能整体喂给模型。矩阵当前只在内存生成，后续可由相同请求和已存批次重建，不是已保存的模型文件。
+
+### 10.3 四种对照和怎样读成绩
+
+| 对照编号 | 做法 |
+| --- | --- |
+| `ALWAYS_UP` | 不看输入，始终判断上涨，分数为1。 |
+| `TRAIN_UP_FREQUENCY` | 每只基金使用自己训练段的“上涨次数/总数”，进入验证后固定不变。 |
+| `MOMENTUM_20D` | 最近20日历史收益大于0则判断上涨，否则非上涨，分数为1或0。 |
+| `FIXED_MOMENTUM_SCORE` | 复用原固定公式`0.5 + 2 × 最近20日收益`，限制在0.05–0.95，四位小数。 |
+
+为统一比较，四种方法都以“分数严格大于0.5”为上涨，恰好0.5算非上涨；旧评分流程的0.45/0.55中性区间不用于本次二分类比较，原评分流程本身未改。
+历史上涨频率与固定公式只是参考分数，不是经过概率校准的未来预测。
+
+- `accuracy`：方向判断正确比例，越高越好。
+- `balanced_accuracy`：上涨和非上涨分别算识别正确比例，再平均；验证段只有一种答案时返回null，而不是满分。
+- `brier_score`：逐条算`(分数 - 真实0/1答案)²`再平均，越低越好。数值低也不证明模型已经校准或可以发布。
+
+指标定义参考[平衡准确率官方说明](https://scikit-learn.org/stable/modules/generated/sklearn.metrics.balanced_accuracy_score.html)和[Brier官方说明](https://scikit-learn.org/stable/modules/generated/sklearn.metrics.brier_score_loss.html)。实现使用现有Python/Decimal，不安装scikit-learn。
+报告同时给总体和逐基金验证结果，不选冠军、不自动调参；本轮是一次固定划分的学习验证，不是完整滚动回测或经济收益回测。
+
+### 10.4 返回字段和异常
+
+| 字段 | 含义 |
+| --- | --- |
+| `status` | `INSUFFICIENT_DATA`说明数量不足；`BASELINE_EVALUATED`说明已完成本轮验证段比较，不表示预测模型合格。 |
+| `protocol` | 时间边界、固定数量门槛、净值口径、标签隔离与测试保留规则，带独立版本。 |
+| `batch_ids/source_sync_run_ids/versions` | 使用哪些保存批次、来源水位和计算规则。 |
+| `dataset_hash` | 完整输入批次和时间规则的内容指纹，包含标签；批次顺序、预览数量不影响它。不是落库报告ID。 |
+| `train_hash` | 只覆盖实际训练样本；验证/测试标签改变而训练数据不变时，它不应变化。 |
+| `input_sample_count/duplicate_sample_count/unique_sample_count` | 去重前、合并重复数量、去重后数量。 |
+| `included_sample_count/excluded_reasons` | 纳入三个时间段的总数及互斥剔除原因；合计必须等于去重后数量。 |
+| `funds` | 每只基金的三段数量、缺口、剔除原因和训练上涨频率。只有一种训练答案会提示`TRAIN_SINGLE_CLASS`。 |
+| `feature_names/sample_preview` | 固定X列顺序及少量训练/验证X和y，测试样本不预览。 |
+| `baselines` | 四种方法的总体与逐基金验证结果；数据不足时为空。 |
+| `persisted/training_eligible/publication_status/limitations` | 报告未写数据库、不授予正式训练资格、模型未发布，以及首次可得/修订/交易日历等边界。 |
+
+无/错Token或带Origin为403；任一批次不存在为404；内容/来源/规则冲突为409；请求参数错误为422；存储损坏、超时或数据库异常为503。
+异常不返回半份报告、连接信息或Token。内部阶段预算15秒、数据库单查询5秒，不宣称是严格HTTP总时长硬中断。
+
+### 10.5 本次真实试点与可恢复执行
+
+用户已确认`001632/006730/008888`、2022–2025年：2022–2023训练，2024验证，2025保留测试。
+执行脚本固定此范围，每基金每月一批，共144批；不接受任意日期或其他基金，且限制本机`fund_ai`。
+默认只读预检；加`--execute`后也先预检，数量不足时不新增样本。每月独立事务，某月失败不删除此前已完成月份，沿用run-key续跑。
+
+```powershell
+# 只读预检，不保存
+.\.venv\Scripts\python.exe -m scripts.historical_nav_baseline_pilot --run-key 2a87b245-dae5-45a5-a547-d34409ad0c2b
+
+# 实际执行；本次已执行过，沿用同一run-key会复用已存批次
+.\.venv\Scripts\python.exe -m scripts.historical_nav_baseline_pilot --run-key 2a87b245-dae5-45a5-a547-d34409ad0c2b --execute
+```
+
+不要为了重试生成新run-key，否则会被解释为一轮新的明确重算。脚本不建表、不改原始净值、不调用外部同步、不训练或发布。
+本轮无新增DDL/迁移DML；业务INSERT继续通过已验收的保存事务。原始净值内容在执行前后作范围指纹核验。
+当前代码入口：`app/services/historical_nav_evaluation.py`（准备/评估），`app/repositories/historical_nav_evaluation.py`（有界读取），
+`app/schemas/historical_nav_evaluation.py`（字段说明），`app/services/momentum_baseline.py`（原固定公式），`scripts/historical_nav_baseline_pilot.py`（显式试点操作）。

@@ -7,3 +7,4 @@ fund_ai.db
 *.iml
 .env
 .env.deepseek
+/.local-runs/

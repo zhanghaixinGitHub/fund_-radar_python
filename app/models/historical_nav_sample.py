@@ -2,12 +2,12 @@
 
 先读 Batch（练习册封面），再读 Record（题目），最后读 Label（答案）。
 这里的 ORM 实体把 Python 属性对应到数据库列；声明类或导入类不会自动建表。
-真正建表由 Alembic 迁移执行，真正保存则需要后续单独实现事务代码。
+真正建表由 Alembic 迁移执行，真正保存由 services/historical_nav_storage.py 的事务代码完成。
 
 Mapped[T] 表示属性的 Python 类型；mapped_column 声明数据库列；comment 会成为
 数据库字段注释。主键是本行编号，外键是关联另一张表的编号，唯一约束用于阻止重复。
 下面只声明数据库能直接检查的规则；跨表统计核对、答案与题目状态核对、禁止覆盖旧批次，
-还需要后续保存服务负责。分表本身不代表已经防住训练时的未来信息泄漏。
+由保存服务及 historical_nav_storage_validation.py 负责。分表本身不代表已经防住训练时的未来信息泄漏。
 """
 
 from __future__ import annotations
@@ -43,8 +43,8 @@ from app.db.base import Base
 class HistoricalNavSampleBatch(Base):
     """练习册封面：一只基金、一个小日期段、同一来源水位与同一套规则。
 
-    当前仅规划保存学习快照，purpose 固定为 LEARNING_ONLY，不能作为模型发布凭证。
-    后续保存成功才留下整批记录，所以这里没有 RUNNING 等任务状态，也没有更新旧批次的字段。
+    当前仅保存学习快照，purpose 固定为 LEARNING_ONLY，不能作为模型发布凭证。
+    保存成功才留下整批记录，所以这里没有 RUNNING 等任务状态，也没有更新旧批次的字段。
     """
 
     __tablename__ = "historical_nav_sample_batch"
@@ -140,7 +140,7 @@ class HistoricalNavSampleRecord(Base):
     """练习册中的一道题；Record 后缀用于区别纯计算模块里的 HistoricalNavSample。
 
     同批的基金、来源水位和版本从封面读取，不在每一行复制。题目正文仍保存完整 feature_payload，
-    因而后续保存服务要核对其中的来源/版本与封面一致。这里只定义格式，不自动完成这些核对。
+    保存服务会核对其中的来源/版本与封面一致。这里只定义格式，导入实体不会自动执行核对。
     """
 
     __tablename__ = "historical_nav_sample"

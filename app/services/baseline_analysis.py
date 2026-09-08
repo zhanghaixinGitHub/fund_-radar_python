@@ -37,6 +37,7 @@ from app.services.benchmark_registry import (
     get_stock_benchmark_readiness,
     load_active_stock_benchmark_points,
 )
+from app.services.momentum_baseline import fixed_momentum_score
 from app.services.stock_feature_snapshot import STOCK_FEATURE_VERSION
 
 logger = get_logger(__name__)
@@ -530,9 +531,7 @@ def evaluate_stock_rolling_backtest(
     all_test_samples = 0
     for fold in folds:
         test_observations = tuple(
-            observation
-            for observation in observations
-            if fold.test_start <= observation.signal_date <= fold.test_end
+            observation for observation in observations if fold.test_start <= observation.signal_date <= fold.test_end
         )
         if not test_observations:
             continue
@@ -995,11 +994,7 @@ def _payload_decimal(payload: dict[str, object], key: str) -> Decimal | None:
 
 def _baseline_up_probability(return_20d: Decimal) -> Decimal:
     """将已观测 20 日收益映射为有界概率，避免把收益幅度当作确定性结论。"""
-    raw_probability = Decimal("0.5") + return_20d * Decimal("2")
-    return min(Decimal("0.9500"), max(Decimal("0.0500"), raw_probability)).quantize(
-        _PROBABILITY_QUANTUM,
-        rounding=ROUND_HALF_UP,
-    )
+    return fixed_momentum_score(return_20d)
 
 
 def _baseline_confidence(up_probability: Decimal) -> Decimal:

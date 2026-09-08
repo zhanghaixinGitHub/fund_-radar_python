@@ -35,3 +35,20 @@ def get_nav_preview_engine() -> Engine:
         # 前者限制建连，后者限制每条SQL；它们不代表整个HTTP请求总共只允许5秒。
         connect_args={"connect_timeout": 5, "options": "-c statement_timeout=5000"},
     )
+
+
+@lru_cache
+def get_nav_sample_storage_engine() -> Engine:
+    """样本保存/读回使用独立有界连接池；不复用或改变只读预览的事务。"""
+    return create_engine(
+        get_settings().ai_database_url,
+        pool_pre_ping=True,
+        pool_size=2,
+        max_overflow=0,
+        pool_timeout=5,
+        hide_parameters=True,
+        connect_args={
+            "connect_timeout": 5,
+            "options": "-c statement_timeout=5000 -c lock_timeout=3000 -c idle_in_transaction_session_timeout=30000",
+        },
+    )

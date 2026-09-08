@@ -11,6 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db.session import get_nav_preview_engine
+from app.repositories.feature_snapshot import FeatureSourceReadiness
 from app.repositories.historical_nav import (
     read_historical_nav_input_page,
     read_historical_nav_sample_input,
@@ -57,50 +58,62 @@ def preview_stored_historical_nav_batch(
     避免某页碰巧读取到同步任务更新后的数据。这里只在内存保留最多31份输出。
     """
     deadline = perf_counter() + 15
+    with Session(get_nav_preview_engine()) as session:
+        session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+        _, result = build_stored_historical_nav_batch(session, request, deadline=deadline)
+        return result
+
+
+def build_stored_historical_nav_batch(
+    session: Session,
+    request: HistoricalNavBatchPreviewRequest,
+    *,
+    deadline: float,
+) -> tuple[FeatureSourceReadiness, HistoricalNavBatchPreviewResponse]:
+    """在调用者的一致性事务内读库、计算；本函数从不写库或提交。
+
+    dry-run传入只读事务；保存入口传入可写事务。两者复用同一来源检查、分页和构建器，
+    不通过再次调用HTTP或开启第二份读快照来拼接数据。deadline是整次操作的单调时钟截止值。
+    """
     samples: list[HistoricalNavSample] = []
     page_count = 0
     after_date = None
-    with Session(get_nav_preview_engine()) as session:
-        session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
-        source = read_historical_nav_source(session, fund_code=request.fund_code)
-        while True:
-            # 这是页间总耗时检查，不是硬中断。每条 SQL 另有连接池配置的5秒超时。
-            if perf_counter() >= deadline:
-                raise HistoricalNavBatchTimeoutError("批量预览超时，请缩短日期范围后重试。")
-            page = read_historical_nav_input_page(
-                session,
-                fund_code=request.fund_code,
-                source=source,
-                start_date=request.start_date,
-                end_date=request.end_date,
-                after_date=after_date,
-                page_size=request.page_size,
-            )
-            if not page:
-                break
-            page_count += 1
-            for window in page:
-                # 每份完整资料仍交给已经学过的构建器，不在这里另写一套收益公式。
-                # 构建器也会生成辅助日期的样本，这里仅取当前要制作的那份题目。
-                sample = next(
-                    item for item in build_historical_nav_samples(window.input_record)
-                    if item.as_of_date == window.as_of_date
-                )
-                samples.append(sample)
-            # 游标总是上一页最后一个起点，下一页严格从其后开始，因此不会重复。
-            after_date = page[-1].as_of_date
-            if len(page) < request.page_size or after_date == request.end_date:
-                break
-        # 最后一页也检查预算；失败会退出 with、释放连接，且没有任何结果落库。
+    source = read_historical_nav_source(session, fund_code=request.fund_code)
+    while True:
+        # 页间预算不是硬中断；数据库单条SQL另有5秒超时。
         if perf_counter() >= deadline:
             raise HistoricalNavBatchTimeoutError("批量预览超时，请缩短日期范围后重试。")
-
+        page = read_historical_nav_input_page(
+            session,
+            fund_code=request.fund_code,
+            source=source,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            after_date=after_date,
+            page_size=request.page_size,
+        )
+        if not page:
+            break
+        page_count += 1
+        for window in page:
+            samples.append(
+                next(
+                    item
+                    for item in build_historical_nav_samples(window.input_record)
+                    if item.as_of_date == window.as_of_date
+                )
+            )
+        after_date = page[-1].as_of_date
+        if len(page) < request.page_size or after_date == request.end_date:
+            break
+    if perf_counter() >= deadline:
+        raise HistoricalNavBatchTimeoutError("批量预览超时，请缩短日期范围后重试。")
     reasons: dict[str, int] = {}
     for sample in samples:
         if sample.unavailable_reason is not None:
             reasons[sample.unavailable_reason] = reasons.get(sample.unavailable_reason, 0) + 1
     # 没有净值的范围正常返回0条，不偷偷改日期；有问题的样本保留原因，不默默丢掉。
-    return HistoricalNavBatchPreviewResponse(
+    return source, HistoricalNavBatchPreviewResponse(
         fund_code=request.fund_code,
         start_date=request.start_date,
         end_date=request.end_date,
