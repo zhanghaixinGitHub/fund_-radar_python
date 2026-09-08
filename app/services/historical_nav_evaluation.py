@@ -113,6 +113,11 @@ def _check_deadline(deadline: float) -> None:
 
 
 def evaluate_stored_historical_nav_batches(request: HistoricalNavEvaluationRequest) -> HistoricalNavEvaluationResponse:
+    """原基线HTTP行为不变，只返回报告；候选训练另复用同一数据准备入口。"""
+    return load_historical_nav_dataset(request).report
+
+
+def load_historical_nav_dataset(request: HistoricalNavEvaluationRequest) -> PreparedDataset:
     """一次只读一致性快照读完显式批次；离开数据库事务后进行纯内存计算。"""
     deadline = perf_counter() + 15
     batches = []
@@ -126,8 +131,7 @@ def evaluate_stored_historical_nav_batches(request: HistoricalNavEvaluationReque
             raise HistoricalNavEvaluationError(
                 "BATCH_NOT_FOUND", "一个或多个所选批次不存在；未返回部分评估。", 404
             ) from error
-    result = prepare_historical_nav_dataset(request, batches, deadline=deadline)
-    return result.report
+    return prepare_historical_nav_dataset(request, batches, deadline=deadline)
 
 
 def prepare_historical_nav_dataset(
@@ -376,3 +380,23 @@ def _evaluate_baselines(
         )
         for name, description in descriptions.items()
     )
+
+
+def evaluate_window_baselines(
+    history: tuple[PreparedRow, ...], exam: tuple[PreparedRow, ...], *, deadline: float
+) -> tuple[BaselineComparison, ...]:
+    """滚动窗口复用同四种公式；history必须由调用者隔离为考试前已成熟的历史。"""
+    histories, exams = _group_funds(history), _group_funds(exam)
+    summaries = [
+        FundPreparationSummary(
+            fund_code=fund,
+            unique_sample_count=len(histories[fund]) + len(rows),
+            split_counts={"TRAIN": len(histories[fund]), "VALIDATION": len(rows), "TEST": 0},
+            missing_samples={},
+            excluded_reasons={},
+            warnings=(),
+            train_up_rate=Decimal(sum(r.y for r in histories[fund])) / len(histories[fund]),
+        )
+        for fund, rows in sorted(exams.items())
+    ]
+    return _evaluate_baselines({"VALIDATION": exams}, summaries, deadline)

@@ -1,4 +1,7 @@
-# 阶段2：用 Postman 验收历史净值样本
+# 历史净值样本与离线候选模型：HTTP 验收手册
+
+当前入口：单日预览看第0节，批量dry-run看第6节，保存样本看第9节，基线评估看第10节，候选训练看第11节，校准与滚动研究验证看第12节，只读失败诊断脚本看第13节，**新增交易日窗口预览看第14节**。
+前面的“只制作样本、不训练”描述的是对应预览/存储接口；新候选训练接口会真正拟合一个研究模型，但不写数据库、不发布预测。
 
 现在直接传基金代码和日期，服务会读取数据库已有净值，返回“当时已知条件”和“后来答案”。不需要导入文件、填写净值列表或提交Body。预览不保存结果、不触发补数、不训练模型；`SCORABLE`只表示样本满足计算条件。
 
@@ -604,3 +607,331 @@ POST http://127.0.0.1:8000/internal/v1/features/historical-nav-samples/baseline-
 本轮无新增DDL/迁移DML；业务INSERT继续通过已验收的保存事务。原始净值内容在执行前后作范围指纹核验。
 当前代码入口：`app/services/historical_nav_evaluation.py`（准备/评估），`app/repositories/historical_nav_evaluation.py`（有界读取），
 `app/schemas/historical_nav_evaluation.py`（字段说明），`app/services/momentum_baseline.py`（原固定公式），`scripts/historical_nav_baseline_pilot.py`（显式试点操作）。
+
+## 11. 真正训练第一个候选模型（2026-09-08）
+
+### 11.1 这次做的事情
+
+上一步是“整理历史题目，并给四种简单猜法考试”。这一步让逻辑回归从TRAIN的七个指标和历史答案中学习权重，再对VALIDATION答题。不是查询今天的基金预测，也不是让大语言模型编一个百分比。
+三只基金共用一个模型；使用2022–2023年1377条训练行、2024年660条验证行，2025年的657条仍留作最终测试，不出成绩。均值、尺度、系数全部只用训练段计算。
+
+**逻辑回归：** 将七项指标按学习到的权重相加，再转换成0–1的上涨分数。**标准化：** 先减去训练期平均值，再除以训练期尺度，让不同单位的指标便于共同学习。**正则化：** 限制权重不要过分放大，减少“记住历史偶然现象”。
+参数方案已在首次真实成绩产生前固定，只训练一次方案，不自动搜索参数。模型输出尚未校准，不能把0.7解释成已经证实的“未来有70%上涨概率”。
+
+### 11.2 HTTP 怎么调用
+
+```text
+POST http://127.0.0.1:8000/internal/v1/features/historical-nav-samples/candidate-training
+```
+
+Headers沿用现有`X-Service-Token`和`Content-Type: application/json`，不带Origin。服务须加载本次新代码。
+
+Body在第10节基线请求的基础上，只增加一个字段：
+
+```json
+{
+  "expectedDatasetHash": "67e1bd1ab68226a1e8ef29cfd5f369cd3879eb96d57a2e8ce20276ca243e1e10"
+}
+```
+
+这只是**新增字段示意，不是完整Body**；原来的batchIds、四个日期和previewSize仍需保留。该字段复制自基线返回的`dataset_hash`，作用是确认“训练的仍然是这一本练习册”。不匹配返回409，不训练。
+
+本机已准备完整可复制文件，无需手抄144个编号：
+
+- [本次训练请求](C:/pythonProject/workSpace06/.local-runs/nav-candidate-6e25d583-5ab3-443c-bd65-8aa7ae2ce5d1/request.json)
+- [完整训练报告](C:/pythonProject/workSpace06/.local-runs/nav-candidate-6e25d583-5ab3-443c-bd65-8aa7ae2ce5d1/report.json)
+- [模型JSON](C:/pythonProject/workSpace06/.local-runs/nav-candidate-6e25d583-5ab3-443c-bd65-8aa7ae2ce5d1/model.json)
+
+这些是本机忽略文件，不随Git提交；其他环境要使用自己的已保存批次及基线指纹。HTTP只返回JSON，不自动写服务器文件，不保存到模型数据库。
+
+### 11.3 返回内容先看哪些
+
+| 字段 | 通俗解释 |
+| --- | --- |
+| status=CANDIDATE_EVALUATED | 模型已经训练并完成验证考试，不等于通过上线门槛。 |
+| status=INSUFFICIENT_DATA | 有基金样本不够，本次未训练；model/candidate为null，缺口见preparation。 |
+| preparation | 上一步的数据筛选、数量、指纹和四种基线成绩，直接复用，没有换另一套样本。 |
+| protocol | 事先固定的训练方案，如正则强度、最多迭代次数、未做概率校准。 |
+| model | 训练成果，下面的均值、尺度、权重等保存在这里，不是一串无法阅读的二进制。 |
+| candidate.validation | 新模型在全部2024验证样本上的成绩；accuracy看方向，Brier看分数与答案的偏差。 |
+| candidate.per_fund | 分基金成绩，防止总体均值掩盖某只基金表现差。 |
+| baseline_deltas | 新模型成绩减去每条基线成绩。准确率差值正数更好；Brier差值负数更好。0.01准确率差值代表1个百分点。 |
+| prediction_preview | 最多previewSize条历史验证预测，包含分数、方向和当年真实答案；不是今日预测。 |
+| artifact_persisted=false | 训练服务未写模型文件；CLI可另行保存，保存状态看complete.json。 |
+| database_written=false | 没有修改数据库中的净值、样本或模型表。 |
+| training_eligible=false | 严格历史数据准入仍未通过，不是说这次离线实验没有训练成功。 |
+| MODEL_NOT_RELEASED | 研究模型不能展示为“我的关注”正式预测。 |
+
+模型中的字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| feature_names | 七个指标的固定顺序，必须与mean、scale、coefficients逐项对应。 |
+| mean / scale | 只从训练段学出的平均值和尺度；常量列尺度为1，避免除零。 |
+| coefficients | 七项标准化指标的权重；正数推高上涨得分、负数压低。相关指标共同作用，不能把绝对值直接当因果重要性。 |
+| intercept | 基础得分，和指标加权结果相加后才转换为0–1。 |
+| classes | [0,1]分别是非上涨、上涨；up_score取类别1的输出。 |
+| iterations | 求解器实际计算了多少轮，本次21轮；不是训练了21天，也不是发布门槛。 |
+| train_count / train_counts_per_fund | 总训练量及逐基金数量，本次1377条、每基金459条。 |
+| sample_weight_per_fund | 每基金每条训练行的权重，使基金总贡献相等；本次数量相同，所以每行权重都是1。 |
+| train_class_counts | 仅训练段的0/1答案数量，不含验证和测试。 |
+| train_hash / train_start_date / train_end_date | 模型从哪份训练内容、哪个时间范围学来。 |
+| versions / runtime_versions | 特征/标签规则及Python、数值库版本，便于以后复现。 |
+| model_hash | 模型内容指纹；只变验证或测试答案不改变模型指纹。不是防恶意篡改的签名或发布授权。 |
+
+### 11.4 如何保存、读回和重跑
+
+HTTP响应本身包含完整model，可以在API工具保存响应。要生成完整本机实验包，在Python项目根目录运行：
+
+```powershell
+$candidateRunKey = [guid]::NewGuid().ToString()
+.\.venv\Scripts\python.exe -m scripts.historical_nav_candidate --request .local-runs/nav-baseline-2022-2025-2a87b245/candidate.request.json --run-key $candidateRunKey
+```
+
+CLI只允许当前本机`fund_ai`，新建`.local-runs/nav-candidate-<run-key>/`；写request.json、report.json、model.json，最后写complete.json。清单包含文件SHA256；清单可解析且各文件指纹匹配，才是完整保存。失败目录保留、不删除旧文件；换新run-key可重新执行。相同run-key目录已存在则拒绝覆盖，不静默重新训练或替换。
+这与“样本保存接口同requestKey复用”的语义不同：这里的run-key是**新实验目录编号**，不写样本批次，不需要重新补存144个月。
+
+代码入口：
+
+- `app/services/historical_nav_training.py`：只读准备→TRAIN拟合→JSON重算核对→VALIDATION成绩。`restore_logistic_artifact`校验模型，`predict_artifact_scores`只接收七列X，不接收答案，不挂线上预测路由。
+- `app/schemas/historical_nav_training.py`：请求/协议/模型/返回字段中文说明。
+- `scripts/historical_nav_candidate.py`：本机实验包保存；没有pickle反序列化。
+
+### 11.5 本次真实结果与边界
+
+| 方法 | 2024验证准确率 | 平衡准确率 | Brier，越小越好 |
+| --- | --- | --- | --- |
+| 逻辑回归候选 | 53.18%（351/660） | 52.80% | 0.26914973 |
+| 历史训练上涨频率 | 50.61%（334/660） | 50.00% | 0.25820037 |
+| 原固定公式 | 48.48%（320/660） | 48.43% | 0.27739452 |
+
+候选逐基金：001632为48.18%，006730为59.09%，008888为52.27%。总体方向准确率比历史频率高约2.58个百分点，但Brier反而高约0.01095；不能只挑准确率宣布“全面提升”。未改参数追求更漂亮的成绩，未使用2025测试答案选模型。
+
+模型指纹`05c5873aecb134651222011ce8a282e69c1812de62f4a9bf3022c96e26ebebac`；完整数据指纹仍为第10节那一份。真实运行前后三表数量保持145/2923/2875（含早期单日批次），三基金2022–2025的2922条原始净值内容指纹一致。
+新增依赖组已固定在requirements.txt：scikit-learn及其数值依赖，使用当前项目虚拟环境；原FastAPI等依赖未升级。
+
+训练库API口径参考官方[LogisticRegression](https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html)与[StandardScaler](https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.StandardScaler.html)；`l1_ratio=0`表达L2，标准化支持训练样本权重。持久化仅导出数值JSON，不引入[模型持久化文档](https://scikit-learn.org/stable/model_persistence.html)所提醒的未知pickle执行风险。
+
+下一阶段建议做训练期内部的时间隔离校准与滚动验证设计，仍不提前打开2025测试成绩。正式首次可得/历史修订核验、严格日历和发布闸门尚未完成，不能直接接入用户预测卡。
+
+本轮验证：265项离线测试、18项隔离PostgreSQL测试通过；真实数据库的进程内HTTP和独立临时18011网络HTTP均为200，与保存报告一致，无Token/Origin均403。临时服务验收后关闭；验收时8000未连通，你需在IDE或原启动方式中启动/重载Python服务后，再使用上述8000 URL。没有改动已有其他监听进程。
+
+## 12. 校准与滚动研究验证（2026-09-08）
+
+### 12.1 这次做到了什么
+
+现在能把“基础模型学习、分数调整、最后考试”分成三个先后时间段，换两次历史窗口再考试，并在2024年做固定验收。基础模型和校准器各有自己能看的答案，考试答案不能用于学习。
+2025继续保留，未算成绩。没有同步新净值、补存样本、写模型表或激活线上预测；第11节原模型和报告也未覆盖。
+
+**校准不是自动变准按钮。** 校准器只学习“原始得分z应该怎样映射到0–1”，本次固定`sigmoid(a*z+b)`的一维L2逻辑回归，既不搜索参数，也不比较多个校准方法择优。基础模型保持冻结，不能校准后再偷偷重训基础模型。
+概率可靠性参考官方[校准说明](https://scikit-learn.org/stable/modules/calibration.html)：Brier同时受区分能力和数据不确定性影响，不能仅看它判断校准。因此这里还输出固定分箱和ECE。
+
+### 12.2 固定的三次考试
+
+| 窗口 | 基础模型学到哪天 | 独立校准段 | 考试段 | 每基金实际拟合/校准/考试数 |
+| --- | --- | --- | --- | --- |
+| DEV_2023_Q3 | 2022-01-01至2023-02-28 | 2023-03-01至06-30 | 2023-07-01至09-30 | 254 / 61 / 44 |
+| DEV_2023_Q4 | 2022-01-01至2023-05-31 | 2023-06-01至09-30 | 2023-10-01至12-31 | 315 / 64 / 40 |
+| VALIDATION_2024 | 2022-01-01至2023-06-30 | 2023-07-01至12-31 | 2024年 | 335 / 104 / 220 |
+
+前两轮是原TRAIN内部的扩展窗口，后轮可以用已经成为历史的前轮信息；不是每轮都永远不碰任何曾经考过的样本，而是任何时点都不能看自己未来的答案。2024则仍只用于验收，不参与任何基础模型/校准器的拟合。
+所有日期指输入可得日期，不是保存时间；每段答案也必须已在段末披露，否则剔除。全局筛选先执行，窗口再筛选，不能用20个自然日机械代替。季度考试40条是短窗研究诊断下限，不替代全局252/120/120门槛；校准至少60条，基础拟合仍至少252条/基金。
+
+### 12.3 怎么调接口
+
+```text
+POST http://127.0.0.1:8000/internal/v1/features/historical-nav-samples/calibration-evaluation
+```
+
+Headers与第11节相同，Body也**完全沿用第11节候选训练请求**：batchIds、四个日期、previewSize、expectedDatasetHash。不需要你再配置三组窗口。
+本版只接受固定2022-01-01 / 2023-12-31 / 2024-12-31 / 2025-12-31边界；改日期、自定义windows、method、最低样本量、includeTest或输出路径均422。坏指纹409；与候选训练共享计算槽，忙时429。
+
+本机完整文件：
+
+- [可直接复制的请求](C:/pythonProject/workSpace06/.local-runs/nav-calibration-f0f9f709-b82b-4af1-8326-f09b11abac50/request.json)
+- [三轮完整报告](C:/pythonProject/workSpace06/.local-runs/nav-calibration-f0f9f709-b82b-4af1-8326-f09b11abac50/report.json)
+- [三轮模型及校准参数](C:/pythonProject/workSpace06/.local-runs/nav-calibration-f0f9f709-b82b-4af1-8326-f09b11abac50/models.json)
+
+这些文件仅存在本机忽略目录，不会随Git提交。HTTP不自动保存文件，重跑不会覆盖它们。代码入口为`app/api/routes/historical_nav_calibration.py`、`app/services/historical_nav_calibration.py`和同名schemas文件，字段都有中文说明。
+
+### 12.4 返回字段怎么读
+
+| 字段 | 通俗解释 |
+| --- | --- |
+| CALIBRATION_EVALUATED | 三轮都算完了，不是三轮都变好了，更不是允许发布。 |
+| PARTIAL_EVALUATION | 部分窗口有缺口或被拒绝；没有偷偷丢掉失败窗口。 |
+| INSUFFICIENT_DATA / NO_VALID_WINDOWS | 全部不足，或没有可用的完整考试窗口；看每窗reason，不能当成功模型。 |
+| preparation | 原来的全局筛选报告；其中基线是全局2024基线，不要混同逐窗基线。 |
+| protocol.windows | 事先冻结的时间窗口，不是根据结果挑出的好时段。 |
+| windows[].funds.counts / missing | 每基金本窗FIT、CALIBRATION、EXAM数量与缺口。 |
+| windows[].funds.purged | 全局筛选后本窗口新增的跨界答案剔除数。比如2023年末跨界已在全局剔除，本窗CAL/EXAM可以是0，不代表没有隔离。 |
+| before / after | 同一个基础模型校准前、后的总体现时段及逐基金成绩；里面复用的validation字段指当前窗考试，不一定是2024。 |
+| baselines | 四种简单方法在同一考试段的成绩；历史频率只用校准截止前已成熟的历史答案，考试段不更新。 |
+| reliability_before / reliability_after | 校准前后总体分箱与ECE；逐基金版本见reliability_per_fund。 |
+| brier_delta / ece_delta | 校准后减校准前，负数更好，正数更差；不能据此自动发布。 |
+| prediction_preview | 每窗最多previewSize条历史考试例子：before_score、after_score和实际答案。不是2025测试或今日预测。 |
+| evaluated_window_count | 本次完整完成的窗口数；不是训练成功率。 |
+| brier_improved_window_count | Brier严格改善的窗口数量；本次1，不是“通过1票就上线”。 |
+| model.base_model | 本窗冻结的基础七指标模型，字段沿用第11节。 |
+| model.calibrator | 校准器参数：slope是a，intercept是b；另有校准时间、数量、基金权重、内容指纹和绑定的基础模型哈希。 |
+| model.model_hash | 基础模型和校准器整体指纹；考试答案变化不会改变同窗模型。 |
+| NON_POSITIVE_CALIBRATION_SLOPE | 校准时学出了非正斜率。基础模型分数越高，映射反而越低，是不稳定风险提示，不悄悄翻转后宣称稳定。 |
+
+**可靠性分箱：** 分数固定分为0–20%、20–40%、40–60%、60–80%、80–100%五档，前四档不含右端点，最后包含1。`count`看多少条，`mean_score`看平均报多少，`observed_up_rate`看实际涨多少，`absolute_gap`看两者差多少。空档返回null，不伪造0%；`enough_samples=false`表示不足30条。
+**ECE：** 把各档偏差按样本数量加权平均。它越小通常表示这些分档中报出的分数更贴近实际比例，但分箱和小样本都会影响它，不能单独证明未来概率准确。重叠20日标签并非独立试验，所以没有提供误导性的独立样本置信区间。
+
+### 12.5 真实结果：没有稳定改善
+
+| 考试段 | 校准前准确率 → 校准后 | Brier前 → 后（越小越好） | ECE前 → 后（越小越好） |
+| --- | --- | --- | --- |
+| 2023第三季度 | 64.39% → 67.42% | 0.25659806 → 0.25797493 | 0.17831184 → 0.20043181 |
+| 2023第四季度 | 55.83% → 61.67% | 0.30338054 → 0.21464207 | 0.23039864 → 0.15585841 |
+| 2024固定验证 | 51.82% → 51.21% | 0.27513393 → 0.33669545 | 0.13196165 → 0.26291714 |
+
+只有2023第四季度的两个分数偏差指标变好，但它的映射斜率为-0.7566；2024映射斜率也为负（-0.6864），且指标明显变差。三轮历史频率基线准确率分别69.70%、62.50%、50.61%，Brier分别0.23976427、0.23678793、0.25820037。不能只展示一轮较好的成绩，也不能只看准确率。
+本轮2024“校准前51.82%”不是上一轮全TRAIN模型的53.18%：这里特意留了一段历史给校准，基础模型只学了1005条，而不是1377条。因此校准效果必须在本轮51.82%与51.21%之间比较。上一轮模型未变，重跑原接口仍返回原完整报告。
+目前结果只支持“这套固定校准方案没有在所检验窗口稳定改善”，不能确定根因就是某项数据差或某种市场状态；需要另做失败归因。没有根据本次成绩重选时间、强制正斜率、改校准器或改参数。
+
+### 12.6 本机保存与下一步
+
+```powershell
+$calibrationRunKey = [guid]::NewGuid().ToString()
+.\.venv\Scripts\python.exe -m scripts.historical_nav_calibration --request .local-runs/nav-candidate-6e25d583-5ab3-443c-bd65-8aa7ae2ce5d1/request.json --run-key $calibrationRunKey
+```
+
+只允许本机fund_ai，写新`.local-runs/nav-calibration-<run-key>/`。request.json、report.json、models.json写完并回读核验后才写complete.json，完成清单记录文件SHA256及三组模型指纹。重复目录拒绝覆盖；磁盘失败保留未完成目录，不删除旧实验。部分窗口失败也可以保存诊断，但退出码2、不伪装全部通过。
+没有新依赖、表、外部数据接入、Java/Vue改动或模型发布；原样本和旧实验文件保留。下一步先做**失败归因和历史数据准入核验**，再决定是否需要扩大历史/基金覆盖或调整训练方案；本轮不自动执行这些扩展，不提前打开2025最终测试。
+
+### 12.7 本次实际验收到哪里
+
+- 303项离线相关测试、19项真实PostgreSQL隔离测试通过，共322项；本轮新增38项离线校准用例和1项隔离库端到端用例。Ruff与pip check通过，保留既有TestClient弃用警告。
+- 新接口连接真实数据库，重复请求、批次倒序和保存报告完整JSON一致；原候选训练接口仍返回上一轮完整报告。
+- 临时18012端口实际HTTP返回200，无Token/Origin为403，错误指纹409；完成后临时服务已关闭。**验收时8000未连通，你使用8000调用前需要启动或重载Python服务。** 没有擅自重启用户已有进程。
+- 原始净值范围2922行全列内容指纹不变；三表仍为145批次、2923样本、2875答案。上一轮实验四文件指纹均不变，新实验完成清单和三组模型回读验证通过。
+- 这些检查证明接口、隔离规则和结果保存按预期工作；不证明模型预测已经准确。详细用例见主项目测试文档TC-FDP-17。
+
+## 13. 只读失败诊断：不重新训练，也不新增HTTP
+
+本步复盘已保存的校准实验，使用旧模型对原来的训练/校准/考试段重算分数，核验成绩完全复现后再拆分统计。只检查已有三基金，读取当前原始净值上限为2024-12-31；2021数据仅提供2022起点历史。既有样本准备层仍会读取2025做完整性/指纹校验，但诊断计算不访问TEST对象、不输出测试成绩。
+
+完整人话结论见[主项目诊断报告](C:/WebStormProject/workSpace05/docs_zhx/implementation/free-data-prediction-v1-diagnostics.md)。2024出现明显偏向不涨；同时发现周末净值、累计/复权口径不等价及首次版本证据缺口。诊断完成不表示正式准入通过。
+
+### 13.1 怎么运行
+
+```powershell
+$env:PYTHONIOENCODING = 'utf-8'
+$diagnosticRunKey = [guid]::NewGuid().ToString()
+.\.venv\Scripts\python.exe -m scripts.historical_nav_diagnostics --calibration-run-key f0f9f709-b82b-4af1-8326-f09b11abac50 --run-key $diagnosticRunKey
+```
+
+- `calibration-run-key`：你要复盘的旧校准实验编号，目录必须有完整request/report/models/complete四文件。
+- `run-key`：新诊断编号。只新建`.local-runs/nav-diagnostics-<编号>/`，拒绝覆盖既有目录；不需要8000端口启动，不通过HTTP重训模型。
+- 本机fund_ai限制不变；不接受任意模型路径、输出目录、基金扩展或训练参数。文件上限2MiB，固定文件名，核验完成清单SHA256及各JSON关联，错误则不交付完成清单。
+- 成功写report.json，回读核验后最后写complete.json。失败退出码1，无有效完成清单；不删除旧数据或旧实验文件。
+
+本次[完整JSON报告](C:/pythonProject/workSpace06/.local-runs/nav-diagnostics-1054d538-301e-44a1-858c-0deca79a32f6/report.json)可直接打开，运行产物不随Git提交。
+
+### 13.2 主要字段
+
+| 字段 | 人话解释 |
+| --- | --- |
+| source_calibration_run_key / source_files_sha256 | 复盘哪次旧实验、旧文件有没有变化。 |
+| model_fitted=false / test_scored=false | 没有再训练，也没有给2025考试。 |
+| windows[].stages.FIT / CALIBRATION / EXAM | 对应原来三个时间块；前两块的成绩是样本内描述，不能作为独立验收。 |
+| overall / per_fund | 总体和每只基金分别统计，不能只挑成绩好的基金。 |
+| actual_up_rate | 这段历史真实上涨样本比例。 |
+| mean_score_before / mean_score_after | 校准前后平均报出的分数，不是准确率，也不等于判涨数量。 |
+| up_minus_down_mean_logit | 真涨与不涨样本的平均基础线性得分差；负数表示平均关系反向，单类时null，不是因果结论。 |
+| before / after | 原来相同公式的方向准确率、平衡准确率、Brier等，EXAM必须与旧报告完整一致。 |
+| features[].mean_shift_in_fit_scale | 该段指标均值相比冻结FIT均值偏了多少个FIT尺度；没有用考试数据重新标准化。 |
+| outside_fit_range_rate | 该段有多少输入超出FIT观察过的最小/最大范围，不等同于坏数据比例。 |
+| mean_absolute_linear_contribution | 对此模型线性得分的平均绝对数值贡献；不是特征因果重要性。 |
+| exam_quarters | 原2024考试集合按available_at拆四季，数量相加与原考试一致；不是四个新独立回测。 |
+| nav_audit[].current_replay_mismatches | 当前源净值重算输入、方向及可得日期，与已存样本是否不同；空对象表示未发现这些字段差异。 |
+| weekend_nav_dates / evaluated_windows_containing_weekend_future_nav | 源净值的周末日期，以及多少已纳入样本的未来20条包含周末；不自动删除来源记录。 |
+| accumulated_vs_adjusted_direction_difference_count | 同起终点改看复权净值时，有多少历史方向不同；只做敏感性比较，不替换标签。 |
+| mean/max_absolute_return_gap_bps | 两口径收益差绝对值，单位基点；100基点=1个百分点，不能与涨跌准确率混用。 |
+| raw_snapshot_hash | 当前诊断原始行快照指纹；范围/字段与旧净值完整性MD5不同，不能相互比较。 |
+| catalog_and_source | 当前目录、来源登记和本机表清单；不代表历史分类、供应商账号权限或法律授权被重新核验。 |
+| admission.status=NOT_APPROVED | 首次版本、交易日历、分红口径等仍未闭环，不得发布。 |
+
+代码入口：`scripts/historical_nav_diagnostics.py`负责旧文件核验和新报告保存，`app/repositories/historical_nav_diagnostics.py`负责同来源有界只读查询，`app/services/historical_nav_diagnostics.py`负责纯统计和样本重放。没有改变已有HTTP或训练代码。
+
+## 14. 交易日窗口预览：先确定日期，不计算涨跌
+
+这是新入口，旧GET不变。旧GET读取某个净值业务日的样本；新GET回答：“站在某一天结束时，我已经知道哪个交易日的净值？历史资料必须对应哪61天？未来20交易日准确截止哪天？”
+
+### 14.1 怎么调用
+
+```text
+GET http://127.0.0.1:8000/internal/v1/features/historical-nav-samples/trading-window-preview?fundCode=008888&cutoffDate=2025-08-08
+```
+
+Headers使用已有`X-Service-Token`，不带Origin，Body留空。只支持001632、006730、008888；不传`asOfDate`、`pageSize`、`horizon`、`includeTest`、日历路径或训练参数。
+
+本次验收时8000未监听；在Python仓`C:\pythonProject\workSpace06`用原环境启动新代码：
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+若你已有别的端口服务，先确认它加载新代码并改URL端口，不必重复启动。此次临时18013网络验收服务已关闭，未重启其他进程。
+
+`cutoffDate`按自然日结束解释。8月7日的净值8月8日公告，就不能作为8月7日已知信息；传8月8日时才可能选中它。只有日期没有准确发布时间，不能拿这个接口证明8月8日上午也已经看得到。
+
+### 14.2 返回字段用人话解释
+
+| 字段 | 含义 |
+| --- | --- |
+| mode | 固定只读交易日窗口预览，不是样本保存或模型预测。 |
+| window_rule_version | 本次独立日期规则版本`TRADING_WINDOW_AFTER_CUTOFF_V1`；不是旧样本版本改名。 |
+| status | `WINDOW_DATES_COMPLETE`日期及公告齐全；`INPUT_DATES_INCOMPLETE`起点/历史有问题；`FUTURE_DATES_INCOMPLETE`历史齐但未来日期不齐。只看日期，不代表可训练。 |
+| fund_code / cutoff_date | 当前基金和信息截止日。 |
+| source_code / source_sync_run_id | 当前净值来源及成功同步水位；不是日历来源，也不证明每行历史首次版本。 |
+| anchor_nav_date / anchor_ann_date | 最新已公告且属于交易日的净值日期，以及它的公告日。没有可用起点则null。 |
+| anchor_lag_sessions | 这个起点比截止时最近交易日落后几天，按交易日而非自然日数；最多允许1天。 |
+| anchor_issue | null表示起点正常；`NO_KNOWN_TRADING_NAV`没有已知交易日起点；`STALE_ANCHOR_OVER_ONE_SESSION`超过1交易日滞后；`CALENDAR_HISTORY_SHORTAGE`起点前历史日历不够。异常时不输出一份假装完整的历史。 |
+| history_dates | 截至起点的61个准确交易日；61个数值才对应60段相邻变化，后续算60日指标要用。 |
+| history_issues | 历史要求日期中缺失/公告有问题的项目；不会向前多读一天来顶替。 |
+| future_dates / future_end_date | 严格在cutoff之后的20个交易日，以及第20天。缺净值也不往后挪终点。 |
+| future_issues | 未来这些日期是否已有源记录及合法公告，仅作离线检查，不参与选择历史输入。 |
+| future_navs_available_at | 未来20天都有合法公告日期时的最晚公告日；缺失则null。这不是收益，也不是已生成的标签。 |
+| ignored_non_trading_nav_dates | 本次读取范围里有净值但不开市的日期；仅不参与本规则计数，原记录没有删。可能含历史和未来的诊断日期。 |
+| anchor_based_20th_trading_date | 用日历从起点净值日后数20天的对照终点，不是新规则使用的终点。 |
+| legacy_20th_nav_date_from_anchor | 旧规则从起点后数第20条源记录的对照终点；只看本次有界读取范围，不足20条返回null，不扩查或计算旧标签。 |
+| database_written / feature_generated / label_generated | 固定false：没写库、没生成模型输入指标、没算后来涨跌答案。 |
+| nav_values_verified / training_eligible | 固定false：没有读取和核验净值数值，更未获训练资格。 |
+| publication_status / limitations | 固定`MODEL_NOT_RELEASED`及明确限制，日期齐全不会放行发布。 |
+
+`history_issues`和`future_issues`里的`nav_date`是准确出问题日期；`reason`分别是`MISSING_NAV`缺该日记录、`MISSING_ANN_DATE`缺公告日、`ANN_BEFORE_NAV_DATE`公告早于净值日、`NOT_KNOWN_AT_CUTOFF`截止时还不知道（只用于历史）。
+
+`calendar`说明这把“日期尺子”从哪来：`version`版本、`content_hash`固定内容指纹、`market`适用市场、`coverage_start/end`覆盖起止、`reviewed_on`本地核验日、`construction`按官方休市事实派生的方法、`source_urls`所涉年度沪深官方公告。运行时只读本地静态JSON，不联网抓取日历。
+
+`calendar.future_schedule_known_at_cutoff=false`尤其要注意：表示所用未来年度安排在cutoff之后才公告。接口允许看这份事后日期诊断，但不会宣称当时已知或可以训练。试传`cutoffDate=2023-12-08`可看到此情况。日历不是基金申赎或境外市场日历；缺少历史首次公告版本的问题没有因此解决。
+
+### 14.3 两组真实结果怎么验收
+
+请求008888、`cutoffDate=2025-08-08`：
+
+- `anchor_nav_date=2025-08-07`，`anchor_ann_date=2025-08-08`，`anchor_lag_sessions=1`。
+- 历史61天，从2025-05-14至2025-08-07；未来20天，从2025-08-11至2025-09-05。
+- `future_end_date=2025-09-05`，两种从净值日起算的对照终点都是2025-09-04；差异在于信息截止日和净值业务日不是同一天。
+- 状态日期完整，问题列表为空，未来日期公告最晚2025-09-06；无净值数值、涨跌答案和概率。
+
+再改`cutoffDate=2024-03-07`：
+
+- 起点2024-03-06；旧记录计数终点2024-04-02；从起点按交易日数终点2024-04-03；新规则从截止日之后数终点2024-04-08。
+- 忽略列表含2023-12-31与2024-03-31；3月31日是周末，有净值也不占交易日位置。新终点还跨过清明休市，故不是简单把旧终点机械加一天。
+
+同一数据/来源/日历版本重复请求完整JSON一致。这里只返回有限日期，**没有分页参数**；原批量接口的页大小一致性要求仍由原接口验收。
+
+### 14.4 错误、实际检查与代码入口
+
+- 无Token、错Token或带Origin：403。基金不在三试点、日期格式错或多传参数：422。
+- 缺基金404；基金/来源不适用、日历无法覆盖完整前后窗口409，日历错误码`CALENDAR_COVERAGE_INSUFFICIENT`。例如传2026-01-01或2025-12-31；2021年初历史不足也拒绝，不猜日期。
+- 数据库或日历文件损坏：503，业务错误码`TRADING_WINDOW_UNAVAILABLE`，不输出内部连接或文件细节。日期范围通过但源记录有洞则200带不完整状态，不伪装接口宕机。
+- 新增50项测试；相关离线382项、真实隔离PostgreSQL19项，共401项通过。真实网络200/403/422/409、TraceID传递、重复结果均验收。新入口7次真实读取共35条SET/SELECT，净值查询只含`nav_date`和`ann_date`。旧样本145批次/2923行/2875答案及净值、旧实验指纹未变。
+
+本次[日期验收JSON](C:/pythonProject/workSpace06/.local-runs/nav-trading-window-0147bbd8-f375-40a3-aabc-fc1bea4a3955/report.json)是本地只读验收记录，不是可再次训练的样本数据包。
+
+调用链：`app/api/routes/trading_nav_window.py`负责鉴权/参数/错误；`app/services/trading_nav_window.py`负责日期和只读事务；`app/repositories/trading_nav_window.py`只查两个日期字段；`app/services/trading_calendar.py`加载并校验固定日历；`app/schemas/trading_nav_window.py`说明输入输出。原构建器、旧标签和模型不变，下一步才核准净值口径并接入独立版本样本。
