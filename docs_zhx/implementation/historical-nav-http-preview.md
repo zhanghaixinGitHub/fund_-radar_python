@@ -1,6 +1,6 @@
 # 历史净值样本与离线候选模型：HTTP 验收手册
 
-当前入口：单日预览看第0节，批量dry-run看第6节，保存样本看第9节，基线评估看第10节，候选训练看第11节，校准与滚动研究验证看第12节，只读失败诊断脚本看第13节，**新增交易日窗口预览看第14节**。
+当前入口：旧单日预览看第0节，旧批量dry-run看第6节，保存样本看第9节，基线评估看第10节，候选训练看第11节，校准与滚动研究验证看第12节，只读失败诊断脚本看第13节，交易日窗口预览看第14节，净值口径审计看第15节，现金再投单日样本看第16节，**新增现金再投批量dry-run看第17节**。新版不能直接混入旧存储/训练接口。
 前面的“只制作样本、不训练”描述的是对应预览/存储接口；新候选训练接口会真正拟合一个研究模型，但不写数据库、不发布预测。
 
 现在直接传基金代码和日期，服务会读取数据库已有净值，返回“当时已知条件”和“后来答案”。不需要导入文件、填写净值列表或提交Body。预览不保存结果、不触发补数、不训练模型；`SCORABLE`只表示样本满足计算条件。
@@ -935,3 +935,287 @@ Headers使用已有`X-Service-Token`，不带Origin，Body留空。只支持0016
 本次[日期验收JSON](C:/pythonProject/workSpace06/.local-runs/nav-trading-window-0147bbd8-f375-40a3-aabc-fc1bea4a3955/report.json)是本地只读验收记录，不是可再次训练的样本数据包。
 
 调用链：`app/api/routes/trading_nav_window.py`负责鉴权/参数/错误；`app/services/trading_nav_window.py`负责日期和只读事务；`app/repositories/trading_nav_window.py`只查两个日期字段；`app/services/trading_calendar.py`加载并校验固定日历；`app/schemas/trading_nav_window.py`说明输入输出。原构建器、旧标签和模型不变，下一步才核准净值口径并接入独立版本样本。
+
+## 15. 净值口径审计：看清楚不同净值到底算出了什么
+
+上一节只看日期，这一节读取2022–2024范围内的净值数值和分红进行对照。它不是新版样本接口，也不改变旧GET；没有生成特征、20日答案或模型概率。
+
+### 15.1 请求
+
+```text
+GET http://127.0.0.1:8000/internal/v1/features/historical-nav-samples/nav-basis-audit?fundCode=006730&startDate=2023-01-01&endDate=2023-12-31
+```
+
+Headers用现有`X-Service-Token`，不带Origin，Body留空。只支持三只既有试点，起止均在2022–2024内，最多366自然日；2025、反向/过大范围、`navBasis/includeTest/cutoffDate`等额外参数均422，不查询数据库。没有交易日的范围409；缺基金404，来源不适用409，内部错误503，不展示私密连接细节。
+
+本次验收时8000没有监听。启动方式沿用第14.1节；实际验收用18014，完成后已停止，未重启你的其他进程。
+
+### 15.2 主要返回字段
+
+| 字段 | 人话解释 |
+| --- | --- |
+| mode / audit_rule_version | 固定只读口径审计及V1规则，不是训练或样本版本。 |
+| status | `DIFFERENCES_FOUND`发现现金/复权日差异超过固定1基点；`NO_LARGE_DAILY_DIFFERENCE_FOUND`未发现这种大日差异；`AUDIT_INCOMPLETE`日期、数值、公告或事件存在问题。不是上线状态。 |
+| source_code / source_sync_run_id | 当前净值与分红共同来源、净值同步水位；不能证明分红已完整或当时首次版本正确。 |
+| calendar_version / calendar_hash | 使用上一步独立日历数交易日；不是用源记录条数代替。 |
+| snapshot_hash | 当前有界净值、分红、范围、来源和日历的内容指纹；同一快照重复一致，不是特征哈希。 |
+| trading_day_count | 范围内准确交易日数量。 |
+| raw_nav_count | 实际净值行数，包含用于分母的前一个交易日，以及被忽略的非交易日。 |
+| ignored_non_trading_dates | 有净值但不占日序列位置的日期，源记录未删除。 |
+| invalid_nav_counts | 三列分别检查，缺日期/缺值/非正/NaN或Infinity都算无效；不会用别的净值列补上。 |
+| accumulated_dividend_missing_count | 所需日期里累计分红字段为空的数量；空值不是没有分红。 |
+| dividend_record_count | 范围内可能有关的源分红记录数，包括冲突或未知进度的记录。 |
+| checked_daily_pairs | 实际完成对照的相邻交易日数量；缺数据不能跳过后假装全数完成。 |
+| daily_gap_threshold_bps / daily_gap_over_threshold_count / max_daily_gap_bps | 固定1基点阈值、超过阈值的日数、最大绝对差。100基点=1个百分点。这是现金算式与来源复权的差，不是预测误差或发布标准。 |
+| issues | 需要核对的具体日期与原因；不是自动修复清单。 |
+| period_comparison | 同一基准日和终点的三列比值，以及条件性现金再投资连乘对照，见下文。 |
+| dividend_comparisons | 每个合法且唯一实施分红日的原始数值与公式结果，便于拿计算器核对。 |
+| admission_status / publication_status | 所有状态均`NOT_APPROVED`、`MODEL_NOT_RELEASED`，HTTP200不代表准入通过。 |
+| automatic_basis_fallback_allowed | false：本入口不允许把净值列互相替换。旧学习样本的已有规则并未被暗改。 |
+| database_written / feature_generated / label_generated / model_fitted / test_scored | 全false：没写库、没生成输入/答案、没训练、没给2025评分。 |
+| evidence_urls / limitations | 官方字段说明链接及计算/事件完整性/历史版本限制；接口运行时不联网。 |
+
+`period_comparison.base_date`是首个审计交易日前一个交易日；2023年度示例为2022-12-30，`end_date=2023-12-29`。因此一年242个交易日需要243个所需净值点，数据库还可能多出周末记录，三个数量不矛盾。
+
+`unit_nav_ratio_return/accumulated_nav_ratio_return/source_adjusted_nav_ratio_return`分别计算同端点“对应列终点值/基准值-1”；只表示各列的数学变化，不表示经济含义等价。`cash_reinvestment_candidate_return`将`(当日单位净值+现有每份现金分红)/前日单位净值`逐日连乘后减1，假设现金当日按单位净值再投。它不同于把多年现金简单加在最后，不含到账/申赎/个人持仓信息；没有现有事件时暂按现金0只是条件性假设。有缺数、异常事件或无法解释的日差异则返回null，不能用部分天数拼一个全年结果。
+
+### 15.3 真实示例和分红字段
+
+006730、2023年度返回`DIFFERENCES_FOUND`，242个交易日完成对照，1条实施事件，最大日差26.152031198640基点。原始读取246行，含243个所需交易日点和3条非交易日记录。
+
+其中2023-06-21这一项：
+
+- `previous_trading_date=2023-06-20`，`unit_nav_before=1.4188`，`unit_nav_after=1.2235`，`cash_per_share=0.1676`。
+- `unit_nav_ratio_return≈-0.137651536510`，约跌13.7652%，没计入派息。
+- `cash_inclusive_day_return≈-0.019523541021`，约跌1.9524%，明确按`(1.2235+0.1676)/1.4188-1`算。
+- `source_adjusted_day_return≈-0.022138744140`，约跌2.2139%；两者差`absolute_gap_bps≈26.152031198640`。
+- `ex_cash_denominator_hypothesis_return≈-0.022138746803`是另一种公式`1.2235/(1.4188-0.1676)-1`的假设对照，数值接近不等于供应商确认该算法。
+
+本例全年同端点结果分别为：单位净值比值约-17.7952%，累计净值比值约-4.1216%，来源复权比值约-6.7837%，按现有事件的条件性现金再投约-6.5344%。这些是历史口径对照，不是模型成绩，更不是未来预测或个人实际收益。
+
+日期字段优先`net_ex_date`映射值，缺失时用`ex_date`；同时存在且冲突则拒绝对照。只计算唯一“实施”事件；不能把“预案”、重复事件或不明现金直接当成已实施分红求和。
+
+常见`issues[].code`：`TRADING_NAV_MISSING`缺准确交易日，`INVALID_*_NAV`对应数值无效，`NAV_ANN_DATE_INVALID`公告异常，`DIVIDEND_DATE_CONFLICT`生效日期冲突，`MULTIPLE_DIVIDENDS_REQUIRE_REVIEW`同日多条待核对，`DIVIDEND_NOT_IMPLEMENTED`非实施进度，`DIVIDEND_CASH_INVALID`派息无效，`UNEXPLAINED_ADJUSTMENT_WITHOUT_DIVIDEND`没有对应现有事件却出现较大复权差异。完整原因码在服务与测试中维护，不会据此自动补数。
+
+### 15.4 实际验收和代码位置
+
+64项新增用例，相关离线446项、真实隔离PG19项通过。三基金×三年九组真实审计及一次TestClient实库请求共60条SET/SELECT；未读样本表。临时网络200/403/422/409、重复JSON及TraceID均通过。旧数据和旧实验指纹不变，未执行新训练或保存样本。
+
+本次[审计验收JSON](C:/pythonProject/workSpace06/.local-runs/nav-basis-audit-f6931bd0-5860-4320-abf5-a79882f02c84/report.json)包含九组完整结果及保护快照。它位于Git忽略目录，不是训练数据包。
+
+`app/api/routes/nav_basis_audit.py`负责HTTP，`app/repositories/nav_basis_audit.py`负责单基金/同来源/有界查询，`app/services/nav_basis_audit.py`负责固定算式和拒收，`app/schemas/nav_basis_audit.py`含字段注释。检查入口：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_nav_basis_audit.py -q --tb=short
+```
+
+下一步建议先明确现金分红再投资这一研究目标，再实现独立版本回报序列和样本；不根据2024哪种口径分数更好来决定，也不宣称缺失的事件完整性或首次版本证据已恢复。
+
+## 16. 新版现金再投样本：已经能返回“历史输入和后来答案”
+
+本节是在上一节建议后继续实现的结果，不是把旧样本改名。新规则有自己的样本/特征/口径/标签版本，使用明确现金公式和严格交易日，不使用供应商复权列，不保存、不训练、不发布。
+
+### 16.1 请求与服务
+
+```text
+GET http://127.0.0.1:8000/internal/v1/features/historical-nav-samples/cash-reinvestment-preview?fundCode=006730&cutoffDate=2023-06-20
+```
+
+Headers仍填已有`X-Service-Token`，不带Origin，Body留空。`fundCode`固定001632、006730、008888；`cutoffDate`是**信息截止日的日末**，不是旧`asOfDate`净值日。只支持2022–2024；即使截止在2024，之后20交易日跨2025也拒绝。不支持分页、批量、任意收益口径、交易日数或includeTest参数。
+
+验收时8000未监听；需要在本仓库启动加载本次代码的服务：
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+实际验证使用临时54479端口且已关闭，不表示你的8000进程已启动或更新。使用现有运行方式也可以，不需新增数据库表、依赖、采集任务或导入文件。
+
+### 16.2 先分清三个日期
+
+以006730、截止2023-06-20为例：
+
+| 日期 | 当前值 | 用途 |
+| --- | --- | --- |
+| `cutoff_date` | 2023-06-20 | 假设站在这天结束，划定当时能知道什么。 |
+| `anchor_nav_date` | 2023-06-19 | 最新已公布的净值日；历史输入截至它，不能使用6月20日尚未公布的净值。 |
+| `label_base_date` | 2023-06-20 | 答案从这天的单位净值作分母；这是后来核对用的值，不能进特征。 |
+| `label_end_date` | 2023-07-20 | 严格在cutoff之后第20个交易日，缺数也不能顺延。 |
+
+历史取3月21日至6月19日共61个精确交易日；未来为6月21日至7月20日20个交易日。标签序列含基准日，所以是**21个点、20段变化**。若把6月19日作为分母一直算至7月20日，就变成21段，这正是新旧起算语义需要分开的原因。周末/节假日截止，标签基准改用最近交易日，但仍只数截止之后20天。
+
+### 16.3 怎么计算收益和指标
+
+```text
+每天收益 = (当日单位净值 + 当日每份现金分红) / 前一交易日单位净值 - 1
+研究指数 = 从100开始，每天乘以(1 + 当天收益)
+这段累计收益 = 末日研究指数 / 100 - 1
+```
+
+现金假设生效当天按当天单位净值买回份额，所以多次分红的影响是连乘，不是把历次现金简单加到终点。没有当时可见事件的日期按现金0只是研究假设，不是证明没有漏分红。每段第一点只是基准，当天分红属于之前的区间，不重复加一次；不模拟费用、到账延迟或个人持有收益。
+
+实际6月21日：`(1.2235 + 0.1676) / 1.4188 - 1 = -0.019523541021`，约－1.9524%。本次20日最终指数`97.630933385748`，答案`-0.023690666143`（约－2.3691%）、方向0。**这些是历史事实在当前快照及固定假设下计算出的答案，不是模型预测。**
+
+输入中的7项`metrics`仍用已有纯数学公式，但在这条新研究指数上计算：
+
+| 指标 | 人话解释 |
+| --- | --- |
+| `return_5d/return_20d/return_60d` | 历史最近5/20/60个交易日区间的收益。`0.01`就是1%，不是1元。 |
+| `volatility_20d` | 最近20次日收益的起伏大小，越大越不稳定；总体标准差，不年化。 |
+| `max_drawdown_60d` | 最后60点中从之前高点跌得最深的幅度；负数，－0.05是回撤5%。 |
+| `relative_position_60d` | 最新值在最后60点的最高/最低之间处于什么位置，0最低、1最高；不是上涨概率。全段相等则拒收，不伪造位置。 |
+| `consecutive_decline_days` | 从末尾向前连续下跌了几个区间，遇到持平或上涨停止。 |
+
+计算内部固定Decimal40位及ROUND_HALF_UP；日收益连乘中途不按输出位数截断。输出点的净值、现金、日收益和指数12位；指标从这些显示指数计算，小数字段8位、连续下跌整数。答案按末日显示指数计算并固定12位，方向依据同一个返回值是否大于0，避免“显示0却判上涨”。
+
+### 16.4 返回字段怎么读
+
+| 字段 | 说明 |
+| --- | --- |
+| `mode` | `READ_ONLY_CASH_REINVESTMENT_SAMPLE_PREVIEW`，仅新版研究样本预览。 |
+| `sample_rule_version` | `CASH_REINVESTMENT_SAMPLE_RULE_V1`，这一版样本选择及隔离规则。 |
+| `status` | `RESEARCH_SAMPLE_READY`题和答案可计算；`INPUT_UNAVAILABLE`输入有问题；`LABEL_UNAVAILABLE`输入可用但答案不可用。都不是发布状态。 |
+| `calendar` | 固定交易日历版本、内容指纹、来源及未来年度安排当时是否已公告。 |
+| `anchor_lag_sessions` | 最新已知净值落后截至日最近交易日几天，最多允许1天。 |
+| `history_dates/future_dates` | 必须精确匹配的61个历史日/20个未来日；缺记录不能跳过换下一天。 |
+| `input_issues/label_issues` | 输入和答案各自的问题日及原因；答案问题不会回写历史输入。 |
+| `feature_payload` | 历史输入包，包含可见日期、来源、日历、研究序列和指标，没有未来答案值。真正训练时只能挑规定指标列，不能把整个响应当输入。 |
+| `feature_payload.feature_version/nav_value_basis` | 分别为`CASH_REINVESTMENT_FEATURE_V1`与`CASH_REINVESTED_UNIT_NAV_V1`；不同于旧累计净值样本。 |
+| `feature_payload.available_at` | 历史整段所用信息最晚公告日，必须不晚于cutoff。 |
+| `feature_payload.source_code/source_sync_run_id` | 同一启用来源及当前净值同步水位；不是分红完整性或历史首次版本证明。 |
+| `history_series/label_series`中的`unit_nav` | 真实单位净值；没有读取累计或供应商复权列来替换。 |
+| 每个点的`cash_per_share/dividend_event_keys` | 当天实际计入的每份现金及对应来源事件标识；基准日/无可见事件日现金0、标识为空。 |
+| 每个点的`daily_return/growth_index` | 当天收益及从100起步的累计研究指数；基准日收益null。 |
+| 每个点的`available_at` | 从本段起点到这一点，净值和已使用分红的最晚公告日；是累计可得日期。 |
+| `feature_hash/label_hash` | 两份内容分别生成的SHA256指纹；未来答案变化不应改变历史输入指纹。不是加密或历史快照签名。 |
+| `offline_label` | 后来答案，独立于输入；无答案时null，不能当成0或“预测下跌”。 |
+| `offline_label.label_version` | `CASH_REINVESTMENT_FORWARD_20TD_V1`，新版答案定义。 |
+| `horizon_trading_days` | 固定20，是交易日收益区间数，不是自然日或源表行数。 |
+| `future_return_20d/label_up_20d` | 后来20日收益、涨跌答案；大于0为1，持平/下跌为0。 |
+| `label_available_at` | 21个答案净值点及所用事件均已公告的最早自然日；后续训练分段仍须按此隔离。 |
+| `ignored_non_trading_nav_dates` | 查询范围里多出来的非交易日净值，仅用于诊断；不删除，也不进入特征包。 |
+| `usage/training_eligible` | `LEARNING_ONLY/false`：可研究复算，不具备正式训练准入，也不自动进入旧训练器。 |
+| `historical_versions_verified/dividend_history_complete_verified` | 都是false：没有证明首次公开版本及分红历史完整。 |
+| `database_written/model_fitted/test_scored` | 全是false：未保存或改数，未训练，未做2025测试评分。 |
+| `publication_status/limitations` | 未发布，以及现金再投、市场日历、时点版本和事件覆盖的具体限制。 |
+
+### 16.5 分红信息怎样避免“事后偷看”
+
+历史阶段要求方案公告日存在，若有实施公告日则取两者较晚者，必须已到cutoff。未来才公告或公告缺失的事件不回填历史输入；如果后来才获知旧分红，旧题特征也不追溯改写。当前“实施”字段没有历史版本，仍保留未核准状态。
+
+只有生效日在当前序列基准日之后、末日以内的事件影响该段。两个除息日期不一致、非交易日、同日多个事件、非实施、现金无效等拒收整段；当时已公告但两种生效日期都没有，无法判断和历史是否无关，历史也拒收。有效日优先净值除权日，缺失才用除息日，不自动顺延。
+
+标签允许使用cutoff之后到2024年底才公告的相关事件，并同步推迟`label_available_at`。如果只有答案资料有问题，历史payload与hash保留不变。缺公告事件不用于历史计算，但不因此获得“没有遗漏”的证明；事件完整性、拆分/折算、源覆盖修订仍未解决。
+
+### 16.6 拒绝方式、实际证据与代码入口
+
+- 无Token、错误Token或带Origin403；非试点、非法日期、2025截止或额外参数422。被拒请求不读库。
+- 截止2024-12-20虽然年份允许，但未来窗口进入2025：409 `TEST_PERIOD_PROTECTED`，开数据库前拒绝。来源/日历不满足409，基金不存在404。
+- 数据库/数据结构等内部异常503 `CASH_SAMPLE_UNAVAILABLE`并脱敏；数据缺失、异常或不可得通常200带不可用状态与问题清单。2023-12-08跨2024、当时下一年度安排未公告，保留特征、标签不可用。
+- 一致性只读事务内按基金/同来源取净值三列和分红七列；净值最多192行、事件100行，LIMIT193/101作哨兵，超量拒绝；无分页、无隐式全表返回。
+- 新增80项测试；相关离线526项、真实PostgreSQL隔离19项，共545项通过，Ruff/pip check通过。实际三基金×三个截止日，加006730/2023-06-22共10组可计算；真实HTTP重复结果与直接服务调用一致，鉴权/非法参数/测试期保护和TraceID已核对。
+- 最终验收10次直接调用+2次网络成功请求共72条SET/SELECT（12个只读事务、12条净值、12条分红查询）；失败网络请求不查库，无业务写入、无样本表读取。业务三表145/2923/2875、原始净值及旧候选/校准/诊断/日期/口径审计文件指纹未变。
+- 本地只读验收JSON：[report.json](C:/pythonProject/workSpace06/.local-runs/nav-cash-sample-d87bc4e4-0e2b-457c-b629-0834dda861f8/report.json)，SHA256为`ed7148d9742ccdb49354e20cce16c18998a461d54786cc8105a5c934d63cb8c3`，Git忽略，不是已存样本批次。
+
+调用链：`app/api/routes/cash_reinvestment_samples.py`处理HTTP与错误，`app/services/cash_reinvestment_samples.py`冻结输入/独立附答案，`app/repositories/cash_reinvestment_samples.py`只读所需资料，`app/schemas/cash_reinvestment_samples.py`有每个字段的中文解释。复用已有日历和7项纯数学函数，不执行旧样本选择或标签规则。
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_cash_reinvestment_samples.py -q --tb=short
+```
+
+下一步是新版本的有界批量dry-run，核对单日/批量一致及拒收分布；不是再次训练，不能把新响应直接发给旧保存、基线或训练接口。
+
+## 17. 新版批量dry-run：一只基金、一段日期，一次返回全部练习题
+
+### 17.1 直接调用，不用导入数据
+
+```text
+GET http://127.0.0.1:8000/internal/v1/features/historical-nav-samples/cash-reinvestment-dry-run?fundCode=006730&startDate=2023-06-01&endDate=2023-06-30&pageSize=7
+```
+
+Headers沿用现有`X-Service-Token`，不带Origin，Body留空。服务未启动时仍按第16.1节启动；本次检查8000未监听，临时57807已在验收后关闭，未重启用户进程。
+
+| 参数 | 含义与限制 |
+| --- | --- |
+| `fundCode` | 一只基金，仅001632、006730、008888。 |
+| `startDate/endDate` | 要出题的信息截止日范围，含首尾最多31自然日，均在2022–2024；不是读取原始净值的范围。 |
+| `pageSize` | 内部每页处理的题目数，1–30，默认10；不是预测周期，也不是每页原始净值行数。响应仍返回全部页。 |
+
+只对固定日历的交易日出题，周末/休市日列在`skipped_cutoff_dates`；它们不会被算成“缺少样本”。交易日即使缺净值，仍返回问题样本。单日GET支持周末截止，但本批量固定只选交易日，避免同一休市期重复出题。
+
+任何一道题的完整20日答案进入2025，整次在开数据库前409，不只返回前半段，也不靠换页大小绕过保护。例：2024-11-20至2024-12-20参数范围合法，但被未来窗口保护拒绝。2025截止、多余参数、反向/过长日期、非法页大小为422。
+
+### 17.2 怎么验收分页不变、单日与批量一致
+
+上面这段2023年6月真实数据有20道题、10个跳过日，三只基金均有20道输入/答案可计算。以006730为例：
+
+| pageSize | page_count | sample_count | ready_count | batch_hash |
+| --- | --- | --- | --- | --- |
+| 1 | 20 | 20 | 20 | `454558c6cec14e04b1b93a24ba3abc27f17570799714f181eca8672cb3f4cfb9` |
+| 7 | 3 | 20 | 20 | 与上一行完全相同 |
+| 30 | 1 | 20 | 20 | 与上一行完全相同 |
+
+操作：先发送原请求，再改页大小为1和30。**只有`page_size/page_count`应不同，其他响应字段包括items和batch_hash应相同。** 然后找`items`中`cutoff_date=2023-06-20`，与下面单日接口的完整返回逐字段比较：
+
+```text
+GET http://127.0.0.1:8000/internal/v1/features/historical-nav-samples/cash-reinvestment-preview?fundCode=006730&cutoffDate=2023-06-20
+```
+
+该题答案仍是第16节的`-0.023690666143`、方向0，特征/标签指纹也不变。不是拿旧累计净值`preview?asOfDate=...`作对照，新旧定义不同。此一致性以相同源数据、来源水位、日历和规则为前提，源同步更新后指纹可能合理变化。
+
+### 17.3 返回的新字段
+
+每个`items`对象内部仍是第16节的完整单日结构，字段含义不变。外层批量新增：
+
+| 字段 | 人话说明 |
+| --- | --- |
+| `mode` | 固定`READ_ONLY_CASH_REINVESTMENT_BATCH_DRY_RUN`，已经算了，但没有保存。 |
+| `batch_rule_version` | `CASH_REINVESTMENT_BATCH_RULE_V1`，本批量选题/分页/统计规则；逐题仍是原新版单日规则。 |
+| `status` | `DRY_RUN_COMPLETED`表示全部题目处理完，不代表每道题都可用；`NO_TRADING_CUTOFFS`表示范围内全是休市日。 |
+| `fund_code/start_date/end_date` | 本次基金和请求的信息截止日范围。 |
+| `cutoff_selection` | `TRADING_DAYS_ONLY`，按固定日历选题，不按数据库有无记录选题。 |
+| `skipped_cutoff_dates` | 请求范围内不出题的周末/休市日；与每条样本的非交易日源记录忽略列表不是一回事。 |
+| `source_code/source_sync_run_id` | 本次共同来源及当前同步水位，一次检查、整批共用；不能证明历史首次版本或事件完整。 |
+| `calendar_version/calendar_hash` | 同一份固定研究日历及内容指纹。 |
+| `page_size/page_count` | 每页题数、实际非空页数；不计入batch_hash，不是SQL数量。 |
+| `sample_count` | 总题数，等于items长度；不因题目不可用而减少。 |
+| `input_available_count` | 历史输入算得出的题数，有输入不一定有后来答案。 |
+| `label_available_count` | 后来答案算得出的题数；不是预测命中次数。 |
+| `ready_count` | 输入、答案都可计算的题数，不等于正式训练准入。 |
+| `input_unavailable_count` | 历史输入不可用的题数，这些题也不会附答案。 |
+| `label_unavailable_count` | 输入可用但答案不可用的题数；与上一项互斥。 |
+| `input_issue_counts/label_issue_counts` | 按问题代码统计受影响题数；同题同代码只算一次，多类问题分别计数。详细日期见items里的问题列表。 |
+| `items` | 全部样本，按cutoff_date升序；不是只返回当前页。 |
+| `batch_hash` | 整批内容校验指纹；不是已保存的batch_id，不能拿它去批次查询接口查数据。包含后来答案，不能当模型历史输入。 |
+| `usage/training_eligible` | 固定研究用途、正式训练资格false；批量成功不会解除单日的完整性/历史版本限制。 |
+| `database_written/model_fitted/test_scored/publication_status` | 不写库、不训练、不做2025评分、未发布。 |
+
+数量关系：`sample_count = ready_count + input_unavailable_count + label_unavailable_count`；输入可用数是`ready_count + label_unavailable_count`，答案可用数等于`ready_count`。原因统计可能一题多类，不能把所有原因数直接相加当总题数。
+
+### 17.4 空范围、有问题和失败时怎样返回
+
+- 006730、2023-06-17至06-18仅周末：200，`NO_TRADING_CUTOFFS`，0题0页；仍核验基金和来源，但不读净值或分红。
+- 006730、2023-12-01至12-08：本次6题全部有输入、1题有答案、5题答案不可用，原因`FUTURE_CALENDAR_NOT_KNOWN_AT_CUTOFF`。说明当时跨年安排尚未公布，不是预测下跌；`DRY_RUN_COMPLETED`仍可成立。
+- 缺净值、无公告、分红冲突等按单日规则保留在每道题里，不因批量而放宽。单日与批量都只是假设下可研究计算，来源事件完整性、历史首次版本及拆分/折算仍未核准。
+- 无Token/错Token/带Origin403；缺基金404、来源/日历/测试期保护409；范围/页大小/额外参数422。参数或未来保护拒绝后不读业务资料。
+- 中途SQL/计算/15秒阶段软预算失败：503 `CASH_BATCH_UNAVAILABLE`，不返回已做好的前半段items，不保存半批，不展示内部连接细节。
+
+### 17.5 实现与真实验收
+
+调用链是`app/api/routes/cash_reinvestment_batch.py` → `app/services/cash_reinvestment_batch.py` → 共享现金仓储；参数/字段注释在`app/schemas/cash_reinvestment_batch.py`。先按日历形成全部计划，然后在一个REPEATABLE READ、READ ONLY事务内检查一次来源、读取一次全批分红、每页一条净值SELECT，最后逐题复用原单日纯构建器。没有复制收益公式，不调用旧累计净值样本/训练流程。
+
+每页只取所需的日期/公告/单位净值，最多192行、LIMIT193超量拒绝；全批合并资料跨度也不足192自然日。分红按全批固定上限100、LIMIT101，不能通过分更小的页改变上限。净值和分红都裁回每道题的单日窗口，较大页的相邻题资料不会混入当前题。15秒是页间/题间软检查，数据库单条仍5秒超时，不承诺请求硬实时截止。
+
+- 新增57项用例；583项相关离线、19项真实PostgreSQL隔离回归，共602项通过，Ruff和pip check通过。既有TestClient弃用警告保留。
+- 三基金×1/7/30共9组真实批量对照，与60次真实单日查询逐条相同；006730旧单日完整示例与上轮验收包未发生变化。
+- 最终现场验收共75个只读事务，532条SET/SELECT（包含单日对照、批量、空范围和跨年示例），无样本表读取、无DDL/DML；158条净值SELECT只读单位净值值域、74条事件SELECT包含实施公告日期。参数/鉴权/测试期保护失败未产生SQL。
+- 实际网络200/403/422/409、TraceID、三种页大小、单日一致和空范围已验收。旧三表仍145/2923/2875，原始净值与旧候选/校准/诊断/日期/口径/单日现金报告指纹未变；2025只做完整性指纹核对，不读取为模型输入或答案。
+- 本地验收包：[report.json](C:/pythonProject/workSpace06/.local-runs/nav-cash-batch-23ea0dca-afdf-4e45-81df-260d667ef13b/report.json)，SHA256为`f34b3d73b63d7caaea8d979a1d94f7d4def46c690aaf600a42011cdb884e260b`，已回读、Git忽略；保留对照摘要及一条完整样本，不是保存批次。
+
+复跑本步：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_cash_reinvestment_batch.py tests/test_cash_reinvestment_samples.py -q --tb=short
+```
+
+下一步接独立新版样本保存和按批次读回；本次没有建表、保存、重训、发布或提交/推送。
