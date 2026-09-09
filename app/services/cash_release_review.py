@@ -7,12 +7,21 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db.session import get_nav_preview_engine
+from app.repositories.cash_planned_research import find_planned_research
+from app.schemas.cash_planned_research import CashPlannedResearch
 from app.schemas.cash_policy_freeze import CashFrozenPolicy
 from app.schemas.cash_prediction_check import CashPredictionCheckRequest
 from app.schemas.cash_reinvestment_research import CashStoredResearch
-from app.schemas.cash_release_review import CashReleaseCriterion, CashReleasePolicy, CashReleaseReview
+from app.schemas.cash_release_review import (
+    CashCoverageEvidence,
+    CashReleaseCriterion,
+    CashReleasePolicy,
+    CashReleaseReview,
+)
 from app.schemas.historical_nav_calibration import ReliabilityReport
 from app.schemas.historical_nav_evaluation import BaselineMetrics
+from app.services.cash_exam_plan import validate_cash_exam_plan
+from app.services.cash_planned_research import read_planned_in_session
 from app.services.cash_policy_freeze import read_matching_policy_freeze, validate_policy_binding
 from app.services.cash_prediction_check import inspect_cash_research, load_cash_prediction_research
 from app.services.cash_reinvestment_storage import cash_hash
@@ -131,23 +140,43 @@ def review_cash_research(
     fund_code: str,
     checked_at: datetime,
     frozen_policy: CashFrozenPolicy | None = None,
+    planned_research: CashPlannedResearch | None = None,
 ) -> CashReleaseReview:
     """确定性核验已有报告，不改研究内容；所有三试点/固定窗口都检查，不按成绩择优。"""
     # 同原报告采用28位Decimal上下文，避免调用者改变精度后影响分档算术校验。
     with localcontext() as context:
         context.prec = 28
         return _review_cash_research(
-            stored, policy, fund_code=fund_code, checked_at=checked_at, frozen_policy=frozen_policy
+            stored,
+            policy,
+            fund_code=fund_code,
+            checked_at=checked_at,
+            frozen_policy=frozen_policy,
+            planned_research=planned_research,
         )
 
 
-def _review_cash_research(stored, policy, *, fund_code, checked_at, frozen_policy):
+def _review_cash_research(stored, policy, *, fund_code, checked_at, frozen_policy, planned_research):
     policy = CashReleasePolicy.model_validate_json(policy.model_dump_json())
     if fund_code not in policy.fund_codes:
         raise ValueError("review fund outside frozen pilot scope")
     if frozen_policy is not None:
         validate_policy_binding(frozen_policy, policy)
     blockers, comparisons, _ = inspect_cash_research(stored)
+    planned_groups = {}
+    if planned_research is not None:
+        # 入口只从同一只读事务中的真实关联还原此对象；不接受HTTP上传的计划或覆盖率。
+        planned_research = CashPlannedResearch.model_validate_json(planned_research.model_dump_json())
+        if (
+            frozen_policy is None
+            or planned_research.policy_freeze != frozen_policy
+            or planned_research.research != stored
+            or planned_research.preparation.preparation != stored.report.preparation
+        ):
+            raise ValueError("planned evidence belongs to a different policy or research")
+        validate_cash_exam_plan(planned_research.preparation.plan)
+        planned_groups = {(g.window_id, g.fund_code): g for g in planned_research.preparation.coverage}
+    coverage_evidence = []
     checks = [_missing(code, message) for code, message in EVIDENCE_MESSAGES.items()]
     checks.append(
         CashReleaseCriterion(
@@ -209,17 +238,45 @@ def _review_cash_research(stored, policy, *, fund_code, checked_at, frozen_polic
                         scope=fund.fund_code,
                     )
                 )
-            # 旧报告没有事前考试日历计划和其生成证据。不可从usable/unique等筛选后数量推定覆盖率。
-            checks.append(
-                _missing(
-                    "EXAM_COVERAGE",
-                    "缺少事前应考截点计划，无法计算实际可评分题数/计划题数。",
+            if planned_research is not None and window.status == "EVALUATED":
+                group = planned_groups[window_id, fund.fund_code]
+                # inspect_cash_research已逐基金核验EXAM数量等于模型实际评分数，不能以待考题数冒充。
+                if group.usable_count != fund.counts["EXAM"]:
+                    raise ValueError("bound population differs from scored population")
+                evidence = CashCoverageEvidence(
+                    plan_version=planned_research.preparation.plan.version,
+                    plan_hash=planned_research.preparation.plan.plan_hash,
+                    dataset_hash=stored.report.preparation.dataset_hash,
                     window_id=window_id,
-                    scope=fund.fund_code,
-                    required=policy.minimum_coverage,
-                    operator="GE",
+                    fund_code=fund.fund_code,
+                    planned_count=group.planned_count,
+                    scored_count=fund.counts["EXAM"],
                 )
-            )
+                coverage_evidence.append(evidence)
+                checks.append(
+                    _numeric(
+                        "EXAM_COVERAGE",
+                        Decimal(evidence.scored_count) / evidence.planned_count,
+                        policy.minimum_coverage,
+                        "GE",
+                        "本窗口模型实际评分题数/评估前固定计划题数；覆盖率不是预测准确率。",
+                        window_id=window_id,
+                        scope=fund.fund_code,
+                    )
+                )
+            else:
+                checks.append(
+                    _missing(
+                        "EXAM_COVERAGE",
+                        "已核验事前计划，但本窗口尚未完成评分，不能把可用资料当成模型考试成绩。"
+                        if planned_research is not None
+                        else "缺少事前应考截点计划，无法计算实际可评分题数/计划题数。",
+                        window_id=window_id,
+                        scope=fund.fund_code,
+                        required=policy.minimum_coverage,
+                        operator="GE",
+                    )
+                )
         if window.model is not None:
             checks.append(
                 _numeric(
@@ -281,7 +338,9 @@ def _review_cash_research(stored, policy, *, fund_code, checked_at, frozen_polic
         blocking.append("POLICY_APPROVAL_MISSING")
     if frozen_policy is None:
         blocking.append("POLICY_NOT_FROZEN")
-    blocking.extend(("EX_ANTE_COVERAGE_EVIDENCE_MISSING", "MARKET_STATE_EVIDENCE_MISSING"))
+    if any(c.code == "EXAM_COVERAGE" and c.status == "MISSING" for c in checks):
+        blocking.append("EX_ANTE_COVERAGE_EVIDENCE_MISSING")
+    blocking.append("MARKET_STATE_EVIDENCE_MISSING")
     if any(c.status == "FAIL" for c in checks):
         blocking.append("RELEASE_RULES_NOT_MET")
     return CashReleaseReview(
@@ -299,6 +358,11 @@ def _review_cash_research(stored, policy, *, fund_code, checked_at, frozen_polic
         policy_frozen_at=frozen_policy.frozen_at if frozen_policy else None,
         policy_freeze_hash=frozen_policy.content_hash if frozen_policy else None,
         policy_binding_hash=frozen_policy.binding_hash if frozen_policy else None,
+        ex_ante_plan_verified=planned_research is not None,
+        planned_research_binding_id=planned_research.binding_id if planned_research else None,
+        planned_research_binding_hash=planned_research.content_hash if planned_research else None,
+        exam_plan_hash=planned_research.preparation.plan.plan_hash if planned_research else None,
+        exam_coverage_evidence=tuple(coverage_evidence),
     )
 
 
@@ -310,9 +374,17 @@ def review_cash_release(request: CashPredictionCheckRequest) -> CashReleaseRevie
         session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
         stored = load_cash_prediction_research(session, request, now=now)
         frozen = read_matching_policy_freeze(session, policy)
+        # 只有当前规则确实已批准、冻结才核验研究关联。草案或无匹配规则时不能借旧关联获准。
+        binding = find_planned_research(session, research_run_id=stored.run_id) if frozen is not None else None
+        planned = read_planned_in_session(session, binding) if binding is not None else None
         try:
             return review_cash_research(
-                stored, policy, fund_code=request.fund_code, checked_at=now, frozen_policy=frozen
+                stored,
+                policy,
+                fund_code=request.fund_code,
+                checked_at=now,
+                frozen_policy=frozen,
+                planned_research=planned,
             )
         except (ValueError, TypeError, KeyError, ArithmeticError) as error:
             raise HistoricalNavStorageError(

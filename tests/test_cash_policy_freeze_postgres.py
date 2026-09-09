@@ -58,7 +58,14 @@ def count(engine):
 
 
 def test_http_save_retry_get_and_review_bind_actual_snapshot(policy_db, client):
+    from tests.test_cash_planned_research_schema import migration_module as planned_migration
+
     engine, req, research_request, _ = policy_db
+    # 当前审查在已有规则匹配后按研究唯一键查新绑定；此旧报告没有绑定，不能补认。
+    with engine.begin() as conn:
+        module = planned_migration()
+        module.op = Operations(MigrationContext.configure(conn))
+        module.upgrade()
     payload = req.model_dump(mode="json", by_alias=True)
     first = client.post(URL + "/freezes", json=payload, headers=HEADERS)
     repeated = client.post(URL + "/freezes", json=payload, headers=HEADERS)
@@ -77,6 +84,7 @@ def test_http_save_retry_get_and_review_bind_actual_snapshot(policy_db, client):
     assert review.status_code == 200
     result = review.json()
     assert result["policy_persisted"] and result["policy_freeze_id"] == a["freeze_id"]
+    assert not result["ex_ante_plan_verified"] and result["exam_coverage_evidence"] == []
     assert result["status"] == "BLOCKED" and not result["publication_allowed"] and not result["database_written"]
     assert (
         "POLICY_NOT_FROZEN" not in result["blocking_codes"]

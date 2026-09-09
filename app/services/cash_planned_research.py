@@ -1,6 +1,7 @@
 """已确认计划先行的新研究；新报告和关联一起保存，绝不接收旧报告补绑定请求。"""
 
 from datetime import UTC
+from decimal import localcontext
 from time import perf_counter
 from uuid import UUID, uuid4
 
@@ -76,7 +77,10 @@ def restore_planned_research(row, research_row, freeze_row, *, created=False) ->
             or row.content_hash != binding_content_hash(row)
         ):
             raise ValueError("planned research identity, plan or report mismatch")
-        inspect_cash_research(stored)  # 共用全部固定窗口及数值/分档一致性检查，不因新绑定跳过。
+        # 与报告计算、发布审查使用相同精度，避免调用方Decimal上下文造成假损坏。
+        with localcontext() as context:
+            context.prec = 28
+            inspect_cash_research(stored)  # 共用全部固定窗口及数值/分档一致性检查，不因新绑定跳过。
         groups = {(c.window_id, c.fund_code): c for c in preparation.coverage}
         for window in stored.report.windows:
             for fund in window.funds:

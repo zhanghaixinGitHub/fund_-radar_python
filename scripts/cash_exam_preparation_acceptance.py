@@ -18,7 +18,10 @@ from sqlalchemy.engine import make_url
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import get_settings  # noqa: E402
-from app.db.session import get_nav_sample_storage_engine  # noqa: E402
+from app.db.session import (
+    get_nav_preview_engine,  # noqa: E402
+    get_nav_sample_storage_engine,  # noqa: E402
+)
 from app.schemas.cash_exam_plan import CashExamPreparation, CashExamPreparationRequest  # noqa: E402
 
 from scripts.cash_prediction_attempt_acceptance import stop_http  # noqa: E402
@@ -31,6 +34,9 @@ def main():
     parser.add_argument("--expected-report-hash", required=True)
     parser.add_argument(
         "--verify-planned-research", action="store_true", help="增加真实草案拒绝与新绑定GET检查，不创建研究"
+    )
+    parser.add_argument(
+        "--verify-source-observations", action="store_true", help="检查三试点本地观察元数据，不回填历史或触发来源同步"
     )
     args = parser.parse_args()
     settings = get_settings()
@@ -62,6 +68,11 @@ def main():
             planned_count = (
                 conn.execute(text("SELECT count(*) FROM cash_planned_research_binding")).scalar_one()
                 if args.verify_planned_research
+                else None
+            )
+            observation_count = (
+                conn.execute(text("SELECT count(*) FROM cash_source_observation")).scalar_one()
+                if args.verify_source_observations
                 else None
             )
         assert report_hash == args.expected_report_hash and frozen_count == 0
@@ -144,10 +155,39 @@ def main():
                 assert old_review.status_code == 200
                 old = old_review.json()
                 assert not old["policy_persisted"] and not old["publication_allowed"]
+                assert not old["ex_ante_plan_verified"] and old["exam_coverage_evidence"] == []
+                assert all(
+                    old[field] is None
+                    for field in (
+                        "planned_research_binding_id",
+                        "planned_research_binding_hash",
+                        "exam_plan_hash",
+                    )
+                )
                 coverage = [c for c in old["checks"] if c["code"] == "EXAM_COVERAGE"]
                 assert len(coverage) == 9 and all(c["status"] == "MISSING" for c in coverage)
                 checks += 1  # 旧报告不会借本次事后准备补盖成已有事前冻结证据。
                 if args.verify_planned_research:
+                    checks += 1  # 真实草案和旧报告的绑定引用为空，不从准备预览借用覆盖证据。
+                    for extra in (
+                        {"plannedResearchBindingId": str(UUID(int=0))},
+                        {"exAntePlanVerified": True},
+                        {"examCoverageEvidence": []},
+                    ):
+                        assert (
+                            client.post(
+                                "/internal/v1/predictions/release-review",
+                                json={
+                                    "fundCode": "008888",
+                                    "researchRunId": str(args.research_run_id),
+                                    "expectedReportHash": report_hash,
+                                    **extra,
+                                },
+                                headers=headers,
+                            ).status_code
+                            == 422
+                        )
+                        checks += 1
                     # 前文已明确确认真实规则仍DRAFT；本验收绝不创建APPROVED配置或真实新研究。
                     planned_path = "/internal/v1/features/cash-reinvestment/planned-research-runs"
                     planned_payload = {
@@ -185,6 +225,79 @@ def main():
                     assert len(statements) == before_planned
                     assert client.get(planned_path + f"/{UUID(int=0)}", headers=headers).status_code == 404
                     checks += 1
+                if args.verify_source_observations:
+                    metadata_engine = get_nav_preview_engine()
+                    metadata_sql = []
+
+                    def capture_metadata(conn, cursor, statement, parameters, context, executemany):
+                        metadata_sql.append(statement)
+
+                    event.listen(metadata_engine, "before_cursor_execute", capture_metadata)
+                    try:
+                        observation_path = "/internal/v1/features/cash-reinvestment/source-observation-check"
+                        observation_payload = {
+                            "fundCode": "008888",
+                            "startDate": "2022-01-01",
+                            "endDate": "2024-12-31",
+                            "cutoffDate": "2024-12-31",
+                        }
+                        for fund in ("001632", "006730", "008888"):
+                            response = client.post(
+                                observation_path, json={**observation_payload, "fundCode": fund}, headers=headers
+                            )
+                            assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+                            audit = response.json()
+                            assert (
+                                audit["status"] == "NO_LOCAL_RECORDS"
+                                and audit["active_record_count"] == audit["recorded_before_cutoff_count"] == 0
+                            )
+                            assert not any(
+                                audit[k]
+                                for k in (
+                                    "source_payload_read",
+                                    "database_written",
+                                    "training_eligible",
+                                    "publication_allowed",
+                                    "historical_first_versions_verified",
+                                    "event_completeness_verified",
+                                )
+                            )
+                            checks += 1
+                        for auth in (
+                            {},
+                            {"X-Service-Token": "invalid-acceptance-token"},
+                            {**headers, "Origin": "http://localhost"},
+                        ):
+                            assert (
+                                client.post(observation_path, json=observation_payload, headers=auth).status_code == 403
+                            )
+                            checks += 1
+                        for extra in (
+                            {"cutoffDate": "2025-01-01"},
+                            {"endDate": "2025-01-01"},
+                            {"verified": True},
+                            {"includePayload": True},
+                        ):
+                            assert (
+                                client.post(
+                                    observation_path, json={**observation_payload, **extra}, headers=headers
+                                ).status_code
+                                == 422
+                            )
+                            checks += 1
+                    finally:
+                        event.remove(metadata_engine, "before_cursor_execute", capture_metadata)
+                    assert len(metadata_sql) == 12 and all(
+                        sql.lstrip().upper().startswith(("SET", "SELECT")) for sql in metadata_sql
+                    )
+                    assert all(
+                        not any(
+                            k in sql
+                            for k in ("before_payload", "after_payload", "unit_nav", "nav_daily", "cash_sample")
+                        )
+                        for sql in metadata_sql
+                    )
+                    checks += 1
         after = snapshot(engine, args.research_run_id)
         assert before == after
         assert all(sql.lstrip().upper().startswith(("SET", "SELECT")) for sql in statements)
@@ -197,6 +310,11 @@ def main():
                     conn.execute(text("SELECT count(*) FROM cash_planned_research_binding")).scalar_one()
                     == planned_count
                 )
+            if args.verify_source_observations:
+                assert (
+                    conn.execute(text("SELECT count(*) FROM cash_source_observation")).scalar_one() == observation_count
+                )
+                checks += 1
         checks += 3
         print(
             json.dumps(
@@ -209,6 +327,7 @@ def main():
                     "snapshot": after,
                     "policy_freeze_count": frozen_count,
                     "planned_research_count": planned_count,
+                    "source_observation_count": observation_count,
                     "database_unchanged": True,
                     "temporary_server_stopped": not thread.is_alive(),
                 },

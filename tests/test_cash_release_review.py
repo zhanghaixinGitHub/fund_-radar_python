@@ -314,7 +314,17 @@ def test_http_readonly_identity_no_training_and_no_numeric_input_reads(client, m
 
 @pytest.mark.parametrize(
     "extra",
-    [{"force": True}, {"includeTest": True}, {"policy": {}}, {"minimumCoverage": 0}, {"coverage": []}, {"model": {}}],
+    [
+        {"force": True},
+        {"includeTest": True},
+        {"policy": {}},
+        {"minimumCoverage": 0},
+        {"coverage": []},
+        {"model": {}},
+        {"plannedResearchBindingId": "00000000-0000-0000-0000-000000000001"},
+        {"exAntePlanVerified": True},
+        {"examCoverageEvidence": []},
+    ],
 )
 def test_http_does_not_accept_policy_evidence_or_bypass(client, monkeypatch, extra):
     monkeypatch.setattr(api, "review_cash_release", lambda _: pytest.fail("must not read"))

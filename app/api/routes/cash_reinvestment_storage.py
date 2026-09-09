@@ -19,16 +19,37 @@ from app.schemas.cash_reinvestment_research import (
     CashStoredResearch,
 )
 from app.schemas.cash_reinvestment_storage import CashBatchSaveRequest, CashStoredBatch
+from app.schemas.cash_source_observation import CashObservationCheck, CashObservationCheckRequest
 from app.services.cash_exam_preparation import prepare_cash_exam_data
 from app.services.cash_planned_research import get_planned_research, save_planned_research
 from app.services.cash_reinvestment_research import get_cash_research, load_cash_dataset, save_cash_research
 from app.services.cash_reinvestment_storage import get_cash_batch, save_cash_batch
+from app.services.cash_source_observation import check_cash_source_observations
 from app.services.historical_nav_storage import HistoricalNavStorageError
 from app.services.historical_nav_training import HistoricalNavTrainingError
 from app.services.trading_calendar import CalendarCoverageError
 
 router = APIRouter(dependencies=[Depends(require_service_token)])
 logger = get_logger(__name__)
+
+
+@router.post("/cash-reinvestment/source-observation-check", response_model=CashObservationCheck)
+def check_source_observations(request: CashObservationCheckRequest, response: Response):
+    """仅诊断本地变更留档；不是供应商历史首次版本或分红完整性的审批入口。"""
+    response.headers["Cache-Control"] = "no-store"
+    started = perf_counter()
+    try:
+        result = check_cash_source_observations(request)
+    except ERRORS as error:
+        raise cash_http_error(error, "source_observation_check") from error
+    logger.info(
+        "cash_reinvestment.source_observation_check >>> complete, trace_id=%s, fund=%s, status=%s, elapsed_ms=%.2f",
+        get_trace_id(),
+        request.fund_code,
+        result.status,
+        (perf_counter() - started) * 1000,
+    )
+    return result
 
 
 def cash_http_error(error: Exception, operation: str) -> HTTPException:

@@ -12,6 +12,7 @@ from app.models.cash_planned_research import CashPlannedResearchBinding
 from app.models.cash_policy_freeze import CashPolicyFreezeRecord
 from app.models.cash_prediction_attempt import CashPredictionAttemptRecord
 from app.models.cash_reinvestment import CashResearchRun, CashSampleBatch, CashSampleLabel, CashSampleRecord
+from app.models.cash_source_observation import CashSourceObservation
 from app.models.event import EventRelation, MarketEvent, NewsItem, NewsSourceReference
 from app.models.fund import (
     FundDividend,
@@ -46,6 +47,7 @@ __all__ = [
     "CashSampleBatch",
     "CashSampleLabel",
     "CashSampleRecord",
+    "CashSourceObservation",
     "BacktestRun",
     "BenchmarkNavDaily",
     "BenchmarkSeries",

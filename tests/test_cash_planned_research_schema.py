@@ -27,7 +27,7 @@ def test_planned_binding_migration_and_model_are_identical():
 
     migration = migration_module()
     assert migration.down_revision == "20260909_17"
-    assert ScriptDirectory(str(ROOT / "alembic")).get_heads() == ["20260909_18"]
+    assert ScriptDirectory(str(ROOT / "alembic")).get_heads() == ["20260909_19"]
     recorder = Recorder()
     migration.op = recorder
     migration.upgrade()

@@ -5,12 +5,14 @@ from sqlalchemy import select
 from app.models.cash_planned_research import CashPlannedResearchBinding
 
 
-def find_planned_research(session, *, binding_id=None, request_key=None):
-    if (binding_id is None) == (request_key is None):
-        raise ValueError("exactly one planned research identity required")
-    column, value = (
-        (CashPlannedResearchBinding.binding_id, binding_id)
-        if binding_id is not None
-        else (CashPlannedResearchBinding.request_key, request_key)
+def find_planned_research(session, *, binding_id=None, request_key=None, research_run_id=None):
+    identities = (
+        (CashPlannedResearchBinding.binding_id, binding_id),
+        (CashPlannedResearchBinding.request_key, request_key),
+        (CashPlannedResearchBinding.research_run_id, research_run_id),
     )
+    selected = [(column, value) for column, value in identities if value is not None]
+    if len(selected) != 1:
+        raise ValueError("exactly one planned research identity required")
+    column, value = selected[0]
     return session.scalar(select(CashPlannedResearchBinding).where(column == value))

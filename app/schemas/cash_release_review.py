@@ -1,7 +1,7 @@
 """发布规则草案与核验明细；规则审批/持久冻结、数值合格和正式发布是三件不同的事。"""
 
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from typing import Literal, Self
 from uuid import UUID
 
@@ -86,7 +86,7 @@ class CashReleaseCriterion(BaseModel):
 
 
 class CashCoverageEvidence(BaseModel):
-    """未来事前日历计划生成器的服务内契约；当前HTTP不接受外部填报这些数。"""
+    """服务端从已核验研究绑定及实际成绩提取的覆盖明细；HTTP不接受调用者填报。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     plan_version: Literal["CASH_EX_ANTE_EXAM_PLAN_V1"]
@@ -95,7 +95,9 @@ class CashCoverageEvidence(BaseModel):
     window_id: str = Field(description="固定考试窗口编号")
     fund_code: str = Field(description="明确基金，不使用被筛选后的总体数字代替")
     planned_count: int = Field(gt=0, le=1000, strict=True, description="按冻结窗口及日历事前确定的可考试截点数")
-    scored_count: int = Field(ge=0, le=1000, strict=True, description="其中实际能完整评分的数量")
+    scored_count: int = Field(
+        ge=0, le=1000, strict=True, description="已完成窗口中实际被模型评分的数量，不是待考可用题数"
+    )
 
     @model_validator(mode="after")
     def counts(self) -> Self:
@@ -126,7 +128,22 @@ class CashReleaseReview(BaseModel):
     policy_frozen_at: datetime | None = Field(default=None, description="该快照的数据库冻结时间，不是本次检查时间")
     policy_freeze_hash: Hash | None = Field(default=None, description="匹配快照的完整内容指纹")
     policy_binding_hash: Hash | None = Field(default=None, description="已冻结比较约定的指纹")
-    publication_allowed: Literal[False] = Field(default=False, description="旧研究协议不能因单项PASS变成正式发布")
+    ex_ante_plan_verified: bool = Field(
+        default=False, description="是否从数据库核验本次新研究在评估前选定了当前冻结计划"
+    )
+    planned_research_binding_id: UUID | None = Field(
+        default=None, description="核验通过的研究绑定编号；旧报告或未核验时null"
+    )
+    planned_research_binding_hash: Hash | None = Field(
+        default=None, description="绑定回执完整指纹，供追溯具体研究和计划"
+    )
+    exam_plan_hash: Hash | None = Field(
+        default=None, description="绑定中固定考试日期计划的指纹，不是按可用数据倒推的日期"
+    )
+    exam_coverage_evidence: tuple[CashCoverageEvidence, ...] = Field(
+        default=(), description="仅已完成考试窗口的逐基金分子/分母；未考试不以可用题数充当评分数"
+    )
+    publication_allowed: Literal[False] = Field(default=False, description="计划或单项成绩通过仍不是正式发布许可")
     inference_executed: Literal[False] = Field(default=False, description="只检查已有成绩，不执行预测公式")
     independent_test_read: Literal[False] = Field(default=False, description="不读取2025数值或答案")
     database_written: Literal[False] = Field(default=False, description="不保存审查回执、不修改报告、规则或模型")
@@ -139,6 +156,34 @@ class CashReleaseReview(BaseModel):
                 raise ValueError("persisted policy requires an approved, complete snapshot reference")
         elif any(v is not None for v in references):
             raise ValueError("unfrozen policy cannot claim snapshot references")
+        plan_references = (self.planned_research_binding_id, self.planned_research_binding_hash, self.exam_plan_hash)
+        if self.ex_ante_plan_verified:
+            if not self.policy_persisted or any(v is None for v in plan_references):
+                raise ValueError("verified plan requires matching frozen policy and binding references")
+        elif any(v is not None for v in plan_references) or self.exam_coverage_evidence:
+            raise ValueError("unverified plan cannot claim binding references or coverage")
+        evidence = {(e.window_id, e.fund_code): e for e in self.exam_coverage_evidence}
+        measured = {
+            (c.window_id, c.scope): c for c in self.checks if c.code == "EXAM_COVERAGE" and c.status != "MISSING"
+        }
+        if len(evidence) != len(self.exam_coverage_evidence) or evidence.keys() != measured.keys():
+            raise ValueError("scored coverage evidence must match measured checks exactly")
+        if len({item.dataset_hash for item in evidence.values()}) > 1:
+            raise ValueError("one research cannot claim coverage from different datasets")
+        for key, item in evidence.items():
+            check = measured[key]
+            with localcontext() as context:
+                context.prec = 28
+                ratio = Decimal(item.scored_count) / item.planned_count
+            if (
+                item.plan_hash != self.exam_plan_hash
+                or item.fund_code not in self.policy.fund_codes
+                or item.window_id not in {"DEV_2023_Q3", "DEV_2023_Q4", "VALIDATION_2024"}
+                or check.actual != ratio
+                or check.required != self.policy.minimum_coverage
+                or check.operator != "GE"
+            ):
+                raise ValueError("coverage values, scope or plan contradict their evidence")
         if self.check_counts != {s: sum(c.status == s for c in self.checks) for s in ("PASS", "FAIL", "MISSING")}:
             raise ValueError("review counts do not match checks")
         if not self.blocking_codes or len(set(self.blocking_codes)) != len(self.blocking_codes):

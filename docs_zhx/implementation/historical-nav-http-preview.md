@@ -1575,3 +1575,65 @@ GET同路径加`/{binding_id}`只读保存内容；不查样本、不重新训�
 已完成请求重试200不重新训练；改参数409，缺记录404，损坏关联503且脱敏；当前进程训练忙429。跨进程并发可能重复计算，但唯一约束和事务保证最多一份完整绑定结果。单次准备/研究仍有既有阶段预算，真实长请求需给客户端足够等待时间，不要超时后换requestKey反复开新研究。
 
 本机迁移18已新增`cash_planned_research_binding`且当前0条；所有字段有注释，数据库拒绝更改、删除、清空及非空降级。970项相关离线、111项隔离PG、28项真实TCP/完整性检查通过，真实规则仍草案、旧报告未变。尚需将绑定证据接入发布审查，补齐数据及行情证据、独立考试和正式发布凭证；本轮不解除旧报告的任何发布门槛。复跑见TC-FDP-33。
+
+## 29. 发布审查开始使用研究绑定（2026-09-09）
+
+还是原来的`POST http://127.0.0.1:8000/internal/v1/predictions/release-review`，Body仍只传`fundCode`、`researchRunId`、`expectedReportHash`，内部Token要求不变。**不用额外传绑定编号、计划或覆盖率**：系统在数据库中按本次研究编号查找并核验，自己填“已通过”的参数会被422拒绝。
+
+新返回字段解释：
+
+| 字段 | 通俗含义 |
+| --- | --- |
+| ex_ante_plan_verified | 是否已从真实存储记录核验本次研究先选定了当前冻结计划。true不是模型合格，也不是一定完成了所有窗口的考试。 |
+| planned_research_binding_id | 核验的绑定记录号，可用上一节GET追溯；未核验或旧报告为null。 |
+| planned_research_binding_hash | 绑定内容指纹，防止拿另一份记录混用；不是审批签名。 |
+| exam_plan_hash | 该研究事前选定的固定日期计划指纹，不按最后能用多少资料缩小计划。 |
+| exam_coverage_evidence | 只列已完成评估的窗口，每基金一条实际评分覆盖明细。尚未完成的窗口不列入，全部未完成时为空列表。 |
+| 明细中的 planned_count / scored_count | 计划应考题数/模型实际已评分题数。EXAM_COVERAGE.actual等于后者除以前者，不是预测准确率。 |
+| 明细中的 plan_version / plan_hash / dataset_hash | 这项覆盖所用的计划版本、计划指纹、研究资料指纹，用于追溯而不是涨跌判断。 |
+| 明细中的 window_id / fund_code | 在哪段固定时间、对哪只基金检查；不拿其他基金的数量补足。 |
+
+有完整绑定且窗口完成评分时，覆盖达到规则为PASS、不足为FAIL；缺绑定或尚未评分时为MISSING且actual=null。例如准备好了40道题，但模型因训练资料不足没能考试，这里不能填“评分40道、覆盖100%”。
+
+当前真实规则仍DRAFT，接口不采信历史绑定，实际返回`ex_ante_plan_verified=false`、三个引用null、明细空列表，旧报告九项EXAM_COVERAGE仍MISSING。当前APPROVED配置若与冻结内容冲突409；绑定损坏503，不把坏记录当成“没有记录”继续检查。没有修改审批文件的HTTP捷径。
+
+所有审查仍为只读、不训练、不执行预测、不读取2025答案、不签发模型。计划覆盖合格也不会解除历史数据、行情证据、最终测试或其他成绩门槛。988项相关离线、121项隔离PG、32项真实TCP/完整性检查通过；成功采信绑定仅在隔离人工资料中验证，真实模型仍未发布。复跑见TC-FDP-34。
+
+## 30. 检查本地源值观察记录（2026-09-09）
+
+POST `http://127.0.0.1:8000/internal/v1/features/cash-reinvestment/source-observation-check`，沿用内部服务Token，Body示例：
+
+```json
+{
+  "fundCode": "008888",
+  "startDate": "2022-01-01",
+  "endDate": "2024-12-31",
+  "cutoffDate": "2024-12-31"
+}
+```
+
+这是数据准入的**基础诊断**，不是批准入口。startDate/endDate是要检查的源业务日期范围，cutoffDate是要核对的研究截点；开始≤结束≤截点，研究日期不进入2025。只按基金和启用来源聚合观察日志的计数/时间，不取前后净值、分红金额、答案或模型。
+
+| 返回字段 | 通俗含义 |
+| --- | --- |
+| status | NO_LOCAL_RECORDS：区间内没有未过期留档；ONLY_AFTER_CUTOFF：有留档但都晚于研究截点；LOCAL_WRITE_RECORDS_ONLY：有截点前本地写入记录，仍不代表首次公开或正式准入。 |
+| active_record_count | 区间内未过保留期的本地变更日志条数，不是净值天数或事件完整数。 |
+| recorded_before_cutoff_count | 其中数据库写入时间早于截点次日上海零点的条数，不代表那时已经提交可见。 |
+| expired_record_count | 已过保留期的日志条数，不能作为有效证据。 |
+| first_observed_at | 未过期日志中最早的实际数据库写入时间；无记录为null，不填写旧净值业务日。 |
+| historical_first_versions_verified / event_completeness_verified | 均false。本地日志不是供应商首次公开档案，零分红记录也不等于没有分红或拆分。 |
+| training_eligible / publication_allowed / database_written / source_payload_read | 均false；此接口不放行、不写库、不读取源值正文。 |
+
+新增表`cash_source_observation`由三试点源行变化触发器写入，记录本次现金相关旧值/新值。只记录安装之后的变化，不复制旧库；当前真实0条，三只基金都返回NO_LOCAL_RECORDS。迁移19已在本机执行，但常驻服务未主动重启，新路由需要运行包含本轮代码的服务；本轮真实HTTP验收使用临时本机服务。
+
+观察时间不是首次公告或事务提交时间；日志不覆盖管理员TRUNCATE/禁用触发器/改DDL，不能声称事件完整性。无可归属日期的事件不会被计入任意日期区间。现有旧研究的历史版本、分红/拆分等正式准入缺口没有被解除。
+
+记录按观察时来源登记的保留期到期，当前365天。保留期工具默认只预览：
+
+```powershell
+.venv\Scripts\python.exe scripts/cash_source_observation_retention.py
+```
+
+明确需要清理已到期日志时，运维可加`--execute --max-records 1000`，每次最多1000条；这会不可恢复地删除选中的过期观察日志，**不删除源值、历史样本或模型**。未到期日志仍被数据库保护；没有自动清理任务。本轮仅预览，0条可清理、0条删除。
+
+1005项相关离线、135项隔离PG、44项真实TCP/完整性检查及11项原同步测试通过；没有新来源网络请求、真实模型或预测概率。复跑见TC-FDP-35。
