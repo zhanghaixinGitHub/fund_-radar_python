@@ -1,0 +1,10 @@
+# Offline comparison only. Install into a separate venv, never the service venv.
+# CPU wheels avoid a CUDA/driver dependency. Full resolved lock is stored per run.
+--extra-index-url https://download.pytorch.org/whl/cpu
+-r requirements.txt
+chronos-forecasting==2.3.2
+torch==2.8.0+cpu
+transformers==4.57.6
+huggingface-hub==0.36.2
+pandas==2.3.3
+psutil==7.2.2

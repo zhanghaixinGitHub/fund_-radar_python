@@ -32,6 +32,39 @@ Linux 部署的并发池应按任务类型和容量另行评估；不要直接�
 
 ## 验证
 
+### Chronos-2 与自训练模型的离线比较
+
+入口是 `scripts/compare_chronos2.py`，仅使用本机 `fund_ai` 的明确现金研究批次，数据库事务只读。
+Chronos 是可选研究依赖，在独立环境运行；原服务与自训练接口不需要安装它。
+先安装固定依赖并下载核验官方权重：
+
+```powershell
+.\.venv\Scripts\python.exe -m venv .local-runs\chronos2-runtime
+.\.local-runs\chronos2-runtime\Scripts\python.exe -m pip install -r requirements-chronos2.txt
+.\.venv\Scripts\python.exe scripts\setup_chronos2.py
+```
+
+再按 `freeze → export → smoke → run → verify` 顺序执行。`freeze` 生成新 UUID，后续 `--run` 使用该值；
+同一运行包不可覆盖，重新比较须创建新包。以下来源是本轮已核验的原研究：
+
+```powershell
+.\.local-runs\chronos2-runtime\Scripts\python.exe scripts\compare_chronos2.py freeze --source-run f70feb1a-129d-4482-b66d-f4e2e3a5425c --dataset-hash 7f482c3f6cb43ac00c7dc635dcaa3397c5795e25e127e5bc8b338c70fb8f1c41
+.\.local-runs\chronos2-runtime\Scripts\python.exe scripts\compare_chronos2.py export --run <新UUID>
+.\.local-runs\chronos2-runtime\Scripts\python.exe scripts\compare_chronos2.py smoke --run <新UUID>
+.\.local-runs\chronos2-runtime\Scripts\python.exe scripts\compare_chronos2.py run --run <新UUID>
+.\.local-runs\chronos2-runtime\Scripts\python.exe scripts\compare_chronos2.py verify --run <新UUID>
+```
+
+`inputs.jsonl` 只含历史输入，答案另存且按 FIT/CALIBRATION/HISTORY/EXAM 分区；冻结全部考试预测后才读取 EXAM 答案。
+`complete.json` 最后生成。模型、虚拟环境、完整锁定依赖及原始资料均位于 Git 忽略的 `.local-runs`。
+干净环境按运行包的 `requirements-resolved.txt` 安装后，可用 `replay --run <UUID>` 核验六条真实样本与完整评分；
+复跑回执另存，不改已完成运行包。硬件仅用 CPU 1 线程，小批量 8 条，Chronos 子进程有超时退出边界。
+
+2026-09-09 的正式运行是 `4a329ccd-0cfc-4c81-9ecb-164e0fd9762d`：625 道有答案的 2024 考题上，
+三基金等权原始方向准确率为自训练 58.07%、Chronos 38.40%；两者校准斜率均为负，按冻结协议拒绝概率输出。
+因此没有有效概率的整体赢家，没有读取 2025 数值或替换正式模型。
+完整分步标记和中文报告在 Vue 文档仓库 `docs_zhx/implementation/chronos2-model-comparison.md` 及其报告链接。
+
 阶段2净值样本直接调用 `GET /internal/v1/features/historical-nav-samples/preview?fundCode=008888&asOfDate=2025-08-07`，
 带现有`X-Service-Token`，Body留空，服务自己读取数据库已有净值并计算。参见[调用说明](docs_zhx/implementation/historical-nav-http-preview.md)。
 同路径POST仍支持自备净值的纯计算测试；普通验收不需要导入文件。两种预览均不保存结果、不触发同步、不训练或发布。
