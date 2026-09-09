@@ -1219,3 +1219,125 @@ GET http://127.0.0.1:8000/internal/v1/features/historical-nav-samples/cash-reinv
 ```
 
 下一步接独立新版样本保存和按批次读回；本次没有建表、保存、重训、发布或提交/推送。
+
+## 18. 新版保存、研究报告与关注页面状态（2026-09-08）
+
+**现在能够把新版练习题存起来，实际做研究训练，再让关注页面读取结果状态。当前模型未发布，页面没有真实上涨概率。** 旧累计净值接口和批次保留，新链路只用第16–17节的现金再投版本，不能混用。
+
+### 18.1 先用一个只读请求看真实结果
+
+启动加载新代码的8000服务，Header填写原有X-Service-Token，不带Origin：
+
+```text
+GET http://127.0.0.1:8000/internal/v1/features/cash-reinvestment/research-runs/f70feb1a-129d-4482-b66d-f4e2e3a5425c
+```
+
+这个接口**只读已经保存的报告**，不会重新训练。数据库里现在是108批、2118道题，其中1750道输入和答案都能算出；不是预测正确1750次。没有将2025最终测试答案带入研究。
+
+| 返回部分 | 通俗含义 |
+| --- | --- |
+| run_id / created_at | 这次研究的编号和保存时刻；不是预测的日期。 |
+| database_written=true | 这份研究已经入库，不表示本次GET又写了一遍。 |
+| report.preparation | 本次用了哪些批次、七列指标、资料指纹、可用题数、各基金时间段数量及证据缺口。 |
+| report.windows | 三轮时间隔离考试，各自包含基础训练、校准、考试数量、模型和对照成绩。 |
+| status=PARTIAL_EVALUATION | 有窗口做完，但没有全部做完；本次前两个DEV窗口数量不足，2024验证做完。 |
+| model_fitted=true | 至少一轮真的训练和校准过，不是占位响应。 |
+| release_gate=BLOCKED | 不允许发布，当前协议不能通过请求参数改成通过。 |
+| publication_status=MODEL_NOT_RELEASED | 不向产品提供模型概率。与“已经训练过”不矛盾。 |
+| report_hash | 整份报告的内容校验码，防止模型和成绩错配。 |
+
+本次2024基础拟合778条、校准272条、考试625条，方向准确率52.64%，Brier误差0.35242478。简单训练期涨跌频率对照的Brier是0.25321469，越小越好；当前模型没有证明比简单对照可靠。历史首次版本、分红完整性、拆分/折算及最终独立测试证据仍不足。
+
+### 18.2 保存一小批，再按编号读取
+
+`POST /internal/v1/features/cash-reinvestment/batches`，JSON字段：
+
+| 请求字段 | 含义和限制 |
+| --- | --- |
+| fundCode | 三试点之一：001632、006730、008888。 |
+| startDate / endDate | 信息截止日范围，首尾包含，2022–2024，最多31自然日；未来20交易日答案不得跨入2025。 |
+| pageSize | 内部每页处理题数，1–30，不决定最终只返回几条。 |
+| requestKey | 本次保存操作新生成的UUID；网络重试沿用，想重新生成才换一个。 |
+
+返回`batch_id`后，用`GET /internal/v1/features/cash-reinvestment/batches/{batch_id}`读取。完整计算内容放在`preview`中，跟第17节逐题字段含义相同。
+
+外层`database_written=true`表示“资料已保存”；内层`preview.database_written=false`保留原纯计算结果的语义，表示“这一步计算本身没有写库”。不是自相矛盾，也不是GET产生了写操作。内层hash是内容指纹，外层batch_id才是保存编号。
+
+同requestKey、同基金日期会返回第一次保存的快照，换pageSize也不重算；同key改基金或日期409。整批事务保存，出错不留半批。重复保存不是覆盖旧批次。源数据后来变化不会改已保存快照；读回发现损坏503，不能自动修补。
+
+### 18.3 资料准备和固定研究
+
+1. `POST /internal/v1/features/cash-reinvestment/preparation`，Body只含`batchIds`数组，1–128个不同批次UUID。它只检查和组织资料，返回`dataset_hash`，不写库或训练。
+2. `POST /internal/v1/features/cash-reinvestment/research-runs`，Body含同样的`batchIds`、刚才的`expectedDatasetHash`、本次研究的`requestKey`。它实际运行固定方案并保存；重试返回已有研究，不重复训练。
+3. 用第一节GET按run_id读回完整报告。
+
+X是七列历史指标组成的“输入表”；y是后来涨没涨的“答案列”。基金代码、日期、后来答案不会混进X。时间不随机打散；答案跨出当前训练/校准/考试段的题目要剔除，避免提前知道后来的结果。
+
+`RESEARCH_READY`只说明总研究数量够，不代表每个小时间窗都够，更不代表`training_eligible=true`。当前正式训练准入固定false，但允许带证据缺口说明的研究拟合。新代码没有开放降低数量、传入自定义答案、查看2025考试或强制发布参数。
+
+本轮月批次生成脚本`python -m scripts.cash_reinvestment_pilot`默认只显示计划；`--execute`才会写本机fund_ai。它限定既定三基金和2022-01-01至2024-12-03，以固定幂等键重跑不会新增第二套。正常验收看上面已有GET即可，不必再次补存或重训。
+
+### 18.4 页面读的不是整份研究报告
+
+Python内部：`GET /internal/v1/predictions/008888`。Java对用户：`GET /api/v1/watchlist/008888/prediction`。
+
+浏览器只能访问Java。Java先验证登录、权限和本人是否关注，再向Python取最小状态。Python服务Token、模型系数、考试答案和批次内容不会交给前端。非法基金参数400，未登录401，未关注403；响应禁止共享缓存。上游失败时Java降级为可读的UNAVAILABLE，不泄露连接信息。
+
+Python字段使用下划线，Java页面字段使用驼峰，例如`up_probability → upProbability`：
+
+| 字段 | 含义 |
+| --- | --- |
+| status | MODEL_NOT_RELEASED未发布、DATA_INSUFFICIENT资料不足、NOT_APPLICABLE不适用、UNAVAILABLE暂时无法读取。 |
+| horizon_trading_days | 固定20交易日整体方向，不是逐天预测20次。 |
+| up_probability / direction | 当前只能null，不能填0或50代替未知，也不能把研究分数显示成已发布概率。 |
+| latest_nav_date | 本地当前来源最新已公告净值日，不是预测截止日；只读日期元数据。 |
+| research_run_id / research_evaluated_at | 支撑状态的研究编号和保存时间，不是今日预测生成时间。 |
+| model_version | 研究协议版本，不等于已发布模型。 |
+| reason_codes / reasons / message | 稳定原因代码、中文原因、主提示。 |
+| disclaimer | 研究用途说明；未发布不表示会下跌。 |
+
+真实三端及浏览器验收见[实施手册第21节](C:/WebStormProject/workSpace05/docs_zhx/implementation/free-data-prediction-v1.md:644)和[TC-FDP-23](C:/WebStormProject/workSpace05/docs_zhx/testcase/free-data-prediction-v1.md)。639项Python离线、27项真实隔离PG、18项Java测试通过；Vue检查/构建及真实页面权限、故障恢复、非股票型、窄屏与键盘验收通过。测试服务和合成账户schema已清理，真实账户/关注未变。
+
+正式发布、2025独立测试及在线实时特征/预测生成仍未启用。后续必须先补证据、按预先约定的条件验证效果，再实现发布后的在线能力；不能仅修改status字段上线。
+
+## 19. 检查一份研究是否允许生成预测（2026-09-09）
+
+```text
+POST http://127.0.0.1:8000/internal/v1/predictions/generation-check
+Header: X-Service-Token: 当前内部服务令牌
+Content-Type: application/json
+```
+
+```json
+{
+  "fundCode": "008888",
+  "researchRunId": "f70feb1a-129d-4482-b66d-f4e2e3a5425c",
+  "expectedReportHash": "db527ccca8015a4f41af2ee68608dae27ec5ab86c2627ef158d39f2f6b067795"
+}
+```
+
+**这不是生成预测的接口，而是生成前的只读检查。** 指定已有报告和指纹，避免不小心检查了另一版。它不重训、不读原始净值数值、不打开2025、不保存，也不提供force之类绕过参数。
+
+返回 `GENERATION_BLOCKED` 表示不允许进入预测计算；`inference_executed=false` 表示没有执行模型，`forecast_created=false` 表示没有创建产品预测。上涨概率和方向均为null。
+
+`comparisons` 是已有考试成绩的对照，不是当前基金的未来概率：按窗口、整体ALL及每只基金各列四个对照，`accuracy_delta`是模型正确率减对照（正数较好），`brier_delta`是模型误差减对照（负数较好）。`strict_gain_observed=true`只说明该组两项同时改善；所有组改善也不能代替完整历史版本证据或最终独立测试。缺窗列入`incomplete_window_ids`，不补一个假成绩。
+
+参数/额外字段422；认证或Origin403；基金/指定研究不存在404；来源、试点范围或指纹不匹配409；数据库不可用或报告损坏503脱敏。只有实际检查完成才返回200的检查结果，数据库连不上不能伪装成“正常未发布”。
+
+新增20项测试通过，相关离线总计659项通过。完整目标及未实现的数值生成/正式发布链路见[实施第22节](C:/WebStormProject/workSpace05/docs_zhx/implementation/free-data-prediction-v1.md)。现场验证不能由人工测试成绩替代，详见TC-FDP-24。
+
+## 20. 历史输入计算器不是一个新的HTTP操作（2026-09-09）
+
+本轮新增服务内`app.services.cash_prediction_features.read_cash_prediction_feature`，为后续实际预测准备已知历史资料。你不需要在接口工具里再加一个操作：现有HTTP契约和页面行为不变。
+
+它与练习题构建器共用历史选窗和现金再投资指标，只看cutoff以前已公布的信息，不读取或生成未来答案；未公告价格在SQL层屏蔽。支持旧研究年份和独立核验的2026日历，仍禁止2025数值读取。日历不足、当日未结束、原始资料缺失均不猜数。
+
+`INPUT_READY`只表示历史输入可以算出，不表示已有合格模型，更不表示预测上涨。计算器不训练、不保存、不返回概率。完整契约和2026官方公告来源见[实施第23节](C:/WebStormProject/workSpace05/docs_zhx/implementation/free-data-prediction-v1.md)。该阶段待验的真实SQL已在Docker恢复后补验，见下节，不能倒写成此前已取得实库证据。
+
+## 21. Docker恢复后的实际返回与页面复验（2026-09-09）
+
+29项隔离PostgreSQL测试通过。第19节generation-check已用真实HTTP和冻结报告复验：三基金都正常200，GENERATION_BLOCKED、16组对照、6项阻止原因；没有执行模型或保存预测。报告指纹仍与第19节示例一致，force参数422、错误指纹409。
+
+第20节历史输入实际读库验证：三基金在09-04/09-05历史cutoff都能得到61点输入；以09-08为cutoff时，最新已知净值仍为09-04、落后2个交易日，因此DATA_INSUFFICIENT，不生成输入指纹。不能把旧截止日的成功当作今日数据已就绪。
+
+Java到Python、本人关注权限、4种状态页面、公开页不展示、故障恢复、窄屏和键盘均已复验。临时服务和测试账户已清理，真实账号/关注及原净值前后指纹不变。最新实际证据见[实施第24节](C:/WebStormProject/workSpace05/docs_zhx/implementation/free-data-prediction-v1.md)和[TC-FDP-26](C:/WebStormProject/workSpace05/docs_zhx/testcase/free-data-prediction-v1.md)。这是状态链路验收，不是正式上涨概率发布或全部数值生成能力已完成。

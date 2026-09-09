@@ -160,6 +160,45 @@ def build_cash_return_series(
         return tuple(output), ()
 
 
+def build_cash_history_feature(
+    *,
+    fund_code: str,
+    cutoff_date: date,
+    history_dates: tuple[date, ...],
+    source: FeatureSourceReadiness,
+    nav: dict[date, CashNavPoint],
+    events: tuple[CashDividend, ...],
+    calendar: TradingCalendar,
+) -> tuple[CashFeaturePayload | None, tuple[CashSampleIssue, ...]]:
+    """样本与预测复用同一现金序列/指标公式；调用者先核验历史日期，绝不附加答案。"""
+    if len(history_dates) != 61:
+        raise ValueError("cash features require exactly 61 history sessions")
+    known_events = tuple(
+        e for e in events if (available := _event_available_at(e)) is not None and available <= cutoff_date
+    )
+    with localcontext() as context:
+        context.prec = 40
+        context.rounding = ROUND_HALF_UP
+        history, issues = build_cash_return_series(history_dates, nav, known_events, latest_available=cutoff_date)
+        if issues:
+            return None, issues
+        metrics = _build_metrics(tuple(Decimal(p.growth_index) for p in history))
+        if metrics is None:
+            return None, (CashSampleIssue(day=history_dates[-1], code="FLAT_HISTORY_POSITION_UNDEFINED"),)
+        return CashFeaturePayload(
+            fund_code=fund_code,
+            cutoff_date=cutoff_date,
+            anchor_nav_date=history_dates[-1],
+            available_at=history[-1].available_at,
+            source_code=source.source_code,
+            source_sync_run_id=source.source_sync_run_id,
+            calendar_version=calendar.definition.version,
+            calendar_hash=calendar.content_hash,
+            history_series=history,
+            metrics=metrics,
+        ), ()
+
+
 def build_cash_reinvestment_sample(
     request: CashSampleRequest,
     source: FeatureSourceReadiness,
@@ -182,39 +221,21 @@ def build_cash_reinvestment_sample(
     input_issues = [CashSampleIssue(day=i.nav_date, code=i.reason) for i in window.history_issues]
     if window.anchor_issue:
         input_issues.append(CashSampleIssue(day=window.anchor_nav_date, code=window.anchor_issue))
-    # 只让截止时确实有公告日期的事件进入历史阶段。未知/未来公告不会回溯污染feature_hash。
-    known_events = tuple(
-        e for e in events if (available := _event_available_at(e)) is not None and available <= request.cutoff_date
-    )
     features = None
     with localcontext() as context:
         context.prec = 40
         context.rounding = ROUND_HALF_UP
         if not input_issues:
-            history, problems = build_cash_return_series(
-                window.history_dates, by_date, known_events, latest_available=request.cutoff_date
+            features, problems = build_cash_history_feature(
+                fund_code=request.fund_code,
+                cutoff_date=request.cutoff_date,
+                history_dates=window.history_dates,
+                source=source,
+                nav=by_date,
+                events=events,
+                calendar=calendar,
             )
             input_issues.extend(problems)
-            if not input_issues:
-                # 指标使用响应中可复算的12位指数；七项定义仍与旧纯公式一致，但版本/输入经济含义不同。
-                metrics = _build_metrics(tuple(Decimal(p.growth_index) for p in history))
-                if metrics is None:
-                    input_issues.append(
-                        CashSampleIssue(day=window.anchor_nav_date, code="FLAT_HISTORY_POSITION_UNDEFINED")
-                    )
-                else:
-                    features = CashFeaturePayload(
-                        fund_code=request.fund_code,
-                        cutoff_date=request.cutoff_date,
-                        anchor_nav_date=window.anchor_nav_date,
-                        available_at=history[-1].available_at,
-                        source_code=source.source_code,
-                        source_sync_run_id=source.source_sync_run_id,
-                        calendar_version=calendar.definition.version,
-                        calendar_hash=calendar.content_hash,
-                        history_series=history,
-                        metrics=metrics,
-                    )
         feature_hash = _hash(features) if features else None
         # 标签基准不是历史anchor。否则anchor落后一天时，会把未来20日收益算成21段。
         base = calendar.sessions[calendar.at_or_before_index(request.cutoff_date)]

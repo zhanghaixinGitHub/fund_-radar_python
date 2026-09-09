@@ -94,10 +94,11 @@ def _column_contract(table: Table) -> list[tuple]:
     ]
 
 
-def test_migration_is_the_only_head_and_follows_schema_comments() -> None:
+def test_migration_remains_in_single_chain_and_follows_schema_comments() -> None:
     """接在已发布的注释迁移之后，不修改旧版本，不产生迁移分叉。"""
     script = ScriptDirectory(str(ROOT / "alembic"))
-    assert script.get_heads() == [REVISION]
+    assert len(script.get_heads()) == 1
+    assert REVISION in {item.revision for item in script.walk_revisions()}
     assert load_migration().down_revision == "20260905_12"
 
 

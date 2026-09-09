@@ -267,24 +267,23 @@ def _comparison(name: str, rows: tuple[PreparedRow, ...], scores: tuple[Decimal,
     )
 
 
-def _evaluate_window(
-    request: HistoricalNavCalibrationRequest,
-    data: PreparedDataset,
+def evaluate_calibration_window_rows(
+    rows: dict[str, tuple[PreparedRow, ...]],
+    counts: tuple[WindowFundCounts, ...],
+    history: tuple[PreparedRow, ...],
+    versions: dict[str, str],
     window: CalibrationWindow,
     *,
+    preview_size: int,
     deadline: float,
 ) -> CalibrationWindowReport:
+    """两种数据口径共用纯数值阶段；调用者完成各自版本、时点和数量校验。"""
     _deadline(deadline)
-    rows, counts = _window_rows(data, window)
     result = CalibrationWindowReport(window=window, status="INSUFFICIENT_DATA", funds=counts)
-    if data.report.status == "INSUFFICIENT_DATA":
-        return result.model_copy(update={"reason": "GLOBAL_DATA_INSUFFICIENT"})
     if any(any(f.missing.values()) for f in counts):
         return result.model_copy(update={"reason": "WINDOW_DATA_INSUFFICIENT"})
     try:
-        base = fit_logistic_artifact(
-            rows["FIT"], start_date=START, end_date=window.fit_end_date, versions=data.report.versions
-        )
+        base = fit_logistic_artifact(rows["FIT"], start_date=START, end_date=window.fit_end_date, versions=versions)
         _deadline(deadline)
         model = fit_calibrator(base, rows["CALIBRATION"], end_date=window.calibration_end_date)
     except HistoricalNavTrainingError as error:
@@ -323,11 +322,6 @@ def _evaluate_window(
         )
         for f in counts
     )
-    history = tuple(
-        r
-        for r in data.train
-        if r.available_at <= window.calibration_end_date and r.label_available_at <= window.calibration_end_date
-    )
     warnings_ = ["OVERLAPPING_LABELS_NOT_INDEPENDENT"]
     if model.calibrator.slope <= 0:
         warnings_.append("NON_POSITIVE_CALIBRATION_SLOPE")
@@ -353,13 +347,37 @@ def _evaluate_window(
                     fund_code=r.fund_code, as_of_date=r.as_of_date, before_score=b, after_score=a, actual_up=r.y
                 )
                 for r, b, a in zip(
-                    exam[: request.preview_size],
-                    before_scores[: request.preview_size],
-                    after_scores[: request.preview_size],
+                    exam[:preview_size],
+                    before_scores[:preview_size],
+                    after_scores[:preview_size],
                     strict=True,
                 )
             ),
         }
+    )
+
+
+def _evaluate_window(
+    request: HistoricalNavCalibrationRequest,
+    data: PreparedDataset,
+    window: CalibrationWindow,
+    *,
+    deadline: float,
+) -> CalibrationWindowReport:
+    """旧累计净值入口保留旧的全局准入与窗口切分，不更换数据语义。"""
+    _deadline(deadline)
+    rows, counts = _window_rows(data, window)
+    if data.report.status == "INSUFFICIENT_DATA":
+        return CalibrationWindowReport(
+            window=window, status="INSUFFICIENT_DATA", funds=counts, reason="GLOBAL_DATA_INSUFFICIENT"
+        )
+    history = tuple(
+        r
+        for r in data.train
+        if r.available_at <= window.calibration_end_date and r.label_available_at <= window.calibration_end_date
+    )
+    return evaluate_calibration_window_rows(
+        rows, counts, history, data.report.versions, window, preview_size=request.preview_size, deadline=deadline
     )
 
 

@@ -7,6 +7,7 @@ from app.models.analysis import (
     ForecastResult,
 )
 from app.models.benchmark import BenchmarkNavDaily, BenchmarkSeries
+from app.models.cash_reinvestment import CashResearchRun, CashSampleBatch, CashSampleLabel, CashSampleRecord
 from app.models.event import EventRelation, MarketEvent, NewsItem, NewsSourceReference
 from app.models.fund import (
     FundDividend,
@@ -33,6 +34,10 @@ from app.models.market_reference import (
 )
 
 __all__ = [
+    "CashResearchRun",
+    "CashSampleBatch",
+    "CashSampleLabel",
+    "CashSampleRecord",
     "BacktestRun",
     "BenchmarkNavDaily",
     "BenchmarkSeries",

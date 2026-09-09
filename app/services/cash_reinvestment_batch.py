@@ -102,60 +102,68 @@ def summarize_cash_batch(
     return response.model_copy(update={"batch_hash": digest})
 
 
-def preview_cash_reinvestment_batch(request: CashBatchRequest) -> CashBatchResponse:
-    """只读同一快照最多31自然日，所有页完成才返回；不会重复调用单日HTTP或训练器。"""
-    deadline = perf_counter() + 15
+def build_cash_batch_in_session(
+    session: Session, request: CashBatchRequest, *, deadline: float
+) -> CashBatchResponse:
+    """调用者持有一致性事务；只读预览与保存共用算法，不嵌套独立快照。"""
     calendar = load_calendar()
     plans = plan_cash_batch(request, calendar)  # 2025保护在开数据库前检查所有计划。
     items, page_count = [], 0
     _check_budget(deadline)
-    with Session(get_nav_preview_engine()) as session, session.begin():
-        session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
-        source = read_historical_nav_source(session, fund_code=request.fund_code)
-        if source.source_code != "TUSHARE_PRO_FUND":
-            raise HistoricalNavPreviewReadError("CASH_SOURCE_UNSUPPORTED", "现金字段映射仅核验既有Tushare来源。")
-        _check_budget(deadline)
-        # 分红整批最多100条，先读一次；上限不会因换页大小而变成另一组规则。
-        events = (
-            read_cash_dividends(
-                session,
-                fund_code=request.fund_code,
-                source_id=source.source_id,
-                start=plans[0].read_start,
-                end=plans[-1].read_end,
-            )
-            if plans
-            else ()
+    source = read_historical_nav_source(session, fund_code=request.fund_code)
+    if source.source_code != "TUSHARE_PRO_FUND":
+        raise HistoricalNavPreviewReadError("CASH_SOURCE_UNSUPPORTED", "现金字段映射仅核验既有Tushare来源。")
+    _check_budget(deadline)
+    # 分红整批最多100条，先读一次；上限不会因换页大小而变成另一组规则。
+    events = (
+        read_cash_dividends(
+            session,
+            fund_code=request.fund_code,
+            source_id=source.source_id,
+            start=plans[0].read_start,
+            end=plans[-1].read_end,
         )
-        if len(events) > 100 or len({event.event_key for event in events}) != len(events):
-            raise ValueError("cash batch events oversized or duplicate keys")
-        for offset in range(0, len(plans), request.page_size):
-            _check_budget(deadline)
-            page = plans[offset : offset + request.page_size]
-            # 一页合并一条净值SELECT，不逐题查来源、查分红、再调单日接口。
-            nav = read_cash_nav_window(
-                session,
-                fund_code=request.fund_code,
-                source_id=source.source_id,
-                start=page[0].read_start,
-                end=page[-1].read_end,
-            )
-            for plan in page:
-                _check_budget(deadline)
-                # 裁回该题与单日GET完全一致的读取边界，包括非交易日诊断行和冲突事件。
-                own_nav = tuple(point for point in nav if plan.read_start <= point.nav_date <= plan.read_end)
-                items.append(
-                    build_cash_reinvestment_sample(
-                        CashSampleRequest(fundCode=request.fund_code, cutoffDate=plan.cutoff_date),
-                        source,
-                        own_nav,
-                        _events_in_window(events, plan),
-                        calendar,
-                    )
-                )
-            page_count += 1
+        if plans
+        else ()
+    )
+    if len(events) > 100 or len({event.event_key for event in events}) != len(events):
+        raise ValueError("cash batch events oversized or duplicate keys")
+    for offset in range(0, len(plans), request.page_size):
         _check_budget(deadline)
+        page = plans[offset : offset + request.page_size]
+        # 一页合并一条净值SELECT，不逐题查来源、查分红、再调单日接口。
+        nav = read_cash_nav_window(
+            session,
+            fund_code=request.fund_code,
+            source_id=source.source_id,
+            start=page[0].read_start,
+            end=page[-1].read_end,
+        )
+        for plan in page:
+            _check_budget(deadline)
+            # 裁回该题与单日GET完全一致的读取边界，包括非交易日诊断行和冲突事件。
+            own_nav = tuple(point for point in nav if plan.read_start <= point.nav_date <= plan.read_end)
+            items.append(
+                build_cash_reinvestment_sample(
+                    CashSampleRequest(fundCode=request.fund_code, cutoffDate=plan.cutoff_date),
+                    source,
+                    own_nav,
+                    _events_in_window(events, plan),
+                    calendar,
+                )
+            )
+        page_count += 1
+    _check_budget(deadline)
     # 空范围也先完成基金和来源检查，但不读取任何净值/事件；不伪造周末题目。
     result = summarize_cash_batch(request, source, calendar, tuple(items), page_count=page_count)
     _check_budget(deadline)
     return result
+
+
+def preview_cash_reinvestment_batch(request: CashBatchRequest) -> CashBatchResponse:
+    """只读同一快照最多31自然日；预检在开库前执行，全部完成才返回。"""
+    deadline = perf_counter() + 15
+    plan_cash_batch(request, load_calendar())
+    with Session(get_nav_preview_engine()) as session, session.begin():
+        session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+        return build_cash_batch_in_session(session, request, deadline=deadline)

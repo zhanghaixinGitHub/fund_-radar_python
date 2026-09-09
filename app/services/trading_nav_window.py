@@ -1,6 +1,7 @@
 """独立的严格日历窗口规则，不修改旧构建器、旧标签、旧训练接口或原始净值。"""
 
 from bisect import bisect_left
+from dataclasses import dataclass
 from datetime import date
 from time import perf_counter
 
@@ -58,6 +59,39 @@ def _issues(
     return tuple(result)
 
 
+@dataclass(frozen=True)
+class HistoryDateWindow:
+    """只有历史输入日期；不计算未来窗口，也不需要未来净值或答案。"""
+
+    anchor: NavDatePoint | None  # 截止时最新已公告交易日，可能比cutoff早一日。
+    lag_sessions: int | None  # 起点落后最近交易日的数量；超过1必须拒绝。
+    anchor_issue: str | None  # 无可见起点、过时或日历不足，不自动补日期。
+    dates: tuple[date, ...]  # 起点可用时要求的精确61个历史交易日。
+    issues: tuple[NavDateIssue, ...]  # 缺数或公告日期问题，不包含任何未来诊断。
+
+
+def build_history_date_window(
+    cutoff: date, points: tuple[NavDatePoint, ...], calendar: TradingCalendar
+) -> HistoryDateWindow:
+    """共享训练/预测的历史选窗规则；调用者先验证有序、唯一和自身读取范围。"""
+    sessions = calendar.sessions
+    latest = calendar.at_or_before_index(cutoff)
+    session_set = set(sessions)
+    known = tuple(
+        p for p in points if p.nav_date in session_set and p.ann_date is not None and p.nav_date <= p.ann_date <= cutoff
+    )
+    anchor = known[-1] if known else None
+    anchor_index = bisect_left(sessions, anchor.nav_date) if anchor else None
+    lag = latest - anchor_index if anchor else None
+    anchor_issue = "NO_KNOWN_TRADING_NAV" if anchor is None else "STALE_ANCHOR_OVER_ONE_SESSION" if lag > 1 else None
+    history = sessions[anchor_index - 60 : anchor_index + 1] if anchor_issue is None and anchor_index >= 60 else ()
+    if anchor_issue is None and len(history) != 61:
+        anchor_issue = "CALENDAR_HISTORY_SHORTAGE"
+    return HistoryDateWindow(
+        anchor, lag, anchor_issue, history, _issues(history, {p.nav_date: p for p in points}, cutoff)
+    )
+
+
 def build_trading_nav_window(
     request: TradingNavWindowRequest,
     source: FeatureSourceReadiness,
@@ -76,18 +110,9 @@ def build_trading_nav_window(
     sessions = calendar.sessions
     session_set = set(sessions)
     by_date = {p.nav_date: p for p in points}
-    known = tuple(
-        p for p in points if p.nav_date in session_set and p.ann_date is not None and p.nav_date <= p.ann_date <= cutoff
-    )
-    anchor = known[-1] if known else None
-    anchor_index = bisect_left(sessions, anchor.nav_date) if anchor else None
-    lag = calendar.at_or_before_index(cutoff) - anchor_index if anchor else None
-    anchor_issue = "NO_KNOWN_TRADING_NAV" if anchor is None else "STALE_ANCHOR_OVER_ONE_SESSION" if lag > 1 else None
-    # 过旧起点的历史可能超出本次读取范围；直接拒绝，不把未查询的日期伪报成数据库缺数。
-    history = sessions[anchor_index - 60 : anchor_index + 1] if anchor_issue is None and anchor_index >= 60 else ()
-    if anchor_issue is None and len(history) != 61:
-        anchor_issue = "CALENDAR_HISTORY_SHORTAGE"
-    historical_issues = _issues(history, by_date, cutoff)
+    history_window = build_history_date_window(cutoff, points, calendar)
+    anchor, lag, anchor_issue = history_window.anchor, history_window.lag_sessions, history_window.anchor_issue
+    history, historical_issues = history_window.dates, history_window.issues
     future = calendar.future_sessions(cutoff)
     future_issues = _issues(future, by_date, None)
     # 完整未来元数据只是离线核验；绝不回写历史known/anchor/history。
