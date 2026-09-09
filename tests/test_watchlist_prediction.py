@@ -86,6 +86,9 @@ def test_query_is_bounded_and_reads_no_nav_values_or_old_model_release():
             self.sql.append(str(statement.compile(dialect=postgresql.dialect())))
             return next(self.results)
 
+        def execute(self, statement):
+            return SimpleNamespace(one_or_none=lambda: self.scalar(statement))
+
     session = Session()
     assert read_prediction_inputs(session, "008888", date(2026, 9, 8)) == (fund, source, day, None)
     nav = next(sql for sql in session.sql if "nav_daily" in sql)

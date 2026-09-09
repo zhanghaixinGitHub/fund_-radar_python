@@ -85,6 +85,8 @@ class CashForecastView(BaseModel):
                 or self.target_base_date is None
                 or self.target_end_date is None
                 or self.target_end_date <= self.target_base_date
+                or self.target_base_date > self.cutoff_date
+                or self.target_end_date <= self.cutoff_date
                 or self.up_probability is None
                 or self.reason_codes
                 or self.direction != ("UP" if self.up_probability > Decimal("0.5") else "NON_UP")

@@ -238,7 +238,9 @@ def test_missing_history_never_creates_partial_result(forecasts_db):
 def test_error_after_insert_rolls_back_result(forecasts_db, monkeypatch):
     engine, req, _ = forecasts_db
     monkeypatch.setattr(
-        service, "_view", lambda *a, **k: (_ for _ in ()).throw(ValueError("synthetic post-insert error"))
+        service,
+        "read_cash_forecast_in_session",
+        lambda *a, **k: (_ for _ in ()).throw(ValueError("synthetic post-insert error")),
     )
     with pytest.raises(ValueError, match="post-insert"):
         service.generate_cash_forecast(req)

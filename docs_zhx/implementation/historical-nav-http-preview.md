@@ -1387,9 +1387,9 @@ X-Service-Token: <本机配置的服务Token，不要写入代码或提交>
 
 模型纯数值内核也已经实现并用人工资料核对公式，但没有向HTTP或页面开放，不能越过闸门先算分数。本轮真实16项HTTP与41项隔离PG通过；临时验收服务已停止，若你的8000未启用自动重载，需要按原项目方式加载新代码后再调用。完整复跑命令与剩余边界见[实施第25节](C:/WebStormProject/workSpace05/docs_zhx/implementation/free-data-prediction-v1.md)和TC-FDP-27。
 
-## 23. 受正式授权保护的结果生成与读取（2026-09-09，代码已完成，业务库待迁移）
+## 23. 受正式授权保护的结果生成与读取（2026-09-09，迁移与拒绝路径已实测）
 
-这两个新接口用于“真正获准后生成结果”和“查询结果现在能否展示”，不是训练入口。**本机业务库当前仍为迁移15；先执行`alembic upgrade 20260909_16`并加载新服务，才能做实际调用。** 迁移仅增加独立结果表，保留旧资料；本次已通过隔离数据库验证，未执行业务库迁移。
+这两个新接口用于“真正获准后生成结果”和“查询结果现在能否展示”，不是训练入口。**本机业务库已执行`alembic upgrade 20260909_16`，并使用临时服务完成真实调用。** 其他环境需先执行迁移、加载新服务；迁移只增加独立结果表，保留旧资料。用户常驻服务本轮未重启。
 
 ```http
 POST /internal/v1/predictions/cash-forecasts
@@ -1412,4 +1412,12 @@ Body沿用第22节的`requestKey/fundCode/cutoffDate/researchRunId/expectedRepor
 
 `target_base_date/target_end_date`描述原本20交易日区间；不因查询日期变化而延期。分红同步即使没改净值同步编号也会使旧来源快照失效，同步中或最近失败同样不能展示旧概率。
 
-相关离线790项、隔离PG62项通过；成功计算/存储分支仅用人工授权和人工资料验证，新增接口的真实TCP业务场景及正式授权签发尚未验收。最新部署待办见[实施第26节](C:/WebStormProject/workSpace05/docs_zhx/implementation/free-data-prediction-v1.md)及TC-FDP-28。
+相关离线790项、隔离PG68项通过；成功计算/存储分支仅用人工授权和人工资料验证。真实TCP26项通过，三基金均未发布、不推理、不写结果，原数据摘要不变；正式授权签发尚未实现。最新边界见[实施第27节](C:/WebStormProject/workSpace05/docs_zhx/implementation/free-data-prediction-v1.md)及TC-FDP-29。
+
+## 24. 页面读取已保存结果与当前状态（2026-09-09）
+
+Java仍通过`GET /internal/v1/predictions/{fundCode}`读取本人关注卡片资料。该接口增加AVAILABLE/STALE及`forecast_id/cutoff_date/target_base_date/target_end_date/generated_at/model_hash`，但不会在GET时生成结果。没有记录沿用研究状态；已有最新记录则重新检查授权、来源更新与时效，不能在最新记录损坏或失效后选旧数字替代。
+
+只有完整且仍有效的AVAILABLE才有`up_probability/direction`。其他状态必须为空；返回不含模型参数、完整历史输入、未来答案和授权凭证。Java继续先验证本人关注，浏览器不能直连内部接口或传force。
+
+本轮完成真实未发布状态及明确标注的人工结果投影三端验收。人工页面样例仅验证展示，不写真实预测表；新增结果表当前0条，真实模型仍未获发布资格。查看[实施第27节](C:/WebStormProject/workSpace05/docs_zhx/implementation/free-data-prediction-v1.md)区分隔离数据库计算、人工HTTP投影及真实研究三种证据。

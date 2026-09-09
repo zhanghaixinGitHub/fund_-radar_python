@@ -59,6 +59,7 @@ def db(monkeypatch, row, *, fund=None, source=None):
 
         def execute(self, statement):
             sql.append(str(statement.compile(dialect=postgresql.dialect())))
+            return SimpleNamespace(one_or_none=lambda: next(results))
 
         def scalar(self, statement):
             self.execute(statement)

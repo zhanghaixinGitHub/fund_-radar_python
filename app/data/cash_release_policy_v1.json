@@ -1,0 +1,22 @@
+{
+  "version": "CASH_RELEASE_POLICY_V1",
+  "approval_state": "DRAFT",
+  "approval_reference": null,
+  "fund_codes": ["001632", "006730", "008888"],
+  "horizon_trading_days": 20,
+  "minimum_fit_per_fund": 252,
+  "minimum_calibration_per_fund": 60,
+  "minimum_rolling_exam_per_fund": 40,
+  "minimum_annual_exam_per_fund": 120,
+  "minimum_bin_count": 30,
+  "minimum_populated_annual_bins": 2,
+  "maximum_ece": "0.10",
+  "maximum_bin_gap": "0.15",
+  "minimum_coverage": "0.80",
+  "require_strict_accuracy_gain": true,
+  "require_strict_brier_gain": true,
+  "require_monotone_observed_rates": true,
+  "independent_test_start": "2025-01-01",
+  "independent_test_end": "2025-12-31",
+  "required_market_states": ["UP", "DOWN", "HIGH_VOLATILITY", "SIDEWAYS"]
+}

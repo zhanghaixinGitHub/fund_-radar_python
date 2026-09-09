@@ -9,10 +9,16 @@ from app.models.fund import FundShareClass, NavDaily, SourceRegistry
 
 
 def read_prediction_inputs(session, fund_code: str, today: date, *, include_research: bool = True):
-    fund = session.scalar(select(FundShareClass).where(FundShareClass.fund_code == fund_code))
+    fund = session.execute(
+        select(
+            FundShareClass.fund_code, FundShareClass.fund_type, FundShareClass.status, FundShareClass.source_code
+        ).where(FundShareClass.fund_code == fund_code)
+    ).one_or_none()
     if fund is None:
         return None, None, None, None
-    source = session.scalar(select(SourceRegistry).where(SourceRegistry.source_code == fund.source_code))
+    source = session.execute(
+        select(SourceRegistry.source_id, SourceRegistry.enabled).where(SourceRegistry.source_code == fund.source_code)
+    ).one_or_none()
     latest_date = None
     if source is not None and source.enabled:
         # 仅查询日期，不读取或计算保留测试期的净值数值；沿用基金/来源/日期索引。
@@ -30,11 +36,16 @@ def read_prediction_inputs(session, fund_code: str, today: date, *, include_rese
         )
     run = None
     if include_research and fund.fund_type == "STOCK":
-        counts = CashResearchRun.report["preparation"]["fund_counts"][fund_code]
-        run = session.scalar(
-            select(CashResearchRun)
-            .where(or_(cast(counts["TRAIN"].astext, Integer) > 0, cast(counts["VALIDATION"].astext, Integer) > 0))
-            .order_by(CashResearchRun.created_at.desc(), CashResearchRun.run_id.desc())
-            .limit(1)
-        )
+        run = find_latest_fund_research(session, fund_code)
     return fund, source, latest_date, run
+
+
+def find_latest_fund_research(session, fund_code: str):
+    """只读研究状态；不参与选择已发布结果，也不按研究成绩挑模型。"""
+    counts = CashResearchRun.report["preparation"]["fund_counts"][fund_code]
+    return session.scalar(
+        select(CashResearchRun)
+        .where(or_(cast(counts["TRAIN"].astext, Integer) > 0, cast(counts["VALIDATION"].astext, Integer) > 0))
+        .order_by(CashResearchRun.created_at.desc(), CashResearchRun.run_id.desc())
+        .limit(1)
+    )

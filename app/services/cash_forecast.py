@@ -106,7 +106,7 @@ def cash_forecast_stale_reasons(
     return tuple(reasons)
 
 
-def _view(
+def read_cash_forecast_in_session(
     session: Session,
     row: CashForecastRecord,
     *,
@@ -114,6 +114,7 @@ def _view(
     created: bool = False,
     grant: CashAuthorizedModel | None = None,
 ) -> CashForecastView:
+    """在调用方的同一快照内核验结果、授权及来源；不执行生成，供两个GET入口共用。"""
     saved = restore_forecast(row)
     req, value = saved.request, saved.value
     fields = dict(
@@ -172,7 +173,7 @@ def get_cash_forecast(forecast_id: UUID) -> CashForecastView:
         row = find_forecast(session, forecast_id=forecast_id)
         if row is None:
             raise HistoricalNavStorageError("CASH_FORECAST_NOT_FOUND", "现金预测结果不存在。", 404)
-        return _view(session, row, now=utc_now())
+        return read_cash_forecast_in_session(session, row, now=utc_now())
 
 
 def generate_cash_forecast(request: CashForecastRequest) -> CashForecastView:
@@ -192,7 +193,7 @@ def generate_cash_forecast(request: CashForecastRequest) -> CashForecastView:
                         raise HistoricalNavStorageError(
                             "REQUEST_KEY_CONFLICT", "该requestKey已用于另一份生成请求。", 409
                         )
-                    return _view(session, existing, now=now)
+                    return read_cash_forecast_in_session(session, existing, now=now)
                 try:
                     grant = validate_cash_authorization(resolve_cash_authorization(session, request, now=now), request)
                 except CashPublicationUnavailable as error:
@@ -262,7 +263,7 @@ def generate_cash_forecast(request: CashForecastRequest) -> CashForecastView:
                 )
                 session.add(row)
                 session.flush()
-                return _view(session, row, now=now, created=True, grant=grant)
+                return read_cash_forecast_in_session(session, row, now=now, created=True, grant=grant)
         except CashPublicationUnavailable as error:
             return CashForecastView(
                 status="MODEL_NOT_RELEASED",

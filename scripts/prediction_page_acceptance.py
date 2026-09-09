@@ -31,6 +31,9 @@ def main():
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--core-dir", required=True)
     parser.add_argument("--web-dir", required=True)
+    parser.add_argument(
+        "--synthetic-contract-fixture", action="store_true", help="额外允许显式人工响应验收，绝不发布真实模型"
+    )
     args = parser.parse_args()
     if not args.execute:
         print("PLAN ONLY: isolated schema and three loopback services", flush=True)
@@ -124,6 +127,10 @@ def main():
         "APP_PORTFOLIO_IMPORT_ENABLED": "false",
     }
     py_command = [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(PYTHON_PORT)]
+    if args.synthetic_contract_fixture:
+        py_env["PREDICTION_PAGE_FIXTURE_DIR"] = str(root)
+        py_command[3] = "scripts.prediction_page_fixture:create_app"
+        py_command.append("--factory")
     java = core / ".tools/jdk17/jdk-17.0.20.1+1/bin/java.exe"
     assert java.is_file()
     try:
@@ -241,6 +248,7 @@ def main():
                     "log_dir": str(root),
                     "checks": checks,
                     "commands": ["pause-python", "resume-python", "stop"],
+                    "synthetic_contract_fixture": args.synthetic_contract_fixture,
                 },
                 ensure_ascii=False,
             ),

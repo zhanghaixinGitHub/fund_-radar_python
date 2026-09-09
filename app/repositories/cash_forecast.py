@@ -19,6 +19,20 @@ def find_forecast(session: Session, *, forecast_id: UUID | None = None, request_
     return session.scalar(select(CashForecastRecord).where(clause))
 
 
+def find_latest_forecast(session: Session, *, fund_code: str):
+    """只取最新一份生成记录；不按分数/状态挑模型，也不越过失效记录回退到旧结果。"""
+    return session.scalar(
+        select(CashForecastRecord)
+        .where(CashForecastRecord.fund_code == fund_code)
+        .order_by(
+            CashForecastRecord.cutoff_date.desc(),
+            CashForecastRecord.created_at.desc(),
+            CashForecastRecord.forecast_id.desc(),
+        )
+        .limit(1)
+    )
+
+
 def find_identical_forecast(
     session: Session,
     *,
