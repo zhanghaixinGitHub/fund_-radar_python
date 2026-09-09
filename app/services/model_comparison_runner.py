@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from time import perf_counter
 
+from app.services.calibration_policy import calibration_diagnostic
 from app.services.cash_reinvestment_research import FUNDS, VERSIONS
 from app.services.historical_nav_calibration import WINDOWS, restore_calibrated_artifact
 from app.services.historical_nav_evaluation import FEATURE_NAMES
@@ -76,11 +77,12 @@ def freeze_runtime(folder):
             p.relative_to(ROOT).as_posix(): file_hash(p)
             for p in sorted(
                 set((ROOT / "app" / "services").glob("model_comparison_*.py"))
-                | {ROOT / "app" / "schemas" / "model_comparison.py"}
+                | {ROOT / "app" / "schemas" / name for name in ("model_comparison.py", "calibration_diagnostic.py")}
                 | {
                     ROOT / "app" / "services" / name
                     for name in (
                         "historical_nav_training.py",
+                        "calibration_policy.py",
                         "historical_nav_calibration.py",
                         "historical_nav_evaluation.py",
                         "cash_reinvestment_research.py",
@@ -188,14 +190,22 @@ def prepare_models(folder, window, inputs, protocol, adapter, deadline):
     return base, calibrated, b_model, binding
 
 
-def _with_probability(output, b_model, base_hash):
+def _with_probability(output, b_model, base_hash, *, reject_nonpositive_slope=False):
     output = dict(output)
     output["probability"] = None
     if output.get("raw_score") is not None:
         try:
             if "rejected" in b_model:
                 raise ValueError(b_model["rejected"])
-            output["probability"] = float(calibrated_chronos_score(b_model, output["raw_score"], base_hash))
+            output["probability"] = float(
+                calibrated_chronos_score(
+                    b_model, output["raw_score"], base_hash, reject_nonpositive_slope=reject_nonpositive_slope
+                )
+            )
+            if not reject_nonpositive_slope:
+                output["calibration"] = calibration_diagnostic(b_model["slope"], b_model["intercept"]).model_dump(
+                    mode="json"
+                )
         except ValueError as error:
             output["reason"] = str(error)
     return output
@@ -203,6 +213,7 @@ def _with_probability(output, b_model, base_hash):
 
 def smoke(folder: Path, checkpoint: Path):
     protocol, manifest, inputs = checked_dataset(folder)
+    policy = {"reject_nonpositive_slope": protocol["settings"]["calibration"]["reject_nonpositive_slope"]}
     freeze_runtime(folder)
     window = WINDOWS[-1]
     if manifest["windows"][window.window_id]["status"] != "READY":
@@ -221,7 +232,7 @@ def smoke(folder: Path, checkpoint: Path):
         first = _predict_many(adapter, selected, perf_counter() + 300)
         second = _predict_many(adapter, selected, perf_counter() + 300)
         started = perf_counter()
-        a = predict_self_trained(base, a_model, selected)
+        a = predict_self_trained(base, a_model, selected, **policy)
         a_seconds = perf_counter() - started
         rows = []
         for item, a_output in zip(selected, a, strict=True):
@@ -235,7 +246,7 @@ def smoke(folder: Path, checkpoint: Path):
                     "key": item.key,
                     "input_hash": item.input_hash,
                     "A": a_output,
-                    "B": _with_probability(first[item.key], b_model, adapter.base_hash),
+                    "B": _with_probability(first[item.key], b_model, adapter.base_hash, **policy),
                     "repeat_delta": difference,
                 }
             )
@@ -280,6 +291,7 @@ def _baseline_outputs(item, histories):
 
 def run_comparison(folder: Path, checkpoint: Path):
     protocol, manifest, inputs = checked_dataset(folder)
+    policy = {"reject_nonpositive_slope": protocol["settings"]["calibration"]["reject_nonpositive_slope"]}
     freeze_runtime(folder)
     if not (folder / "smoke.json").exists():
         raise ValueError("complete real development smoke before full comparison")
@@ -303,11 +315,15 @@ def run_comparison(folder: Path, checkpoint: Path):
             if eligible:
                 base, a_model, b_model, binding = prepare_models(folder, window, inputs, protocol, adapter, deadline)
                 batch_start = perf_counter()
-                a_outputs = dict(zip((i.key for i in items), predict_self_trained(base, a_model, items), strict=True))
+                a_outputs = dict(
+                    zip((i.key for i in items), predict_self_trained(base, a_model, items, **policy), strict=True)
+                )
                 runtime["windows"][name] = {"A_warm_predict_seconds": perf_counter() - batch_start, "training": binding}
                 batch_start = perf_counter()
                 b_raw = _predict_many(adapter, items, deadline)
-                b_outputs = {key: _with_probability(value, b_model, adapter.base_hash) for key, value in b_raw.items()}
+                b_outputs = {
+                    key: _with_probability(value, b_model, adapter.base_hash, **policy) for key, value in b_raw.items()
+                }
                 runtime["windows"][name]["B_warm_predict_seconds"] = perf_counter() - batch_start
                 model_hashes = {"A": a_model.model_hash, "B": b_model.get("model_hash")}
             for fund in FUNDS:
@@ -387,6 +403,18 @@ def score_frozen_predictions(folder):
             protocol["settings"]["bootstrap"],
         )
         windows[window.window_id] = {"data_status": manifest["windows"][window.window_id]["status"], **evaluated}
+        if not protocol["settings"]["calibration"]["reject_nonpositive_slope"]:
+            windows[window.window_id]["calibration_diagnostics"] = {
+                name: next(
+                    (
+                        p["models"][name]["calibration"]
+                        for p in predictions
+                        if p["window"] == window.window_id and "calibration" in p["models"][name]
+                    ),
+                    None,
+                )
+                for name in ("A", "B")
+            }
     return {
         "protocol_hash": protocol["protocol_hash"],
         "manifest_hash": manifest["manifest_hash"],
@@ -410,6 +438,7 @@ def replay_smoke(folder: Path, checkpoint: Path):
     from uuid import uuid4
 
     protocol, _, inputs = checked_dataset(folder)
+    policy = {"reject_nonpositive_slope": protocol["settings"]["calibration"]["reject_nonpositive_slope"]}
     freeze_runtime(folder)
     verified = verify_run(folder)
     reference = read_json(folder / "smoke.json")
@@ -421,10 +450,10 @@ def replay_smoke(folder: Path, checkpoint: Path):
         base = restore_logistic_artifact(model_paths["A-base"].read_bytes())
         a_model = restore_calibrated_artifact(model_paths["A"].read_bytes())
         b_model = read_json(model_paths["B"])
-        a_outputs = predict_self_trained(base, a_model, selected)
+        a_outputs = predict_self_trained(base, a_model, selected, **policy)
         deltas = []
         for old, item, a in zip(reference["rows"], selected, a_outputs, strict=True):
-            b = _with_probability(output[item.key], b_model, adapter.base_hash)
+            b = _with_probability(output[item.key], b_model, adapter.base_hash, **policy)
             raw_delta = abs(old["B"]["raw_score"] - b["raw_score"])
             probability_deltas = []
             for name, current in (("A", a), ("B", b)):

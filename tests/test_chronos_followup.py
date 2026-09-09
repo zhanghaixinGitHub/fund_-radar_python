@@ -91,7 +91,7 @@ def test_sigmoid_diagnostic_accepts_signed_map_without_changing_old_gate():
     model = {"version": "CHRONOS2_LOCAL_SIGMOID_V1", "base_model_hash": "a" * 64, "slope": -2.0, "intercept": 0.0}
     model["model_hash"] = fingerprint(model)
     with pytest.raises(ValueError, match="NONPOSITIVE"):
-        calibrated_chronos_score(model, 1.0, "a" * 64)
+        calibrated_chronos_score(model, 1.0, "a" * 64, reject_nonpositive_slope=True)
     with pytest.raises(ValueError, match="nonfinite"):
         signed_diagnostic_probability(1.0, 0.0, float("nan"))
 

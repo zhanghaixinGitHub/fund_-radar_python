@@ -133,8 +133,10 @@ def test_scalar_calibration_replays_and_is_bound_to_time_and_checkpoint():
     negative = fit_chronos_calibrator(
         rows, [-v for v in values], lower=date(2023, 6, 30), upper=date(2023, 12, 31), base_hash="a" * 64
     )
+    assert calibrated_chronos_score(negative, 1.0, "a" * 64) < 0.5
+    assert calibrated_chronos_score(negative, -1.0, "a" * 64) > 0.5
     with pytest.raises(ValueError, match="NONPOSITIVE"):
-        calibrated_chronos_score(negative, 1.0, "a" * 64)
+        calibrated_chronos_score(negative, 1.0, "a" * 64, reject_nonpositive_slope=True)
 
 
 def test_worker_timeout_closes_only_its_owned_process():

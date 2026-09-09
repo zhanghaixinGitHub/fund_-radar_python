@@ -9,7 +9,12 @@ from pathlib import Path
 from time import perf_counter
 
 from app.schemas.model_comparison import ComparisonInput
-from app.services.historical_nav_calibration import fit_calibrator, predict_calibrated_scores
+from app.services.calibration_policy import calibration_diagnostic
+from app.services.historical_nav_calibration import (
+    fit_calibrator,
+    predict_calibrated_scores,
+    restore_calibrated_artifact,
+)
 from app.services.historical_nav_training import fit_logistic_artifact, predict_artifact_scores, sigmoid
 from app.services.model_comparison_artifacts import file_hash, fingerprint, read_json
 from app.services.model_comparison_protocol import REVISION, WEIGHT_HASH
@@ -47,16 +52,22 @@ def fit_self_trained(fit_rows, cal_rows, window, versions):
     return base, calibrated
 
 
-def predict_self_trained(base, calibrated, items):
+def predict_self_trained(base, calibrated, items, *, reject_nonpositive_slope=False):
+    calibrated = restore_calibrated_artifact(calibrated.model_dump_json())
+    if base.model_hash != calibrated.base_model.model_hash:
+        raise ValueError("CALIBRATION_ARTIFACT_MISMATCH")
+    diagnostic = calibration_diagnostic(calibrated.calibrator.slope, calibrated.calibrator.intercept)
     x = tuple(i.x for i in items)
     raw = predict_artifact_scores(base, x)
-    scores = predict_calibrated_scores(calibrated, x) if calibrated.calibrator.slope > 0 else [None] * len(items)
+    rejected = reject_nonpositive_slope and calibrated.calibrator.slope <= 0
+    scores = [None] * len(items) if rejected else predict_calibrated_scores(calibrated, x)
     return [
         {
             "raw_score": float(r),
             "raw_direction": int(r > 0.5),
             "probability": float(p) if p is not None else None,
             "reason": None if p is not None else "CALIBRATOR_NONPOSITIVE_SLOPE",
+            **({} if reject_nonpositive_slope else {"calibration": diagnostic.model_dump(mode="json")}),
         }
         for r, p in zip(raw, scores, strict=True)
     ]
@@ -116,21 +127,24 @@ def fit_chronos_calibrator(rows, raw_scores, *, lower: date, upper: date, base_h
         "publication_status": "MODEL_NOT_RELEASED",
     }
     result["model_hash"] = fingerprint(result)
-    # A nonpositive map remains an inspectable artifact, but cannot supply main probabilities.
+    # Preserve the fitted sign; the run's version decides legacy rejection versus diagnostic reporting.
     replay = [sigmoid(result["slope"] * z + result["intercept"]) for z in raw_scores]
     if any(abs(float(a) - float(b)) > 1e-12 for a, b in zip(replay, reference, strict=True)):
         raise ValueError("CALIBRATION_REPLAY_MISMATCH")
     return result
 
 
-def calibrated_chronos_score(model: dict, value: float, expected_base_hash: str) -> float:
+def calibrated_chronos_score(
+    model: dict, value: float, expected_base_hash: str, *, reject_nonpositive_slope=False
+) -> float:
     if (
         fingerprint({k: v for k, v in model.items() if k != "model_hash"}) != model["model_hash"]
         or model["base_model_hash"] != expected_base_hash
         or model["version"] != "CHRONOS2_LOCAL_SIGMOID_V1"
     ):
         raise ValueError("CALIBRATION_ARTIFACT_MISMATCH")
-    if not math.isfinite(model["slope"]) or not math.isfinite(model["intercept"]) or model["slope"] <= 0:
+    calibration_diagnostic(model["slope"], model["intercept"])
+    if reject_nonpositive_slope and model["slope"] <= 0:
         raise ValueError("CALIBRATOR_NONPOSITIVE_SLOPE")
     if not math.isfinite(value):
         raise ValueError("NONFINITE_RAW_SCORE")

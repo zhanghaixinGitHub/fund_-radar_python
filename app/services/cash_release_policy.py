@@ -5,7 +5,7 @@ from pathlib import Path
 from app.schemas.cash_release_review import CashReleasePolicy
 from app.services.historical_nav_storage import HistoricalNavStorageError
 
-POLICY_PATH = Path(__file__).resolve().parents[1] / "data" / "cash_release_policy_v1.json"
+POLICY_PATH = Path(__file__).resolve().parents[1] / "data" / "cash_release_policy_v2.json"
 
 
 def load_release_policy() -> CashReleasePolicy:

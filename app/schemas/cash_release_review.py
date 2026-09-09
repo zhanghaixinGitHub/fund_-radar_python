@@ -7,12 +7,15 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.schemas.calibration_diagnostic import WindowCalibrationDiagnostic
 from app.schemas.historical_nav_training import Hash
 
 
 class CashReleasePolicy(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
-    version: Literal["CASH_RELEASE_POLICY_V1"] = Field(description="规则版本；改规则必须另立版本，不改旧冻结记录")
+    version: Literal["CASH_RELEASE_POLICY_V1", "CASH_RELEASE_POLICY_V2"] = Field(
+        description="V1保留正斜率硬检查，V2只记录方向风险；旧冻结记录不改"
+    )
     approval_state: Literal["DRAFT", "APPROVED"] = Field(description="草案或业务已确认；APPROVED仍不是数据库已冻结")
     approval_reference: str | None = Field(max_length=200, description="业务确认的可追溯记录，不能由HTTP参数代填")
     fund_codes: tuple[str, ...] = Field(description="三只已确认股票型试点，不按成绩剔除基金")
@@ -118,6 +121,9 @@ class CashReleaseReview(BaseModel):
     policy: CashReleasePolicy = Field(description="实际使用的服务器规则；草案同样可作诊断，但不能发布")
     blocking_codes: tuple[str, ...] = Field(description="未解除的证据、规则冻结和成绩问题")
     checks: tuple[CashReleaseCriterion, ...] = Field(description="逐窗口、逐基金的候选规则核验明细")
+    calibration_diagnostics: tuple[WindowCalibrationDiagnostic, ...] = Field(
+        default=(), description="各窗口校准方向说明；V2不以斜率符号判合格或失败，不计入检查通过数"
+    )
     check_counts: dict[Literal["PASS", "FAIL", "MISSING"], int] = Field(
         description="明细中通过、不通过、缺证据各多少项"
     )

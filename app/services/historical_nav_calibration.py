@@ -24,6 +24,7 @@ from app.schemas.historical_nav_calibration import (
 )
 from app.schemas.historical_nav_evaluation import BaselineComparison, BaselineFundMetrics
 from app.schemas.historical_nav_training import LogisticModelArtifact
+from app.services.calibration_policy import calibration_diagnostic
 from app.services.historical_nav_evaluation import (
     PreparedDataset,
     PreparedRow,
@@ -323,8 +324,9 @@ def evaluate_calibration_window_rows(
         for f in counts
     )
     warnings_ = ["OVERLAPPING_LABELS_NOT_INDEPENDENT"]
+    diagnostic = calibration_diagnostic(model.calibrator.slope, model.calibrator.intercept)
     if model.calibrator.slope <= 0:
-        warnings_.append("NON_POSITIVE_CALIBRATION_SLOPE")
+        warnings_.append(diagnostic.status)
     if any(0 < b.count < 30 for p in (before_reliability, after_reliability) for b in p.bins):
         warnings_.append("SMALL_RELIABILITY_BINS")
     if window.role == "FIXED_VALIDATION":

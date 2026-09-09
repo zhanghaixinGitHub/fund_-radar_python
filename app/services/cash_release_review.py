@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_nav_preview_engine
 from app.repositories.cash_planned_research import find_planned_research
+from app.schemas.calibration_diagnostic import WindowCalibrationDiagnostic
 from app.schemas.cash_planned_research import CashPlannedResearch
 from app.schemas.cash_policy_freeze import CashFrozenPolicy
 from app.schemas.cash_prediction_check import CashPredictionCheckRequest
@@ -20,6 +21,7 @@ from app.schemas.cash_release_review import (
 )
 from app.schemas.historical_nav_calibration import ReliabilityReport
 from app.schemas.historical_nav_evaluation import BaselineMetrics
+from app.services.calibration_policy import calibration_diagnostic
 from app.services.cash_exam_plan import validate_cash_exam_plan
 from app.services.cash_planned_research import read_planned_in_session
 from app.services.cash_policy_freeze import read_matching_policy_freeze, validate_policy_binding
@@ -177,6 +179,7 @@ def _review_cash_research(stored, policy, *, fund_code, checked_at, frozen_polic
         validate_cash_exam_plan(planned_research.preparation.plan)
         planned_groups = {(g.window_id, g.fund_code): g for g in planned_research.preparation.coverage}
     coverage_evidence = []
+    calibration_diagnostics = []
     checks = [_missing(code, message) for code, message in EVIDENCE_MESSAGES.items()]
     checks.append(
         CashReleaseCriterion(
@@ -277,7 +280,7 @@ def _review_cash_research(stored, policy, *, fund_code, checked_at, frozen_polic
                         operator="GE",
                     )
                 )
-        if window.model is not None:
+        if window.model is not None and policy.version == "CASH_RELEASE_POLICY_V1":
             checks.append(
                 _numeric(
                     "CALIBRATION_SLOPE",
@@ -288,6 +291,9 @@ def _review_cash_research(stored, policy, *, fund_code, checked_at, frozen_polic
                     **identity,
                 )
             )
+        elif window.model is not None:
+            diagnostic = calibration_diagnostic(window.model.calibrator.slope, window.model.calibrator.intercept)
+            calibration_diagnostics.append(WindowCalibrationDiagnostic(window_id=window_id, **diagnostic.model_dump()))
         if window.window.role == "FIXED_VALIDATION":
             if window.status != "EVALUATED":
                 for scope in ("ALL", *policy.fund_codes):
@@ -352,6 +358,7 @@ def _review_cash_research(stored, policy, *, fund_code, checked_at, frozen_polic
         policy=policy,
         blocking_codes=tuple(dict.fromkeys(blocking)),
         checks=tuple(checks),
+        calibration_diagnostics=tuple(calibration_diagnostics),
         check_counts={s: sum(c.status == s for c in checks) for s in ("PASS", "FAIL", "MISSING")},
         policy_persisted=frozen_policy is not None,
         policy_freeze_id=frozen_policy.freeze_id if frozen_policy else None,

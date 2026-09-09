@@ -112,10 +112,24 @@ def test_wrong_model_hash_rejected(model):
 
 
 @pytest.mark.parametrize("slope", [0, -1])
-def test_invalid_calibrator_even_with_new_valid_hash_rejected(model, slope):
+def test_nonpositive_calibrator_computes_with_explicit_diagnostic(model, slope):
     changed = model.model_copy(update={"calibrator": model.calibrator.model_copy(update={"slope": slope})})
     changed = changed.model_copy(update={"model_hash": calibrated_model_hash(changed)})
-    with pytest.raises(ValueError, match="slope"):
+    result = service.calculate_cash_inference(feature(), changed, expected_model_hash=changed.model_hash)
+    assert result.calibration.status == ("CONSTANT_PENDING_VALIDATION" if slope == 0 else "REVERSED_PENDING_VALIDATION")
+    assert result.calibration.slope == slope
+    assert 0 <= result.up_score <= 1
+    assert not {"release_id", "publication_allowed", "up_probability"} & result.model_dump().keys()
+    if slope == 0:
+        expected = Decimal(str(1 / (1 + math.exp(-changed.calibrator.intercept))))
+        assert result.up_score == expected.quantize(Decimal("0.00000001"), rounding=ROUND_HALF_UP)
+
+
+@pytest.mark.parametrize("field", ["slope", "intercept"])
+def test_nonfinite_calibration_still_rejected_before_numerics(model, monkeypatch, field):
+    changed = model.model_copy(update={"calibrator": model.calibrator.model_copy(update={field: float("nan")})})
+    monkeypatch.setattr(service, "predict_calibrated_scores", lambda *a, **k: pytest.fail("must not infer"))
+    with pytest.raises(ValueError):
         service.calculate_cash_inference(feature(), changed, expected_model_hash=changed.model_hash)
 
 

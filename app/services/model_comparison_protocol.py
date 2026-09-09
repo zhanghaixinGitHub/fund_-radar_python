@@ -18,10 +18,12 @@ REVISION = "29ec3766d36d6f73f0696f85560a422f50e8498c"
 WEIGHT_HASH = "ddcda3c7508bf2528087723e98a20707cc04b7f370ae275a9fd88078ddba4f42"
 
 
-def settings() -> dict:
+def settings(version: str = "CHRONOS2_CASH_COMPARISON_V2") -> dict:
+    if version not in ("CHRONOS2_CASH_COMPARISON_V1", "CHRONOS2_CASH_COMPARISON_V2"):
+        raise ValueError("unsupported comparison protocol version")
     plan = build_cash_exam_plan()
     return {
-        "version": "CHRONOS2_CASH_COMPARISON_V1",
+        "version": version,
         "purpose": "HISTORICAL_EXPLORATION_ONLY",
         "publication_status": "MODEL_NOT_RELEASED",
         "funds": list(FUNDS),
@@ -50,8 +52,7 @@ def settings() -> dict:
         "dtype": "float32",
         "device": "cpu",
         "raw_score": (
-            "(end_q50 - (last_known if lag=0 else step1_q50)) / "
-            "max(end_q90-end_q10,1e-8*max(abs(last_known),1))"
+            "(end_q50 - (last_known if lag=0 else step1_q50)) / max(end_q90-end_q10,1e-8*max(abs(last_known),1))"
         ),
         "quantile_levels": [0.1, 0.5, 0.9],
         "calibration": {
@@ -63,7 +64,7 @@ def settings() -> dict:
             "seed": 0,
             "weighting": "EQUAL_TOTAL_PER_FUND",
             "minimum_per_fund": 60,
-            "reject_nonpositive_slope": True,
+            "reject_nonpositive_slope": version == "CHRONOS2_CASH_COMPARISON_V1",
         },
         "minimum_fit_per_fund": 252,
         "main_metric": "equal_fund_macro_brier",
@@ -136,7 +137,8 @@ def freeze_protocol(folder: Path, source_run: UUID, expected_hash: str, requirem
 def validate_protocol(folder: Path) -> dict:
     protocol = read_json(folder / "protocol.json")
     unsigned = {k: v for k, v in protocol.items() if k != "protocol_hash"}
-    if fingerprint(unsigned) != protocol["protocol_hash"] or protocol["settings"] != settings():
+    expected = settings(protocol["settings"]["version"])
+    if fingerprint(unsigned) != protocol["protocol_hash"] or protocol["settings"] != expected:
         raise ValueError("protocol modified or incompatible; create a new version/run")
     root = Path(__file__).resolve().parents[2]
     if (

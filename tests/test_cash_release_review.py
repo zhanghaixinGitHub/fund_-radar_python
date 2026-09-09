@@ -1,6 +1,7 @@
 """候选规则只读审查：人工报告/分档验证规则，不作为真实模型发布证据。"""
 
 import copy
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal, localcontext
 
@@ -402,17 +403,9 @@ def test_individually_consistent_fund_bins_cannot_conflict_with_aggregate(evalua
         validate_window_evidence(window)
 
 
-@pytest.mark.parametrize("mutation", ["fit_count", "calibration_count", "model_date", "negative_slope"])
+@pytest.mark.parametrize("mutation", ["fit_count", "calibration_count", "model_date"])
 def test_model_binding_and_slope_are_checked(evaluated, mutation):
     window = restore_research(evaluated).report.windows[-1].model_copy(deep=True)
-    if mutation == "negative_slope":
-        # 负斜率是实测失败，而不是“没有模型”；不靠翻转答案或模型方向修饰成绩。
-        policy = review.load_release_policy()
-        criterion = review._numeric(
-            "CALIBRATION_SLOPE", -1, 0, "GT", "人工负斜率", window_id=window.window.window_id, scope="ALL"
-        )
-        assert criterion.status == "FAIL" and policy.require_monotone_observed_rates
-        return
     if mutation == "fit_count":
         window.model.base_model.train_counts_per_fund["006730"] += 1
     elif mutation == "calibration_count":
@@ -423,3 +416,39 @@ def test_model_binding_and_slope_are_checked(evaluated, mutation):
         )
     with pytest.raises(ValueError, match="mismatch"):
         validate_window_evidence(window)
+
+
+def test_reversed_model_is_diagnostic_in_v2_and_all_other_release_gates_remain(data, evaluated):
+    from app.services.cash_reinvestment_research import evaluate_cash_dataset
+
+    # 人工校准段构造反向关系，然后真实拟合和评分，避免只改斜率而保留不相配的成绩。
+    changed = replace(
+        data,
+        rows=tuple(
+            replace(r, y=1 - r.y, content_hash=cash_hash({"old": r.content_hash, "y": 1 - r.y}))
+            if str(r.available_at) > "2023-06-30" and str(r.available_at) <= "2023-12-31"
+            else r
+            for r in data.rows
+        ),
+    )
+    report = evaluate_cash_dataset(changed)
+    assert report.windows[-1].model.calibrator.slope < 0
+    assert "REVERSED_PENDING_VALIDATION" in report.windows[-1].warnings
+    row = copy.deepcopy(evaluated)
+    row.report = report.model_dump(mode="json")
+    current = checked(row)
+    diagnostic = next(d for d in current.calibration_diagnostics if d.window_id == "VALIDATION_2024")
+    assert diagnostic.status == "REVERSED_PENDING_VALIDATION" and "反向校准" in diagnostic.message
+    assert not any(c.code == "CALIBRATION_SLOPE" for c in current.checks)
+    assert not current.publication_allowed and not current.database_written and not current.independent_test_read
+    assert set(precheck.BLOCKERS).issubset(current.blocking_codes)
+    old_policy = CashReleasePolicy.model_validate_json(
+        policy_source.POLICY_PATH.with_name("cash_release_policy_v1.json").read_bytes()
+    )
+    old = review.review_cash_research(restore_research(row), old_policy, fund_code="006730", checked_at=NOW)
+    assert (
+        next(c.status for c in old.checks if c.code == "CALIBRATION_SLOPE" and c.window_id == "VALIDATION_2024")
+        == "FAIL"
+    )
+    assert tuple(c for c in old.checks if c.code != "CALIBRATION_SLOPE") == current.checks
+    assert not old.calibration_diagnostics

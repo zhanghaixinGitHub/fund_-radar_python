@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.calibration_diagnostic import CalibrationDiagnostic
 from app.schemas.historical_nav_training import Hash
 
 
@@ -21,3 +22,4 @@ class CashInferenceValue(BaseModel):
     model_hash: Hash = Field(description="已回读并核对的基础模型与校准器共同指纹")
     up_score: Decimal = Field(ge=0, le=1, description="内部校准计算值；未经正式发布不能称为产品概率")
     predicted_up: bool = Field(description="对返回的8位计算值严格判断大于0.5；否则为非上涨而非必然下跌")
+    calibration: CalibrationDiagnostic = Field(description="校准映射方向及风险说明；计算成功不代表获准发布")

@@ -5,6 +5,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from app.schemas.cash_prediction_features import CashPredictionFeature
 from app.schemas.cash_prediction_inference import CashInferenceValue
 from app.schemas.historical_nav_calibration import CalibratedModelArtifact
+from app.services.calibration_policy import calibration_diagnostic
 from app.services.cash_reinvestment_research import VERSIONS
 from app.services.cash_reinvestment_samples import _hash
 from app.services.historical_nav_calibration import predict_calibrated_scores, restore_calibrated_artifact
@@ -25,8 +26,9 @@ def calculate_cash_inference(
     payload = feature.feature_payload
     if model.model_hash != expected_model_hash or model.base_model.versions != VERSIONS:
         raise ValueError("cash inference model hash or data versions mismatch")
-    if model.base_model.feature_names != FEATURE_NAMES or model.calibrator.slope <= 0:
-        raise ValueError("cash inference feature order or calibration slope invalid")
+    if model.base_model.feature_names != FEATURE_NAMES:
+        raise ValueError("cash inference feature order invalid")
+    diagnostic = calibration_diagnostic(model.calibrator.slope, model.calibrator.intercept)
     if (
         feature.status != "INPUT_READY"
         or payload is None
@@ -85,4 +87,5 @@ def calculate_cash_inference(
         model_hash=model.model_hash,
         up_score=score,
         predicted_up=score > Decimal("0.5"),
+        calibration=diagnostic,
     )
