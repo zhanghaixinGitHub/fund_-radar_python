@@ -84,31 +84,30 @@ def inspect_cash_research(
     return tuple(blockers), tuple(checks), tuple(incomplete)
 
 
-def check_cash_prediction(request: CashPredictionCheckRequest) -> CashPredictionCheck:
-    """一个只读一致性事务，无净值数值、无特征/答案读取、无推理调用；未通过不生成预测。"""
-    now = datetime.now(UTC)
-    with Session(get_nav_preview_engine()) as session, session.begin():
-        session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
-        # 除指定报告外，只复用基金/来源及日期元数据查询，不调用旧发布或评分链路。
-        fund, source, _, _ = read_prediction_inputs(
-            session, request.fund_code, now.astimezone(ZoneInfo("Asia/Shanghai")).date(), include_research=False
-        )
-        if fund is None:
-            raise HistoricalNavStorageError("FUND_NOT_FOUND", "基金不存在。", 404)
-        if fund.fund_type != "STOCK" or request.fund_code not in FUNDS:
-            raise HistoricalNavStorageError("CASH_PREDICTION_NOT_APPLICABLE", "当前只检查三只股票型试点。", 409)
-        if fund.status != "ACTIVE" or fund.source_code != "TUSHARE_PRO_FUND" or source is None or not source.enabled:
-            raise HistoricalNavStorageError("CASH_SOURCE_UNAVAILABLE", "基金或来源当前不可用。", 409)
-        stored = restore_research(find_research(session, run_id=request.research_run_id))
-        if stored.report.report_hash != request.expected_report_hash:
-            raise HistoricalNavStorageError("REPORT_HASH_MISMATCH", "报告指纹不一致，请重新核对指定研究记录。", 409)
-        counts = stored.report.preparation.fund_counts.get(request.fund_code, {})
-        if not any(counts.get(stage, 0) > 0 for stage in ("TRAIN", "VALIDATION")):
-            raise HistoricalNavStorageError("FUND_RESEARCH_MISMATCH", "指定报告没有这只基金的有效研究资料。", 409)
-        try:
-            blockers, comparisons, incomplete = inspect_cash_research(stored)
-        except (ValueError, TypeError, KeyError, ArithmeticError) as error:
-            raise HistoricalNavStorageError("CASH_RESEARCH_CORRUPTED", "报告比较数据校验失败。", 503) from error
+def check_cash_prediction_in_session(
+    session: Session, request: CashPredictionCheckRequest, *, now: datetime
+) -> CashPredictionCheck:
+    """复用调用方的一致性事务；自己只读，供预检和拒绝回执保存共用同一份判断。"""
+    # 除指定报告外，只复用基金/来源及日期元数据查询，不调用旧发布或评分链路。
+    fund, source, _, _ = read_prediction_inputs(
+        session, request.fund_code, now.astimezone(ZoneInfo("Asia/Shanghai")).date(), include_research=False
+    )
+    if fund is None:
+        raise HistoricalNavStorageError("FUND_NOT_FOUND", "基金不存在。", 404)
+    if fund.fund_type != "STOCK" or request.fund_code not in FUNDS:
+        raise HistoricalNavStorageError("CASH_PREDICTION_NOT_APPLICABLE", "当前只检查三只股票型试点。", 409)
+    if fund.status != "ACTIVE" or fund.source_code != "TUSHARE_PRO_FUND" or source is None or not source.enabled:
+        raise HistoricalNavStorageError("CASH_SOURCE_UNAVAILABLE", "基金或来源当前不可用。", 409)
+    stored = restore_research(find_research(session, run_id=request.research_run_id))
+    if stored.report.report_hash != request.expected_report_hash:
+        raise HistoricalNavStorageError("REPORT_HASH_MISMATCH", "报告指纹不一致，请重新核对指定研究记录。", 409)
+    counts = stored.report.preparation.fund_counts.get(request.fund_code, {})
+    if not any(counts.get(stage, 0) > 0 for stage in ("TRAIN", "VALIDATION")):
+        raise HistoricalNavStorageError("FUND_RESEARCH_MISMATCH", "指定报告没有这只基金的有效研究资料。", 409)
+    try:
+        blockers, comparisons, incomplete = inspect_cash_research(stored)
+    except (ValueError, TypeError, KeyError, ArithmeticError) as error:
+        raise HistoricalNavStorageError("CASH_RESEARCH_CORRUPTED", "报告比较数据校验失败。", 503) from error
     return CashPredictionCheck(
         checked_at=now,
         fund_code=request.fund_code,
@@ -118,3 +117,10 @@ def check_cash_prediction(request: CashPredictionCheckRequest) -> CashPrediction
         comparisons=comparisons,
         incomplete_window_ids=incomplete,
     )
+
+
+def check_cash_prediction(request: CashPredictionCheckRequest) -> CashPredictionCheck:
+    """一个只读一致性事务，无净值数值、无特征/答案读取、无推理调用；未通过不生成预测。"""
+    with Session(get_nav_preview_engine()) as session, session.begin():
+        session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+        return check_cash_prediction_in_session(session, request, now=datetime.now(UTC))

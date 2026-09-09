@@ -1341,3 +1341,75 @@ Content-Type: application/json
 第20节历史输入实际读库验证：三基金在09-04/09-05历史cutoff都能得到61点输入；以09-08为cutoff时，最新已知净值仍为09-04、落后2个交易日，因此DATA_INSUFFICIENT，不生成输入指纹。不能把旧截止日的成功当作今日数据已就绪。
 
 Java到Python、本人关注权限、4种状态页面、公开页不展示、故障恢复、窄屏和键盘均已复验。临时服务和测试账户已清理，真实账号/关注及原净值前后指纹不变。最新实际证据见[实施第24节](C:/WebStormProject/workSpace05/docs_zhx/implementation/free-data-prediction-v1.md)和[TC-FDP-26](C:/WebStormProject/workSpace05/docs_zhx/testcase/free-data-prediction-v1.md)。这是状态链路验收，不是正式上涨概率发布或全部数值生成能力已完成。
+
+## 22. 保存一次生成拒绝回执（2026-09-09）
+
+`generation-check`仍然只是只读体检；现在另有一个会保存**拒绝回执**的内部接口：
+
+```http
+POST /internal/v1/predictions/generation-attempts
+X-Service-Token: <本机配置的服务Token，不要写入代码或提交>
+Content-Type: application/json
+```
+
+```json
+{
+  "requestKey": "4e7be4bf-c382-4e48-96b1-8c0e06bbd10e",
+  "fundCode": "008888",
+  "cutoffDate": "2026-09-04",
+  "researchRunId": "f70feb1a-129d-4482-b66d-f4e2e3a5425c",
+  "expectedReportHash": "db527ccca8015a4f41af2ee68608dae27ec5ab86c2627ef158d39f2f6b067795"
+}
+```
+
+这里选择9月4日是为了复验一个已经结束的历史截止日，不表示今天的资料已经足够。`requestKey`是你给这次尝试起的唯一编号：相同请求重试保持不变，要重新检查则换一个新UUID。首次201，重试200；同编号换参数409，不覆盖旧回执。
+
+返回里的关键字段：
+
+| 字段 | 通俗含义 |
+| --- | --- |
+| attempt_id | 回执编号，可用下方GET读回 |
+| cutoff_date | 当时计划使用哪一天的信息；被拒绝后没有继续取输入 |
+| check | 当时实际执行的检查及比较证据，含报告编号/指纹和6条拒绝原因 |
+| receipt_hash | 回执内容的“校验码”，读回时检查有没有错配或损坏 |
+| historical_receipt=true | 这是历史回执，不是重新检查后的当前结论 |
+| database_written=true | 回执已经保存，不是预测已经完成 |
+| forecast_created=false | 没有生成产品预测，概率和方向仍为空 |
+
+内层`check.database_written=false`说的是检查步骤自己不写库；外层true说的是把检查结果保存成回执。不能只看外层true就理解成模型已经作答。
+
+```http
+GET /internal/v1/predictions/generation-attempts/bc5a1092-e131-4379-a14a-4bc315a0bdd2
+X-Service-Token: <本机配置的服务Token，不要写入代码或提交>
+```
+
+这个已验证的编号属于008888，读回会得到2026-09-09保存的拒绝回执。读回不重新训练、检查或计算。当前服务禁止force、上传模型/指标和2025截止日；未结束的截止日409，无权限403，记录不存在404，异常503脱敏。
+
+模型纯数值内核也已经实现并用人工资料核对公式，但没有向HTTP或页面开放，不能越过闸门先算分数。本轮真实16项HTTP与41项隔离PG通过；临时验收服务已停止，若你的8000未启用自动重载，需要按原项目方式加载新代码后再调用。完整复跑命令与剩余边界见[实施第25节](C:/WebStormProject/workSpace05/docs_zhx/implementation/free-data-prediction-v1.md)和TC-FDP-27。
+
+## 23. 受正式授权保护的结果生成与读取（2026-09-09，代码已完成，业务库待迁移）
+
+这两个新接口用于“真正获准后生成结果”和“查询结果现在能否展示”，不是训练入口。**本机业务库当前仍为迁移15；先执行`alembic upgrade 20260909_16`并加载新服务，才能做实际调用。** 迁移仅增加独立结果表，保留旧资料；本次已通过隔离数据库验证，未执行业务库迁移。
+
+```http
+POST /internal/v1/predictions/cash-forecasts
+X-Service-Token: <本机配置的服务Token，不要提交>
+Content-Type: application/json
+```
+
+Body沿用第22节的`requestKey/fundCode/cutoffDate/researchRunId/expectedReportHash`，另须提供`expectedModelHash`：从明确指定研究的固定`VALIDATION_2024`窗口模型取得64位`model_hash`，不是报告指纹，也不能自行填写任意模型。只支持001632、006730、008888，不接受模型参数、输入X、客户端授权或force。
+
+当前真实模型仍未获正式授权，因此应返回200、`status=MODEL_NOT_RELEASED`、非空`reason_codes`、`created=false`，`forecast_id/up_probability/direction`为空；不执行数值计算，不保存结果。200仅代表请求被正常处理，不能理解成预测成功。正式证据驱动的授权签发仍未实现。
+
+将来只有真正获准且资料齐全才会首次201并得到`forecast_id`；相同key重试200，同key改参数409，相同业务结果换key重复生成409。GET `/internal/v1/predictions/cash-forecasts/{forecastId}`查询已保存结果；不存在404。它每次重新核验当前授权和数据时效，但不重新训练或计算：
+
+| status | 页面含义 | 数字 |
+| --- | --- | --- |
+| AVAILABLE | 授权有效、数据及预测期限仍有效 | 才可返回0至1的上涨概率 |
+| MODEL_NOT_RELEASED | 没有正式授权，或授权已更换/撤销 | 概率和方向为空 |
+| DATA_INSUFFICIENT | 本次生成输入或来源未就绪 | 不生成结果 |
+| STALE | 已保存结果因资料更新、过期等原因不可再展示 | 概率和方向为空 |
+
+`target_base_date/target_end_date`描述原本20交易日区间；不因查询日期变化而延期。分红同步即使没改净值同步编号也会使旧来源快照失效，同步中或最近失败同样不能展示旧概率。
+
+相关离线790项、隔离PG62项通过；成功计算/存储分支仅用人工授权和人工资料验证，新增接口的真实TCP业务场景及正式授权签发尚未验收。最新部署待办见[实施第26节](C:/WebStormProject/workSpace05/docs_zhx/implementation/free-data-prediction-v1.md)及TC-FDP-28。

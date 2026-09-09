@@ -85,27 +85,36 @@ def build_cash_prediction_feature(
     )
 
 
-def read_cash_prediction_feature(request: CashPredictionFeatureRequest) -> CashPredictionFeature:
-    """有界只读适配器，供后续通过正式门槛的生成流程调用；不作为额外HTTP或页面入口。"""
+def prepare_cash_feature_read(request: CashPredictionFeatureRequest):
+    """查询前完成日期和2025保护；生成器可在开库前复用，不因新增写入入口放宽。"""
     request = CashPredictionFeatureRequest.model_validate(request.model_dump())
     # 公告只有日期，所以当天尚未结束时不能声称知道当日结束的全部信息。
     if request.cutoff_date >= datetime.now(ZoneInfo("Asia/Shanghai")).date():
         raise HistoricalNavPreviewReadError("CUTOFF_DAY_NOT_CLOSED", "只能使用已经结束的自然日作为信息截止日。")
     calendar = load_prediction_calendar(request.cutoff_date)
     start, end = cash_history_bounds(calendar, request)  # 日历不足/2025保护必须在开库前拒绝。
-    deadline = perf_counter() + 15
-    with Session(get_nav_preview_engine()) as session, session.begin():
-        session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
-        source = read_historical_nav_source(session, fund_code=request.fund_code)
-        if source.source_code != "TUSHARE_PRO_FUND":
-            raise HistoricalNavPreviewReadError("CASH_SOURCE_UNSUPPORTED", "现金口径只核验既有Tushare来源。")
-        nav, events = read_cash_history_inputs(
-            session,
-            fund_code=request.fund_code,
-            source_id=source.source_id,
-            start=start,
-            cutoff=end,
-        )
+    return request, calendar, start, end
+
+
+def read_cash_prediction_feature_in_session(
+    session: Session, request: CashPredictionFeatureRequest, *, deadline: float
+) -> CashPredictionFeature:
+    """只读调用方的一致性快照；生成器在同一事务中完成授权、输入读取和结果写入。"""
+    request, calendar, start, end = prepare_cash_feature_read(request)
+    source = read_historical_nav_source(session, fund_code=request.fund_code)
+    if source.source_code != "TUSHARE_PRO_FUND":
+        raise HistoricalNavPreviewReadError("CASH_SOURCE_UNSUPPORTED", "现金口径只核验既有Tushare来源。")
+    nav, events = read_cash_history_inputs(
+        session, fund_code=request.fund_code, source_id=source.source_id, start=start, cutoff=end
+    )
     if perf_counter() >= deadline:
         raise TimeoutError("cash prediction feature read budget exceeded")
     return build_cash_prediction_feature(request, source, nav, events, calendar)
+
+
+def read_cash_prediction_feature(request: CashPredictionFeatureRequest) -> CashPredictionFeature:
+    """有界只读适配器，不作为额外HTTP或页面入口。"""
+    prepare_cash_feature_read(request)  # 日历不足/2025保护在开库前拒绝。
+    with Session(get_nav_preview_engine()) as session, session.begin():
+        session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+        return read_cash_prediction_feature_in_session(session, request, deadline=perf_counter() + 15)
