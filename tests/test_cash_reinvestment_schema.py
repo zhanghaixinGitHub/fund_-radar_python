@@ -11,7 +11,7 @@ TABLES = (CashSampleBatch.__table__, CashSampleRecord.__table__, CashSampleLabel
 
 def test_cash_migration_is_single_head():
     script = ScriptDirectory(str(ROOT / "alembic"))
-    assert script.get_heads() == ["20260909_17"]
+    assert script.get_heads() == ["20260909_18"]
     assert migration_module().down_revision == "20260907_13"
 
 

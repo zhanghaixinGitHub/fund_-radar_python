@@ -10,6 +10,8 @@ from app.api.dependencies import require_service_token
 from app.core.logging import get_logger
 from app.core.middleware import get_trace_id
 from app.repositories.historical_nav import HistoricalNavPreviewReadError
+from app.schemas.cash_exam_plan import CashExamPreparation, CashExamPreparationRequest
+from app.schemas.cash_planned_research import CashPlannedResearch, CashPlannedResearchRequest
 from app.schemas.cash_reinvestment_research import (
     CashPreparation,
     CashPrepareRequest,
@@ -17,6 +19,8 @@ from app.schemas.cash_reinvestment_research import (
     CashStoredResearch,
 )
 from app.schemas.cash_reinvestment_storage import CashBatchSaveRequest, CashStoredBatch
+from app.services.cash_exam_preparation import prepare_cash_exam_data
+from app.services.cash_planned_research import get_planned_research, save_planned_research
 from app.services.cash_reinvestment_research import get_cash_research, load_cash_dataset, save_cash_research
 from app.services.cash_reinvestment_storage import get_cash_batch, save_cash_batch
 from app.services.historical_nav_storage import HistoricalNavStorageError
@@ -119,9 +123,61 @@ def research(request: CashResearchRequest, response: Response):
     return result
 
 
+@router.post("/cash-reinvestment/exam-preparation", response_model=CashExamPreparation)
+def prepare_exam(request: CashExamPreparationRequest, response: Response):
+    """核对计划和批次指纹后只读准备覆盖；不执行考试，不把旧报告补盖成事前证据。"""
+    started = perf_counter()
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        result = prepare_cash_exam_data(request)
+    except ERRORS as error:
+        raise cash_http_error(error, "prepare_exam") from error
+    logger.info(
+        "cash_reinvestment.prepare_exam >>> complete, trace_id=%s, plan_hash=%s, "
+        "dataset_hash=%s, groups=%s, elapsed_ms=%.2f",
+        get_trace_id(),
+        result.plan.plan_hash,
+        result.preparation.dataset_hash,
+        len(result.coverage),
+        (perf_counter() - started) * 1000,
+    )
+    return result
+
+
 @router.get("/cash-reinvestment/research-runs/{run_id}", response_model=CashStoredResearch)
 def read_research(run_id: UUID):
     try:
         return get_cash_research(run_id)
     except ERRORS as error:
         raise cash_http_error(error, "read_research") from error
+
+
+@router.post("/cash-reinvestment/planned-research-runs", response_model=CashPlannedResearch)
+def create_planned_research(request: CashPlannedResearchRequest, response: Response):
+    """已确认规则先行的新研究，不接收旧报告编号、模型、时间或强制发布开关。"""
+    started = perf_counter()
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        result = save_planned_research(request)
+    except ERRORS as error:
+        raise cash_http_error(error, "create_planned_research") from error
+    response.status_code = 201 if result.created else 200
+    logger.info(
+        "cash_reinvestment.create_planned_research >>> complete, trace_id=%s, binding_id=%s, "
+        "run_id=%s, created=%s, elapsed_ms=%.2f",
+        get_trace_id(),
+        result.binding_id,
+        result.research.run_id,
+        result.created,
+        (perf_counter() - started) * 1000,
+    )
+    return result
+
+
+@router.get("/cash-reinvestment/planned-research-runs/{binding_id}", response_model=CashPlannedResearch)
+def read_planned_research(binding_id: UUID, response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return get_planned_research(binding_id)
+    except ERRORS as error:
+        raise cash_http_error(error, "read_planned_research") from error

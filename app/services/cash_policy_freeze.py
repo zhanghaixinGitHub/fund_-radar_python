@@ -13,12 +13,13 @@ from app.models.cash_policy_freeze import CashPolicyFreezeRecord
 from app.repositories.cash_policy_freeze import find_policy_freeze
 from app.schemas.cash_policy_freeze import (
     CashFrozenPolicy,
+    CashPlannedRuleBinding,
     CashPolicyDescriptor,
     CashPolicyFreezeRequest,
     CashPolicySnapshot,
-    CashRuleBinding,
 )
 from app.schemas.cash_release_review import CashReleasePolicy
+from app.services.cash_exam_plan import build_cash_exam_plan, validate_cash_exam_plan
 from app.services.cash_reinvestment_research import VERSIONS
 from app.services.cash_reinvestment_storage import cash_hash
 from app.services.cash_release_policy import load_release_policy
@@ -26,10 +27,13 @@ from app.services.historical_nav_calibration import WINDOWS
 from app.services.historical_nav_storage import HistoricalNavStorageError
 
 
-def current_rule_binding() -> CashRuleBinding:
+def current_rule_binding() -> CashPlannedRuleBinding:
     """冻结比较约定的内容版本；不是完整独立测试执行协议或运行代码签名。"""
-    return CashRuleBinding(
-        windows=WINDOWS, feature_versions=dict(VERSIONS), bin_edges=tuple(Decimal(i) / 5 for i in range(6))
+    return CashPlannedRuleBinding(
+        windows=WINDOWS,
+        feature_versions=dict(VERSIONS),
+        bin_edges=tuple(Decimal(i) / 5 for i in range(6)),
+        exam_plan=build_cash_exam_plan(),
     )
 
 
@@ -63,6 +67,8 @@ def restore_policy_freeze(row, *, created=False) -> CashFrozenPolicy:
         raise HistoricalNavStorageError("CASH_POLICY_FREEZE_NOT_FOUND", "规则冻结记录不存在。", 404)
     try:
         snapshot = CashPolicySnapshot.model_validate(row.snapshot)
+        if isinstance(snapshot.binding, CashPlannedRuleBinding):
+            validate_cash_exam_plan(snapshot.binding.exam_plan)
         if (
             row.created_at.tzinfo is None
             or snapshot.policy.version != row.policy_version

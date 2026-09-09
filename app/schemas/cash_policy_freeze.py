@@ -1,11 +1,12 @@
 """发布规则快照，不是模型发布凭证；不允许调用者自报已完成考试或数据审核。"""
 
 from decimal import Decimal
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
+from app.schemas.cash_exam_plan import CashExamPlan
 from app.schemas.cash_release_review import CashReleasePolicy
 from app.schemas.historical_nav_calibration import CalibrationWindow
 from app.schemas.historical_nav_training import Hash
@@ -36,11 +37,19 @@ class CashRuleBinding(BaseModel):
     )
 
 
+class CashPlannedRuleBinding(CashRuleBinding):
+    version: Literal["CASH_RELEASE_RULE_BINDING_V2"] = "CASH_RELEASE_RULE_BINDING_V2"
+    exam_plan: CashExamPlan = Field(description="独立于批次和成绩的固定应考日期，含不读取数值的2025日期计划")
+
+
+RuleBinding = Annotated[CashRuleBinding | CashPlannedRuleBinding, Field(discriminator="version")]
+
+
 class CashPolicySnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     version: Literal["CASH_POLICY_FREEZE_V1"] = "CASH_POLICY_FREEZE_V1"
     policy: CashReleasePolicy = Field(description="已获服务器业务确认的规则正文")
-    binding: CashRuleBinding = Field(description="这套规则对应的固定时间窗口、口径及比较方式")
+    binding: RuleBinding = Field(description="这套规则对应的固定时间窗口、口径及比较方式；V2包含日期计划")
 
     @model_validator(mode="after")
     def must_be_approved(self) -> Self:
@@ -52,7 +61,7 @@ class CashPolicySnapshot(BaseModel):
 class CashPolicyDescriptor(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     policy: CashReleasePolicy = Field(description="服务器当前规则，可为草案")
-    binding: CashRuleBinding = Field(description="服务器当前固定比较约定")
+    binding: RuleBinding = Field(description="服务器当前固定比较约定")
     policy_hash: Hash = Field(description="规则正文指纹；冻结请求须原样核对")
     binding_hash: Hash = Field(description="窗口/口径/比较约定的内容指纹，不是程序签名")
     approval_ready: bool = Field(description="规则是否已获业务确认；不表示已冻结或可发布模型")

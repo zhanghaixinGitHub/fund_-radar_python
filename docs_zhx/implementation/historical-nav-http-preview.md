@@ -1500,3 +1500,78 @@ $env:PYTHONIOENCODING='utf-8'
 `freeze_id`是规则记录号，不是模型授权号；`frozen_at`来自数据库时钟。`content_hash`用于核对完整内容，`binding_hash`核对窗口/口径/分档约定，都不是审批签名。数据库阻止UPDATE、DELETE、TRUNCATE，非空表拒绝降级删除。
 
 成功保存、重试、并发和不可变性使用隔离PostgreSQL人工确认资料验证；真实规则没有获批或被冻结。最终独立测试的执行协议、数据证据和模型发布管理仍未完成，这份快照不会解封2025答案。最新验证记录见实施第29节及TC-FDP-31。
+
+## 27. 考试资料准备：先确定应有多少题，再看实际有多少（2026-09-09）
+
+先调用`GET /internal/v1/predictions/release-policy`，现在`binding.version`为`CASH_RELEASE_RULE_BINDING_V2`，`binding.exam_plan`内有日期清单和`plan_hash`。V1历史快照仍能原样读回，但不能当作V2匹配；已冻结记录不会被覆盖。真实规则仍DRAFT。
+
+日期计划不看数据库资料好坏。每个窗口先列全部交易日，再排除未来20交易日终点必定越界的尾部20日；前三窗应考数依次44、40、222。迟公告、缺输入、少传批次都不能进一步缩小分母。2025计划223个日期，仅来自静态日历，不表示已经读取测试数据。
+
+然后发送`POST http://127.0.0.1:8000/internal/v1/features/cash-reinvestment/exam-preparation`，使用已有内部服务Token，Body选JSON：
+
+```json
+{
+  "batchIds": ["替换为preparation中明确选择的现金批次UUID"],
+  "expectedDatasetHash": "替换为原preparation返回的dataset_hash",
+  "expectedPlanHash": "替换为GET返回的binding.exam_plan.plan_hash"
+}
+```
+
+示例文字必须替换为实际UUID/64位指纹，不能直接发送占位符。最多128个不重复批次，不接受日期范围、模型、coverage、force或includeTest。服务需加载本次代码；本轮没有主动重启常驻8000服务。
+
+| 返回字段 | 通俗含义 |
+| --- | --- |
+| plan.windows[].planned_cutoffs | 不看数据好坏预先列出的应考日期，所有三基金相同。 |
+| plan.windows[].boundary_purged_cutoffs | 答案终点一定越过考试末日的20个尾部日期，不因成绩变更。 |
+| preparation | 原资料准备结果与指纹，规则和批次未被改写。 |
+| coverage[].planned_count | 本窗口本基金理论上应有多少道题。 |
+| coverage[].usable_count | 所选批次中，输入完整且答案在窗口内可得的题数；不是答对多少题，也没有调用模型。 |
+| coverage[].coverage | 可用题数除以计划题数，是资料覆盖率，不是准确率。 |
+| coverage[].missing_cutoffs | 哪些应考日尚无可用题；可能未选到批次、输入/答案不可用或公告太晚，此处不臆测具体来源原因。 |
+| coverage[].late_label_count | 缺口中已有研究答案、但公布日超过本窗口末日的数量；不是所有缺口都由晚公告造成。 |
+| TEST_PERIOD_PROTECTED | 2025只列计划；usable_count、coverage、missing_cutoffs、late_label_count均null，未检查不能报0或空列表。 |
+| ex_ante_evidence | 固定false；今天的预览不是旧研究训练前曾冻结计划的证明。 |
+| model_fitted / independent_test_read / database_written / publication_allowed | 均false：没有训练、读取2025答案、保存结果或批准发布。 |
+
+实测原108批：2023第三季度三基金为30/44、31/44、31/44；第四季度均40/40；2024为208/222、209/222、208/222。2024资料覆盖约94%不等于预测正确率94%，也不会解除旧报告的发布限制。
+
+同一只读事务每8批先检查批次和标签日期，再读取允许范围的输入/答案正文。无/错Token、Origin403；非法或额外参数422；计划/资料指纹冲突409；缺批次404；保护期409；损坏日期或正文503并脱敏。计划冲突不查库，不能靠客户端提供一个覆盖率绕过。
+
+本轮937项相关离线、93项隔离PG和17项真实TCP/完整性检查通过；真实报告仍保留九项覆盖证据MISSING。日期计划须在后续新研究训练开始前真实绑定已确认冻结快照；尚不能给旧报告事后补盖。复跑命令及验证范围见TC-FDP-32。
+
+## 28. 计划先行的新研究：不允许给旧成绩补手续（2026-09-09）
+
+新增`POST http://127.0.0.1:8000/internal/v1/features/cash-reinvestment/planned-research-runs`。它与原research-runs不同：先核验已经确认并存下来的规则/日期计划，再读取资料和研究；本次结果与绑定回执一起保存。原接口及旧报告保留，不能把旧报告编号传给新接口补绑。
+
+沿用内部服务Token，Body字段如下，示例文字需换成实际UUID和64位指纹：
+
+```json
+{
+  "requestKey": "替换为本次新研究请求UUID",
+  "batchIds": ["替换为明确的现金批次UUID"],
+  "expectedDatasetHash": "替换为preparation返回的dataset_hash",
+  "policyFreezeId": "替换为已确认且保存的规则freeze_id",
+  "expectedPolicyFreezeHash": "替换为规则快照的完整content_hash"
+}
+```
+
+**当前真实规则是DRAFT，没有真实可用的freeze_id。** 合法格式的请求会在连接数据库前409拒绝，代码`CASH_POLICY_APPROVAL_REQUIRED`；不要为了试通接口自行把规则改成APPROVED。本轮成功分支仅在隔离人工资料中验证。未来确认规则并正常冻结后，才能使用实际快照；不能传客户端审批标记、模型、旧研究或计算时间。
+
+| 返回字段 | 通俗含义 |
+| --- | --- |
+| binding_id / request_key | 本次绑定记录号/安全重试号；不是模型发布号。 |
+| evaluation_started_at | 核验计划和资料后、进入研究评估函数前从数据库取得的时间。资料不足可能不实际拟合模型。 |
+| completed_at | 评估结束、准备保存结果时从数据库取得的时间。 |
+| policy_freeze | 计算前已真实保存的已确认规则及日期计划；此操作不创建规则。 |
+| preparation | 计算前独立复制的资料覆盖底稿，不会因算法意外修改元数据而被改写。 |
+| research | 本流程新建的研究报告。内部研究请求号由服务器生成，与binding_id相同，不会命中调用者的旧研究请求。 |
+| plan_bound_before_evaluation | true只说明服务器按计划先行的流程执行，不是数据已准入、已通过考试或一定训练过。 |
+| created / database_written | 首次201时均true，表示研究与关联一起新增；已完成重试和GET均false。嵌套research.database_written沿用“报告已保存”的历史含义。 |
+| publication_allowed / independent_test_read | 始终false，不批准模型，不读取2025答案。 |
+| content_hash | 本次关联、时刻及资料/报告指纹的完整内容指纹，不是审批签名。 |
+
+GET同路径加`/{binding_id}`只读保存内容；不查样本、不重新训练、不依赖今天的审批配置。规则快照先保存，**绑定回执是在计算结束后与研究一起保存**，不能把回执时间说成训练前持久化。回读还核验冻结/开始/完成时间顺序、明确模型关联、资料底稿和各窗口数量。
+
+已完成请求重试200不重新训练；改参数409，缺记录404，损坏关联503且脱敏；当前进程训练忙429。跨进程并发可能重复计算，但唯一约束和事务保证最多一份完整绑定结果。单次准备/研究仍有既有阶段预算，真实长请求需给客户端足够等待时间，不要超时后换requestKey反复开新研究。
+
+本机迁移18已新增`cash_planned_research_binding`且当前0条；所有字段有注释，数据库拒绝更改、删除、清空及非空降级。970项相关离线、111项隔离PG、28项真实TCP/完整性检查通过，真实规则仍草案、旧报告未变。尚需将绑定证据接入发布审查，补齐数据及行情证据、独立考试和正式发布凭证；本轮不解除旧报告的任何发布门槛。复跑见TC-FDP-33。

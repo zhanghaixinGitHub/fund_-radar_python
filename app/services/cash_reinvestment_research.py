@@ -138,10 +138,13 @@ def load_cash_dataset(request: CashPrepareRequest) -> CashDataset:
     deadline = perf_counter() + 30
     with Session(get_nav_sample_storage_engine()) as session, session.begin():
         session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
-        batches = (
-            restore_cash_batch(b, rows) for b, rows in iter_cash_batches(session, tuple(sorted(request.batch_ids)))
-        )
-        return prepare_cash_batches(batches, deadline=deadline)
+        return load_cash_dataset_in_session(session, request, deadline=deadline)
+
+
+def load_cash_dataset_in_session(session: Session, request: CashPrepareRequest, *, deadline: float) -> CashDataset:
+    """供已开启只读快照的流程复用；不另开连接，不绕过日期先行和完整性检查。"""
+    batches = (restore_cash_batch(b, rows) for b, rows in iter_cash_batches(session, tuple(sorted(request.batch_ids))))
+    return prepare_cash_batches(batches, deadline=deadline)
 
 
 def cash_window_rows(data: CashDataset, window):
