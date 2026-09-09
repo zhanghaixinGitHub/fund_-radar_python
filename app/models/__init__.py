@@ -8,6 +8,7 @@ from app.models.analysis import (
 )
 from app.models.benchmark import BenchmarkNavDaily, BenchmarkSeries
 from app.models.cash_forecast import CashForecastRecord
+from app.models.cash_policy_freeze import CashPolicyFreezeRecord
 from app.models.cash_prediction_attempt import CashPredictionAttemptRecord
 from app.models.cash_reinvestment import CashResearchRun, CashSampleBatch, CashSampleLabel, CashSampleRecord
 from app.models.event import EventRelation, MarketEvent, NewsItem, NewsSourceReference
@@ -37,6 +38,7 @@ from app.models.market_reference import (
 
 __all__ = [
     "CashForecastRecord",
+    "CashPolicyFreezeRecord",
     "CashPredictionAttemptRecord",
     "CashResearchRun",
     "CashSampleBatch",

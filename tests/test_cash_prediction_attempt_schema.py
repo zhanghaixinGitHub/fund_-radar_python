@@ -13,7 +13,7 @@ def test_attempt_migration_matches_orm_and_follows_cash_storage():
 
     migration = migration_module()
     assert migration.down_revision == "20260908_14"
-    assert ScriptDirectory(str(ROOT / "alembic")).get_heads() == ["20260909_16"]
+    assert ScriptDirectory(str(ROOT / "alembic")).get_heads() == ["20260909_17"]
     recorder = Recorder()
     migration.op = recorder
     migration.upgrade()

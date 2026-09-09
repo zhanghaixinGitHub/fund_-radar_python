@@ -1,7 +1,6 @@
 """独立的生成前检查：重读冻结报告，核验身份/指纹并解释为什么不能执行预测。"""
 
 from datetime import UTC, datetime
-from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
@@ -12,25 +11,12 @@ from app.repositories.cash_reinvestment_research import find_research
 from app.repositories.watchlist_prediction import read_prediction_inputs
 from app.schemas.cash_prediction_check import CashComparisonCheck, CashPredictionCheck, CashPredictionCheckRequest
 from app.schemas.cash_reinvestment_research import CashStoredResearch
-from app.schemas.historical_nav_evaluation import BaselineMetrics
 from app.services.cash_reinvestment_research import BLOCKERS, FUNDS, restore_research
+from app.services.cash_release_evidence import validate_window_evidence
 from app.services.historical_nav_calibration import WINDOWS
 from app.services.historical_nav_storage import HistoricalNavStorageError
 
 BASELINES = frozenset(("ALWAYS_UP", "TRAIN_UP_FREQUENCY", "MOMENTUM_20D", "FIXED_MOMENTUM_SCORE"))
-
-
-def _metrics_check(metrics: BaselineMetrics) -> None:
-    """成绩必须有可比较的有限值；不能把缺失/NaN/样本错配解释为改善。"""
-    if (
-        metrics.sample_count <= 0
-        or not 0 <= metrics.correct_count <= metrics.sample_count
-        or not 0 <= metrics.actual_up_count <= metrics.sample_count
-        or not 0 <= metrics.predicted_up_count <= metrics.sample_count
-        or any(not value.is_finite() or not 0 <= value <= 1 for value in (metrics.accuracy, metrics.brier_score))
-        or abs(metrics.accuracy - Decimal(metrics.correct_count) / metrics.sample_count) > Decimal("0.00000001")
-    ):
-        raise ValueError("invalid comparison metrics")
 
 
 def inspect_cash_research(
@@ -42,6 +28,8 @@ def inspect_cash_research(
         raise ValueError("fixed research windows mismatch")
     checks, incomplete = [], []
     for window in report.windows:
+        # 原生成闸门与新增规则审查共用报告一致性校验；这里不启用尚未批准的数值门槛。
+        validate_window_evidence(window)
         if window.status != "EVALUATED":
             incomplete.append(window.window.window_id)
             continue
@@ -58,8 +46,6 @@ def inspect_cash_research(
                 raise ValueError("baseline fund coverage mismatch")
             for scope, actual in candidate.items():
                 control = groups[scope]
-                _metrics_check(actual)
-                _metrics_check(control)
                 if (actual.sample_count, actual.actual_up_count) != (control.sample_count, control.actual_up_count):
                     raise ValueError("comparison populations mismatch")
                 accuracy_delta = actual.accuracy - control.accuracy
@@ -84,10 +70,10 @@ def inspect_cash_research(
     return tuple(blockers), tuple(checks), tuple(incomplete)
 
 
-def check_cash_prediction_in_session(
+def load_cash_prediction_research(
     session: Session, request: CashPredictionCheckRequest, *, now: datetime
-) -> CashPredictionCheck:
-    """复用调用方的一致性事务；自己只读，供预检和拒绝回执保存共用同一份判断。"""
+) -> CashStoredResearch:
+    """在调用方只读快照中核验基金/来源，并只取指定报告；预检与规则审查共用身份边界。"""
     # 除指定报告外，只复用基金/来源及日期元数据查询，不调用旧发布或评分链路。
     fund, source, _, _ = read_prediction_inputs(
         session, request.fund_code, now.astimezone(ZoneInfo("Asia/Shanghai")).date(), include_research=False
@@ -104,6 +90,14 @@ def check_cash_prediction_in_session(
     counts = stored.report.preparation.fund_counts.get(request.fund_code, {})
     if not any(counts.get(stage, 0) > 0 for stage in ("TRAIN", "VALIDATION")):
         raise HistoricalNavStorageError("FUND_RESEARCH_MISMATCH", "指定报告没有这只基金的有效研究资料。", 409)
+    return stored
+
+
+def check_cash_prediction_in_session(
+    session: Session, request: CashPredictionCheckRequest, *, now: datetime
+) -> CashPredictionCheck:
+    """复用调用方的一致性事务；自己只读，供预检和拒绝回执保存共用同一份判断。"""
+    stored = load_cash_prediction_research(session, request, now=now)
     try:
         blockers, comparisons, incomplete = inspect_cash_research(stored)
     except (ValueError, TypeError, KeyError, ArithmeticError) as error:

@@ -1,6 +1,6 @@
 """发布规则草案与核验明细；规则审批/持久冻结、数值合格和正式发布是三件不同的事。"""
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal, Self
 from uuid import UUID
@@ -49,14 +49,40 @@ class CashReleasePolicy(BaseModel):
 
 
 class CashReleaseCriterion(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
     code: str = Field(description="核验项编号，不是基金涨跌结论")
     window_id: str = Field(description="在哪个固定窗口检查；GLOBAL表示整个发布流程")
     scope: str = Field(description="ALL表示总体；基金代码表示逐基金，不混为一次通过")
+    baseline_id: str | None = Field(default=None, description="比较哪条简单对照；非对照检查为null")
+    bin_index: int | None = Field(default=None, ge=0, le=4, description="固定五个概率档的编号0到4；非分档检查为null")
     status: Literal["PASS", "FAIL", "MISSING"] = Field(description="符合候选规则、不符合或证据缺失；PASS不是发布许可")
+    operator: Literal["GE", "LE", "GT", "LT", "PRESENT", "NONDECREASING"] = Field(
+        description="依次为至少、至多、严格大于、严格小于、须有证据、不得逆序"
+    )
     actual: Decimal | None = Field(default=None, description="实际核验数值；缺证据保持null，不填0")
     required: Decimal | None = Field(default=None, description="对应规则边界，比较含义由code/message说明")
     message: str = Field(description="通俗核验说明")
+
+    @model_validator(mode="after")
+    def numeric_result_matches_values(self) -> Self:
+        if self.operator in {"GE", "LE", "GT", "LT"}:
+            if self.required is None:
+                raise ValueError("numeric check requires a threshold")
+            if self.status == "MISSING":
+                if self.actual is not None:
+                    raise ValueError("missing numeric evidence cannot contain an actual value")
+                return self
+            if self.actual is None:
+                raise ValueError("numeric result requires actual evidence")
+            passed = {
+                "GE": self.actual >= self.required,
+                "LE": self.actual <= self.required,
+                "GT": self.actual > self.required,
+                "LT": self.actual < self.required,
+            }[self.operator]
+            if (self.status == "PASS") != passed:
+                raise ValueError("numeric check status contradicts its values")
+        return self
 
 
 class CashCoverageEvidence(BaseModel):
@@ -82,14 +108,39 @@ class CashReleaseReview(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     mode: Literal["READ_ONLY_RELEASE_RULE_REVIEW"] = "READ_ONLY_RELEASE_RULE_REVIEW"
     status: Literal["BLOCKED"] = "BLOCKED"
+    checked_at: datetime = Field(description="此次核验时刻，不是模型训练或发布时间")
+    fund_code: str = Field(description="请求所指基金；发布检查始终覆盖全部三试点，不因请求基金而择优")
     research_run_id: UUID = Field(description="实际重读和核验的研究编号")
     report_hash: Hash = Field(description="原研究指纹，不修改研究报告")
     policy_hash: Hash = Field(description="本次候选规则内容指纹，不能当作已冻结凭证")
     policy: CashReleasePolicy = Field(description="实际使用的服务器规则；草案同样可作诊断，但不能发布")
     blocking_codes: tuple[str, ...] = Field(description="未解除的证据、规则冻结和成绩问题")
     checks: tuple[CashReleaseCriterion, ...] = Field(description="逐窗口、逐基金的候选规则核验明细")
-    policy_persisted: Literal[False] = False
-    publication_allowed: Literal[False] = False
-    inference_executed: Literal[False] = False
-    independent_test_read: Literal[False] = False
-    database_written: Literal[False] = False
+    check_counts: dict[Literal["PASS", "FAIL", "MISSING"], int] = Field(
+        description="明细中通过、不通过、缺证据各多少项"
+    )
+    policy_persisted: bool = Field(
+        default=False, description="是否已读到并验证匹配的冻结快照；此只读接口自己不保存规则"
+    )
+    policy_freeze_id: UUID | None = Field(default=None, description="匹配的不可变规则快照编号；缺失时null")
+    policy_frozen_at: datetime | None = Field(default=None, description="该快照的数据库冻结时间，不是本次检查时间")
+    policy_freeze_hash: Hash | None = Field(default=None, description="匹配快照的完整内容指纹")
+    policy_binding_hash: Hash | None = Field(default=None, description="已冻结比较约定的指纹")
+    publication_allowed: Literal[False] = Field(default=False, description="旧研究协议不能因单项PASS变成正式发布")
+    inference_executed: Literal[False] = Field(default=False, description="只检查已有成绩，不执行预测公式")
+    independent_test_read: Literal[False] = Field(default=False, description="不读取2025数值或答案")
+    database_written: Literal[False] = Field(default=False, description="不保存审查回执、不修改报告、规则或模型")
+
+    @model_validator(mode="after")
+    def summary_matches_checks(self) -> Self:
+        references = (self.policy_freeze_id, self.policy_frozen_at, self.policy_freeze_hash, self.policy_binding_hash)
+        if self.policy_persisted:
+            if any(v is None for v in references) or self.policy.approval_state != "APPROVED":
+                raise ValueError("persisted policy requires an approved, complete snapshot reference")
+        elif any(v is not None for v in references):
+            raise ValueError("unfrozen policy cannot claim snapshot references")
+        if self.check_counts != {s: sum(c.status == s for c in self.checks) for s in ("PASS", "FAIL", "MISSING")}:
+            raise ValueError("review counts do not match checks")
+        if not self.blocking_codes or len(set(self.blocking_codes)) != len(self.blocking_codes):
+            raise ValueError("blocked review requires distinct blocking reasons")
+        return self

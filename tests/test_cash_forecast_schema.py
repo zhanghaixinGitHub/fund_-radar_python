@@ -13,7 +13,7 @@ def test_forecast_migration_matches_orm():
 
     migration = migration_module()
     assert migration.down_revision == "20260909_15"
-    assert ScriptDirectory(str(ROOT / "alembic")).get_heads() == [migration.revision]
+    assert ScriptDirectory(str(ROOT / "alembic")).get_heads() == ["20260909_17"]
     recorder = Recorder()
     migration.op = recorder
     migration.upgrade()

@@ -1421,3 +1421,82 @@ Java仍通过`GET /internal/v1/predictions/{fundCode}`读取本人关注卡片�
 只有完整且仍有效的AVAILABLE才有`up_probability/direction`。其他状态必须为空；返回不含模型参数、完整历史输入、未来答案和授权凭证。Java继续先验证本人关注，浏览器不能直连内部接口或传force。
 
 本轮完成真实未发布状态及明确标注的人工结果投影三端验收。人工页面样例仅验证展示，不写真实预测表；新增结果表当前0条，真实模型仍未获发布资格。查看[实施第27节](C:/WebStormProject/workSpace05/docs_zhx/implementation/free-data-prediction-v1.md)区分隔离数据库计算、人工HTTP投影及真实研究三种证据。
+
+## 25. 发布规则审查：把“哪里没过”逐项列出来（2026-09-09）
+
+这个接口是**给已有研究报告检查成绩和证据**，不是再训练一次，也不生成未来涨跌预测。与generation-check相比，它增加逐条数量、概率分组和规则缺口；单项通过不等于模型可以发布。两入口共用报告数学一致性校验，但generation-check不会启用未批准的草案阈值。
+
+在加载了本次代码的Python服务上发送`POST http://127.0.0.1:8000/internal/v1/predictions/release-review`，沿用已有内部服务Token请求头（不要把实际Token写进文档或代码）。Body选JSON：
+
+```json
+{
+  "fundCode": "008888",
+  "researchRunId": "f70feb1a-129d-4482-b66d-f4e2e3a5425c",
+  "expectedReportHash": "db527ccca8015a4f41af2ee68608dae27ec5ab86c2627ef158d39f2f6b067795"
+}
+```
+
+请求指向008888，但审查不会只挑这一只基金的好成绩：仍完整核验原报告的三试点、三个固定窗口、四种简单对照。因此切换为另外两只试点时，整份规则检查明细相同是正常的。
+
+| 返回字段 | 通俗含义 |
+| --- | --- |
+| mode / status | 只读规则审查 / BLOCKED。HTTP 200只表示检查正常完成，不表示预测成功。 |
+| checked_at | 此次检查时刻；重复请求会变化，不是新的训练时间。 |
+| policy.approval_state | 当前DRAFT，规则草案尚未批准；即使以后APPROVED，也不能替代持久冻结和其他证据。 |
+| policy_hash | 此次服务器规则内容的指纹，用于核对用的是哪套规则，不是发布凭证。 |
+| check_counts | PASS、FAIL、MISSING各有多少项，是检查项数量，不能算成模型准确率或发布通过率。 |
+| checks[].window_id / scope | 哪轮考试、总体ALL还是哪只基金。 |
+| checks[].code / baseline_id / bin_index | 检查什么、跟哪条简单规则比较、固定五档中的哪档（0至4）；不相关字段为null。 |
+| checks[].status | PASS=符合这一项；FAIL=有实际数字但没达到；MISSING=没有足够证据，不能下结论。 |
+| checks[].operator | GE=至少，LE=至多，GT=严格大于，LT=严格小于，PRESENT=须有证据，NONDECREASING=顺序不得降低。 |
+| checks[].actual / required | 实际数字/规则边界。小数通常按字符串保留精度；缺证据时actual是null，不拿0代替。 |
+| blocking_codes | 仍阻止正式发布的原因，不因某几项PASS而清空。 |
+| policy_persisted / publication_allowed | 当前均false；前者仅在读到与服务器已批准规则匹配的数据库快照时为true，后者仍为false，保存规则不是批准模型。 |
+| policy_freeze_id / policy_frozen_at / policy_freeze_hash / policy_binding_hash | 匹配的规则快照编号、保存时间及内容/比较约定指纹；未冻结时均为null。 |
+| inference_executed / independent_test_read / database_written | 均false：没有计算产品预测，没有读2025测试数值，没有写业务库。 |
+
+例如`ANNUAL_ECE`检查的不是“答对多少题”，而是平均报出的分数与实际上涨比例有多大差距。`actual="0.12"、required="0.10"、operator="LE"`表示误差12个百分点，大于候选上限10个百分点，应为FAIL。`EXAM_COVERAGE`缺少事前应考日历计划时，actual为null、required为0.80、状态MISSING；绝不能用现有可用题数自己除自己凑成100%。
+
+当前候选规则：年度至少两个非空档、每个非空档至少30条、加权平均误差最多10个百分点、任一档误差最多15个百分点、实际上涨比例不逆序。季度短窗口仍使用原有每基金40题及对照比较门槛，不硬套完整年度分档门槛。这些是**待确认的项目规则，不是已批准的金融标准或可靠收益保证**。
+
+### 本次实测与复跑
+
+2026-09-09，本机真实冻结报告三只基金均返回118项检查：PASS=50、FAIL=47、MISSING=21，状态BLOCKED；草案指纹为`4b2610983b03076b3a19e90d7b570f447434a8f365c9694a71a382333f965dad`。重复请求除检查时间外一致。
+
+```powershell
+Set-Location C:\pythonProject\workSpace06
+$env:PYTHONIOENCODING='utf-8'
+.venv\Scripts\python.exe scripts/cash_release_review_acceptance.py --research-run-id f70feb1a-129d-4482-b66d-f4e2e3a5425c --expected-report-hash db527ccca8015a4f41af2ee68608dae27ec5ab86c2627ef158d39f2f6b067795
+```
+
+脚本只允许本机fund_ai，使用自己占有的随机回环端口，不占用或重启用户8000服务。21项HTTP/完整性检查通过，包含三只基金原generation-check回归；捕获55条SET/SELECT，未查询净值数值、样本/标签或预测表；鉴权/额外参数失败没有查库。缺报告404、指纹冲突409、无/错Token或浏览器Origin403、额外policy/coverage/force/includeTest参数422；损坏报告或规则文件503且脱敏，不回退到宽松规则。
+
+本轮相关离线875项、八个隔离PostgreSQL测试文件71项通过；新增85项离线和3项PG规则审查测试。包括新旧入口一致拒绝损坏报告，以及用原分档重算ECE比较门槛，防止略超限值被8位小数舍入成达标。PG包含故意在隔离只读事务中尝试UPDATE，被数据库拒绝且原报告不变。原研究内容MD5仍`93549dcd6522737534ed5d9c7a0a3920`，业务计数108批/2118题/1750答案/1研究/3拒绝回执不变，现金预测、旧预测和旧发布表仍各0条。
+
+这次没有冻结规则、签发发布授权或重跑模型，没有改Java/Vue运行代码。此前浏览器验收仍是第24节记录的那次；本节只新增内部只读审查验证，不能冒称正式发布成功。
+
+## 26. 保存已确认的规则：给“考试标准”留一份不能改写的底稿（2026-09-09）
+
+这一步保存的是规则，不是训练模型，也不是发布预测。先确认标准，再固定当时的内容，以后才能追溯一次评估到底用了哪套标准。**当前真实规则仍为DRAFT，不能保存为已确认快照**；本机迁移17已落地，新表`cash_policy_freeze`为0条。
+
+以下路径均以`http://127.0.0.1:8000/internal/v1/predictions`开头，沿用内部服务Token，不允许浏览器Origin。须先让服务加载本次代码；提交或推送不会自动重启常驻服务。
+
+1. `GET /release-policy`：查看服务器当前规则、比较约定及各自的指纹。`approval_ready=false`表示尚未确认；即使true也不表示已保存或模型合格。此接口不查库。
+2. `POST /release-policy/freezes`：只允许提交下面三个字段，两个指纹须从上一接口取得；示例中的文字必须替换为实际64位指纹。调用者不能在请求里提供APPROVED或规则正文。
+
+```json
+{
+  "requestKey": "3b4245c1-d12d-4fd1-9111-e005f3ae42de",
+  "expectedPolicyHash": "替换为GET返回的policy_hash",
+  "expectedBindingHash": "替换为GET返回的binding_hash"
+}
+```
+
+当前用合法指纹请求，预期409、错误码`CASH_POLICY_APPROVAL_REQUIRED`，不访问数据库。只有业务真实确认并在服务器配置中留下确认依据后，才允许保存；不要为了试通接口自行改成APPROVED。
+
+3. 获准后的首次POST返回201，`created/database_written=true`，表示只新增一条规则快照；同requestKey重试返回200且两个标志false。同版本换请求号或换内容返回409，不覆盖旧记录。
+4. `GET /release-policy/freezes/{freeze_id}`：读回当时快照；不存在404、内容损坏503。服务器当前配置改变也不会重写历史。`release-review`只有匹配到当前规则快照才返回`policy_persisted=true`，但其余数据、测试和发布门槛继续保留。
+
+`freeze_id`是规则记录号，不是模型授权号；`frozen_at`来自数据库时钟。`content_hash`用于核对完整内容，`binding_hash`核对窗口/口径/分档约定，都不是审批签名。数据库阻止UPDATE、DELETE、TRUNCATE，非空表拒绝降级删除。
+
+成功保存、重试、并发和不可变性使用隔离PostgreSQL人工确认资料验证；真实规则没有获批或被冻结。最终独立测试的执行协议、数据证据和模型发布管理仍未完成，这份快照不会解封2025答案。最新验证记录见实施第29节及TC-FDP-31。
