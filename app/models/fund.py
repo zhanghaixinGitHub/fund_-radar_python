@@ -124,6 +124,10 @@ class FundShareClass(Base):
     # 来源编码，用于找到来源登记表，再按来源主键筛选净值。
     source_code: Mapped[str] = mapped_column(String(64), nullable=False)
     # 来源系统中的完整基金代码，可能含.OF等后缀；与页面使用的6位fund_code区分。
+    # 后缀	含义
+    # .OF	场外基金
+    # .SH	上海证券交易所
+    # .SZ	深圳证券交易所
     source_fund_code: Mapped[str | None] = mapped_column(String(16), unique=True)
     # 已登记的参考基准编码，可为空；本阶段只用自身净值，不使用此字段作特征。
     benchmark_code: Mapped[str | None] = mapped_column(String(64))
