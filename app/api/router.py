@@ -16,12 +16,14 @@ from app.api.routes.historical_nav_storage import router as historical_nav_stora
 from app.api.routes.historical_nav_training import router as historical_nav_training_router
 from app.api.routes.nav_basis_audit import router as nav_basis_audit_router
 from app.api.routes.signals import router as signals_router
+from app.api.routes.simulation_market import router as simulation_market_router
 from app.api.routes.sources import router as sources_router
 from app.api.routes.trading_nav_window import router as trading_nav_window_router
 from app.api.routes.watchlist_prediction import router as watchlist_prediction_router
 
 """内部 API 根路由；由应用入口统一加上 `/internal/v1` 前缀。"""
 api_router = APIRouter()
+api_router.include_router(simulation_market_router, prefix="/simulation", tags=["simulation-market"])
 
 # 服务健康检查：供 Java 核心服务确认 Python 服务可访问，并关联请求追踪标识。
 api_router.include_router(health_router, tags=["system"])

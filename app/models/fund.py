@@ -320,6 +320,20 @@ class FundDividend(Base):
     )
 
 
+class SimulationMarketRefresh(Base):
+    """逐基金记录净值/分红核验水位，不保存用户身份或持仓。"""
+
+    __tablename__ = "simulation_market_refresh"
+    __table_args__ = (
+        CheckConstraint("status IN ('RUNNING','SUCCEEDED','FAILED')", name="ck_simulation_market_refresh_status"),
+    )
+    fund_code: Mapped[str] = mapped_column(String(32), ForeignKey("fund_share_class.fund_code"), primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    dividends_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    message: Mapped[str | None] = mapped_column(String(256))
+
+
 class SourceSyncRun(Base):
     """一次数据同步的执行记录，相当于“这次搬运数据的工作记录”。
 

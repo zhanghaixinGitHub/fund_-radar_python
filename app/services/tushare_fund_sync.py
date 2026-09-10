@@ -638,6 +638,10 @@ class TushareFundSyncService:
             logger.exception("tushare_fund_sync._sync_market_detail_shares >>> failed run_id=%s", sync_run_id)
             raise
 
+    def sync_market_dividends(self, ts_codes: tuple[str, ...]) -> SyncOutcome:
+        """刷新已登记模拟持仓所需的公共分红；沿用既有来源校验与审计。"""
+        return self._sync_market_detail_dividends(ts_codes)
+
     def _sync_market_detail_dividends(
         self,
         ts_codes: tuple[str, ...],
