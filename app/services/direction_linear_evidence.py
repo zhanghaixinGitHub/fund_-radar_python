@@ -2,7 +2,14 @@
 
 from uuid import UUID
 
-from app.services.direction_linear_protocol import ABLATION_VERSION, PRIOR_HASH, PRIOR_RUN
+from app.services.direction_linear_protocol import (
+    ABLATION_VERSION,
+    PRIOR_HASH,
+    PRIOR_RUN,
+    RECENCY_HASH,
+    RECENCY_RUN,
+    REGULARIZATION_VERSION,
+)
 from app.services.direction_training_artifacts import read_json, read_seal, run_folder
 
 P1_RUN = "feff6919-beca-437a-9b44-5478f61aad44"
@@ -65,4 +72,37 @@ def independence_review(prior):
         "read_2025_values": False,
         "scheduler_created": False,
         "independence_passed": False,
+    }
+
+
+def regularization_evidence():
+    folder = run_folder(UUID(RECENCY_RUN))
+    stages = {
+        s: read_seal(folder, f"linear-{s}.json") for s in ("frozen", "prepared", "predicted", "scored", "complete")
+    }
+    if stages["complete"]["manifest_hash"] != RECENCY_HASH:
+        raise ValueError("REGULARIZATION_PRIOR_CHANGED")
+    for current, previous in (
+        ("prepared", "frozen"),
+        ("predicted", "prepared"),
+        ("scored", "predicted"),
+        ("complete", "scored"),
+    ):
+        if stages[current][f"{previous}_hash"] != stages[previous]["manifest_hash"]:
+            raise ValueError("REGULARIZATION_PRIOR_CHAIN")
+    diagnosis = read_json(folder / "linear-time-diagnosis.json")
+    metrics = read_json(folder / "linear-metrics.json")
+    return {
+        "version": REGULARIZATION_VERSION,
+        "prior_run": RECENCY_RUN,
+        "prior_complete_hash": RECENCY_HASH,
+        "status": "OBSERVED_DEVELOPMENT_HYPOTHESIS_ONLY_NOT_PROVEN_OVERFITTING",
+        "previous_common": metrics["common"],
+        "previous_candidate_status": metrics["candidate_status"],
+        "reference_temporal_diagnosis": {
+            w: d["metrics"]["REFERENCE"] for w, d in diagnosis["windows"].items() if d["status"] == "DIAGNOSED"
+        },
+        "prior_unique_audited_inputs": diagnosis["unique_audited_input_count"],
+        "prior_source_value_status": diagnosis["source_value_status"],
+        "independent_plan": read_json(folder / "linear-plan.json")["independent"],
     }

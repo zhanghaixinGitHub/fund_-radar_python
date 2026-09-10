@@ -14,12 +14,22 @@ from app.services.direction_linear_protocol import (
     ABLATION_VERSION,
     BASELINES,
     BRANCHES,
+    COMBINATION_BRANCHES,
+    COMBINATION_C,
+    COMBINATION_VERSION,
+    COVERAGE_BRANCHES,
+    COVERAGE_VERSION,
     RECENCY_BRANCHES,
     RECENCY_VERSION,
+    REGULARIZATION_BRANCHES,
+    REGULARIZATION_C,
+    REGULARIZATION_VERSION,
     VERSION,
     fit_boundary,
+    planned_dates,
     specification_for,
     specification_v1,
+    study_windows,
 )
 from app.services.direction_training_artifacts import digest
 from app.services.direction_training_dataset import FUNDS, WINDOWS, exam_dates
@@ -547,3 +557,498 @@ def test_independent_label_audit_checks_exact_target_and_cash_reinvestment():
     bad["end"] = str(future[-2])
     with pytest.raises(ValueError, match="LABEL_DATES"):
         audit_answer(bad, nav, (event,))
+
+
+def test_regularization_shrinks_weights_while_preserving_training_and_scaler(job):
+    old = execute_job(job)
+    job["version"] = REGULARIZATION_VERSION
+    outputs = {}
+    for branch in REGULARIZATION_BRANCHES:
+        job["branch"] = branch
+        outputs[branch] = execute_job(job)
+    reference = outputs["REFERENCE"]["models"]["POOLED"]
+    assert outputs["REFERENCE"]["scores"] == old["scores"]
+    norms = []
+    for branch, output in outputs.items():
+        model = restore(output["models"]["POOLED"])
+        assert model["C"] == REGULARIZATION_C[branch] and model["penalty"] == "L2"
+        assert 0 < model["solver_iterations"] < 1000
+        for name in ("indices", "mean", "scale", "train_hash", "train_counts", "fit_end"):
+            assert model[name] == reference[name] == old["models"]["POOLED"][name]
+        norms.append(sum(c * c for c in model["coefficients"]))
+    assert norms[0] > norms[1] > norms[2]
+
+
+@pytest.mark.parametrize("branch", REGULARIZATION_BRANCHES[1:])
+def test_regularization_actual_worker_is_reproducible_and_exam_does_not_fit(job, branch):
+    job.update(version=REGULARIZATION_VERSION, branch=branch)
+    worker = run_process(job, command=[sys.executable, "-m", "scripts.direction_linear_worker"])
+    assert worker["status"] == "PREDICTED"
+    expected = execute_job(job)
+    assert worker["models"] == expected["models"] and worker["scores"] == expected["scores"]
+    job["exam"][0]["x"] = [999.0] * 7
+    assert execute_job(job)["models"] == worker["models"]
+
+
+@pytest.mark.parametrize("branch", REGULARIZATION_BRANCHES)
+@pytest.mark.parametrize("mutation", ["C_override", "fit_future", "exam_answer", "new_branch", "new_year"])
+def test_regularization_only_accepts_fixed_jobs_and_original_time_boundaries(job, branch, mutation):
+    job.update(version=REGULARIZATION_VERSION, branch=branch)
+    if mutation == "C_override":
+        job["C"] = 0.3
+    elif mutation == "fit_future":
+        job["fit"][0]["answer"]["available_at"] = "2023-01-03"
+    elif mutation == "exam_answer":
+        job["exam"][0]["y"] = 1
+    elif mutation == "new_branch":
+        job["branch"] = "MATURE_EXPANDING"
+    else:
+        job["exam"][0]["cutoff"] = "2025-01-02"
+    with pytest.raises(ValueError):
+        validate_job(job)
+
+
+def test_regularization_artifact_rejects_changed_hyperparameters_and_legacy_version(job):
+    job.update(version=REGULARIZATION_VERSION, branch="L2_STRONG")
+    original = execute_job(job)["models"]["POOLED"]
+    for key, value in (("C", 1.0), ("penalty", "L1"), ("solver_iterations", 1000), ("version", VERSION)):
+        model = {**original, key: value}
+        model["hash"] = digest({k: v for k, v in model.items() if k != "hash"})
+        with pytest.raises(ValueError):
+            restore(model)
+
+
+@pytest.mark.parametrize("winner", [False, True])
+def test_regularization_preserves_gates_and_retains_failed_variants(winner):
+    original, predictions, answers = exam_records(winner)
+    protocol = specification_for(REGULARIZATION_VERSION)
+    assert all(
+        protocol[k] == original[k] for k in ("windows", "minimum", "features", "selection", "bootstrap", "threshold")
+    )
+    assert protocol["parameter_search"] and protocol["C_by_branch"] == REGULARIZATION_C
+    assert protocol["research_fit_budget"]["maximum_jobs"] == 9
+    predictions = [r for r in predictions if r["branch"] != "PER_FUND"]
+    for row in predictions:
+        row["branch"] = {"RECENT_18M": "L2_STRONG", "DROP_60D_GROUP": "L2_STRONGER"}.get(row["branch"], row["branch"])
+    result = evaluate(protocol, predictions, answers)
+    assert result["selected_candidate"] == ("L2_STRONG" if winner else None)
+    assert not runner.decision(protocol, result, "a" * 64)["independent_test_run"]
+    for row in predictions:
+        if row["branch"] == "L2_STRONGER":
+            row.update(score=None, predicted_up=None, status="FAILED")
+    failed = evaluate(protocol, predictions, answers)
+    assert failed["selected_candidate"] is None and failed["same_question_count"] == 0
+
+
+def test_regularization_bundle_does_not_use_previous_recency_variants(job):
+    bundle = {
+        "window": job["window"],
+        "complete": {"fit": job["fit"], "exam": {"CLEAN": job["exam"]}},
+        "recent_fit": {b: [{"invalid": True}] for b in RECENCY_BRANCHES[1:]},
+    }
+    for branch in REGULARIZATION_BRANCHES:
+        payload = runner.make_job(bundle, branch, REGULARIZATION_VERSION)
+        assert payload["fit"] is job["fit"] and payload["exam"] is job["exam"]
+        validate_job(payload)
+
+
+@pytest.mark.parametrize(
+    "branch,old_version",
+    [("REFERENCE", REGULARIZATION_VERSION), ("DROP_60D_GROUP", VERSION), ("L2_STRONGER", REGULARIZATION_VERSION)],
+)
+def test_combination_controls_preserve_prior_training_math(job, branch, old_version):
+    job.update(version=old_version, branch=branch)
+    old = execute_job(job)
+    job["version"] = COMBINATION_VERSION
+    current = execute_job(job)
+    assert current["scores"] == old["scores"]
+    model, previous = current["models"]["POOLED"], old["models"]["POOLED"]
+    assert all(model[k] == v for k, v in previous.items() if k not in ("hash", "version"))
+
+
+def test_combination_worker_uses_four_columns_strong_penalty_and_no_exam_fit(job):
+    job.update(version=COMBINATION_VERSION, branch="DROP_60D_GROUP_L2")
+    actual = run_process(job, command=[sys.executable, "-m", "scripts.direction_linear_worker"])
+    expected = execute_job(job)
+    assert actual["status"] == "PREDICTED"
+    assert actual["scores"] == expected["scores"] and actual["models"] == expected["models"]
+    model = restore(actual["models"]["POOLED"])
+    assert model["indices"] == [0, 1, 3, 6] and model["C"] == 0.01
+    job["exam"][0]["x"] = [999.0] * 7
+    assert execute_job(job)["models"] == actual["models"]
+    job["exam"][0]["x"] = [0.1] * 7
+    for row in job["fit"]:
+        for index in (2, 4, 5):
+            row["input"]["x"][index] = 999.0
+    assert execute_job(job)["scores"] == actual["scores"]
+    job["branch"] = "DROP_60D_GROUP"
+    weak = execute_job(job)["models"]["POOLED"]
+    assert weak["mean"] == model["mean"] and weak["scale"] == model["scale"]
+    assert sum(c * c for c in model["coefficients"]) < sum(c * c for c in weak["coefficients"])
+
+
+@pytest.mark.parametrize("branch", COMBINATION_BRANCHES)
+@pytest.mark.parametrize("mutation", ["C", "future_label", "exam_answer", "year_2025", "branch"])
+def test_combination_rejects_unplanned_changes_and_leakage(job, branch, mutation):
+    job.update(version=COMBINATION_VERSION, branch=branch)
+    if mutation == "C":
+        job["C"] = 0.001
+    elif mutation == "future_label":
+        job["fit"][0]["answer"]["available_at"] = "2023-01-03"
+    elif mutation == "exam_answer":
+        job["exam"][0]["y"] = 1
+    elif mutation == "year_2025":
+        job["exam"][0]["cutoff"] = "2025-01-02"
+    else:
+        job["branch"] = "MATURE_EXPANDING"
+    with pytest.raises(ValueError):
+        validate_job(job)
+
+
+def test_combination_saved_model_cannot_change_penalty_or_columns(job):
+    job.update(version=COMBINATION_VERSION, branch="DROP_60D_GROUP_L2")
+    original = execute_job(job)["models"]["POOLED"]
+    for key, value in (("C", 1.0), ("indices", [0, 1, 2, 6]), ("version", REGULARIZATION_VERSION)):
+        changed = {**original, key: value}
+        changed["hash"] = digest({k: v for k, v in changed.items() if k != "hash"})
+        with pytest.raises(ValueError):
+            restore(changed)
+
+
+@pytest.mark.parametrize("winner", [False, True])
+def test_combination_preserves_selection_and_closes_search_even_with_a_winner(winner):
+    original, predictions, answers = exam_records(winner)
+    protocol = specification_for(COMBINATION_VERSION)
+    assert all(protocol[k] == original[k] for k in ("windows", "minimum", "selection", "bootstrap", "threshold"))
+    assert protocol["C_by_branch"] == COMBINATION_C
+    assert protocol["new_hypotheses"] == ["DROP_60D_GROUP_L2"]
+    assert protocol["research_fit_budget"]["maximum_jobs"] == 12
+    for row in predictions:
+        row["branch"] = {"RECENT_18M": "DROP_60D_GROUP_L2", "PER_FUND": "L2_STRONGER"}.get(row["branch"], row["branch"])
+    result = evaluate(protocol, predictions, answers)
+    assert result["selected_candidate"] == ("DROP_60D_GROUP_L2" if winner else None)
+    value = runner.decision(protocol, result, "a" * 64)
+    assert value["current_snapshot_combination_search"] == "CLOSED"
+    assert not value["automatic_followup_training"] and not value["independent_test_run"]
+    assert not value["historical_2025_values_read"] and not value["model_released"]
+    for row in predictions:
+        if row["branch"] == "DROP_60D_GROUP_L2":
+            row.update(score=None, predicted_up=None, status="FAILED")
+    failed = evaluate(protocol, predictions, answers)
+    assert failed["selected_candidate"] is None and failed["same_question_count"] == 0
+    assert failed["failures"]["DROP_60D_GROUP_L2"]["FAILED"] == len(answers)
+
+
+@pytest.mark.parametrize("mutation", ["none", "sample", "model", "score"])
+def test_combination_control_parity_detects_changed_data_models_and_predictions(job, tmp_path, monkeypatch, mutation):
+    from app.services import direction_linear_combination as combination
+    from app.services.direction_training_artifacts import write_json
+
+    job.update(version=REGULARIZATION_VERSION)
+    old = execute_job(job)
+    job["version"] = COMBINATION_VERSION
+    current = execute_job(job)
+    if mutation == "model":
+        current["models"]["POOLED"]["coefficients"][0] += 0.01
+    if mutation == "score":
+        current["scores"][0] += 0.01
+    prior, folder = tmp_path / "prior", tmp_path / "new"
+    prior.mkdir()
+    folder.mkdir()
+    name = job["window"]["name"]
+    for location, output in ((prior, old), (folder, current)):
+        write_json(location / f"linear-models-{name}.json", {"REFERENCE": output})
+        write_json(
+            location / f"linear-prepared-{name}.json", {"data": int(mutation == "sample" and location == folder)}
+        )
+    monkeypatch.setattr(combination, "CONTROLS", {"REFERENCE": "f5905e47-097f-4df7-bf85-3c3fdbc64c16"})
+    monkeypatch.setattr(combination, "run_folder", lambda _: prior)
+    protocol = {"version": COMBINATION_VERSION, "windows": [job["window"]]}
+    if mutation != "none":
+        with pytest.raises(ValueError, match="COMBINATION"):
+            combination.control_parity(folder, protocol)
+    else:
+        result = combination.control_parity(folder, protocol)
+        assert result[0]["model_values_identical"] and result[0]["max_difference"] == 0
+
+
+def test_combination_effects_do_not_assume_additive_improvements():
+    from app.services.direction_linear_combination import effect_summary
+
+    groups = {
+        b: {"per_fund": {"001632": {"sample_count": 100, "correct_count": n}}}
+        for b, n in zip(COMBINATION_BRANCHES, (50, 60, 65, 55), strict=True)
+    }
+    result = effect_summary(groups)
+    assert result["feature_effect_at_C1"] == 0.1
+    assert result["feature_effect_at_C001"] == -0.1
+    assert result["penalty_effect_with_four_features"] == -0.05
+    assert result["accuracy_interaction"] == -0.2
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_combination_diagnosis_handles_four_column_models_and_failed_branch(job, tmp_path, failed):
+    from app.services.direction_linear_combination import combination_diagnostics
+    from app.services.direction_training_artifacts import write_json, write_jsonl
+    from app.services.direction_training_evaluation import grouped_metrics
+
+    protocol = specification_for(COMBINATION_VERSION)
+    protocol["windows"] = [job["window"]]
+    name = job["window"]["name"]
+    outputs, predictions, answers = {}, [], []
+    for item in job["exam"]:
+        cutoff = date.fromisoformat(item["cutoff"])
+        end = str(load_calendar().future_sessions(cutoff)[-1])
+        answers.append(
+            {
+                "window": name,
+                "sample_key": f"{item['fund']}:{cutoff}",
+                "answer": {
+                    "fund": item["fund"],
+                    "cutoff": str(cutoff),
+                    "end": end,
+                    "available_at": end,
+                    "y": 1,
+                    "future_return": "0.01",
+                },
+            }
+        )
+    groups = {}
+    for branch in COMBINATION_BRANCHES:
+        job.update(version=COMBINATION_VERSION, branch=branch)
+        output = execute_job(job)
+        outputs[branch] = {"status": "FAILED"} if failed and branch == "DROP_60D_GROUP_L2" else output
+        rows = [
+            {
+                "window": name,
+                "sample_key": f"{item['fund']}:{item['cutoff']}",
+                "fund": item["fund"],
+                "cutoff": item["cutoff"],
+                "branch": branch,
+                "y": 1,
+                "score": score,
+                "predicted_up": int(score > 0.5),
+                "status": outputs[branch]["status"],
+            }
+            for item, score in zip(job["exam"], output["scores"], strict=True)
+        ]
+        predictions.extend(rows)
+        groups[branch] = grouped_metrics([] if failed else rows, FUNDS)
+    write_json(
+        tmp_path / f"linear-prepared-{name}.json", {"complete": {"fit": job["fit"], "exam": {"CLEAN": job["exam"]}}}
+    )
+    write_json(tmp_path / f"linear-models-{name}.json", outputs)
+    write_jsonl(tmp_path / "linear-predictions.jsonl", predictions)
+    result = {"same_question_count": 0 if failed else 3, "common": groups, "per_window": {name: groups}}
+    report = combination_diagnostics(tmp_path, protocol, answers, result)
+    assert report["same_question_count"] == result["same_question_count"] and report["search_closed"]
+    assert len(report["windows"][name]["branches"]["DROP_60D_GROUP"]["coefficients"]) == 4
+    assert sum(r["count"] for r in report["error_transitions"]["REFERENCE"]) == (0 if failed else 3)
+    assert not report["independent_test"]
+
+
+def test_full_quarter_plan_includes_cross_quarter_targets_and_preserves_2025():
+    windows = study_windows(COVERAGE_VERSION)
+    calendar = load_calendar()
+    assert len(windows) == 8
+    dates = [planned_dates(COVERAGE_VERSION, w) for w in windows]
+    assert [len(ds) for ds in dates] == [59, 59, 64, 60, 58, 59, 64, 40]
+    assert sum(map(len, dates)) == len(set(d for ds in dates for d in ds)) == 463
+    assert dates[-1][-1] == date(2024, 12, 2)
+    assert calendar.future_sessions(dates[0][-1])[-1] > date(2023, 3, 31)
+    assert all(
+        str(calendar.future_sessions(ds[-1], 21)[-1]) == w["label_asof"] <= "2024-12-31"
+        for w, ds in zip(windows, dates, strict=True)
+    )
+    old = {w["cal_end"]: w for w in study_windows(VERSION)}
+    assert all(w["fit_end"] == old[w["cal_end"]]["fit_end"] for w in windows if w["cal_end"] in old)
+    assert len(planned_dates(VERSION, old["2023-06-30"])) == 44
+
+
+@pytest.mark.parametrize("branch", COVERAGE_BRANCHES)
+def test_full_quarter_worker_reuses_locked_model_and_can_predict_quarter_end(job, branch):
+    job.update(version=COMBINATION_VERSION, branch=branch)
+    old = execute_job(job)
+    job.update(version=COVERAGE_VERSION, window=study_windows(COVERAGE_VERSION)[2])
+    current = run_process(job, command=[sys.executable, "-m", "scripts.direction_linear_worker"])
+    assert current["status"] == "PREDICTED" and current["scores"] == old["scores"]
+    model, previous = current["models"]["POOLED"], old["models"]["POOLED"]
+    assert all(model[k] == v for k, v in previous.items() if k not in ("version", "hash"))
+    for item in job["exam"]:
+        item.update(cutoff="2023-09-28", anchor="2023-09-27", available_at="2023-09-28")
+    fit, exam = validate_job(job)
+    assert len(exam) == 3 and len(fit) == 756
+    assert execute_job(job)["models"] == current["models"]
+
+
+@pytest.mark.parametrize("branch", COVERAGE_BRANCHES)
+@pytest.mark.parametrize(
+    "mutation", ["C", "threshold", "late_fit", "year_2025", "december_tail", "label_asof", "new_branch"]
+)
+def test_full_quarter_worker_rejects_unfrozen_changes_and_future_periods(job, branch, mutation):
+    job.update(version=COVERAGE_VERSION, branch=branch, window=study_windows(COVERAGE_VERSION)[2])
+    if mutation in ("C", "threshold"):
+        job[mutation] = 0.3
+    elif mutation == "late_fit":
+        job["fit"][0]["answer"]["available_at"] = "2023-01-03"
+    elif mutation == "year_2025":
+        job["exam"][0]["cutoff"] = "2025-01-02"
+    elif mutation == "december_tail":
+        job["window"] = study_windows(COVERAGE_VERSION)[-1]
+        for item in job["exam"]:
+            item.update(cutoff="2024-12-03", anchor="2024-12-02", available_at="2024-12-03")
+    elif mutation == "label_asof":
+        job["window"]["label_asof"] = "2025-01-01"
+    else:
+        job["branch"] = "L2_STRONGER"
+    with pytest.raises(ValueError):
+        validate_job(job)
+
+
+def test_full_quarter_selection_uses_maturity_not_label_direction():
+    from app.services.direction_linear_coverage import select_records
+
+    window = study_windows(COVERAGE_VERSION)[2]
+    records = {}
+    for cutoff, available in (("2022-11-30", "2022-12-30"), ("2022-12-01", "2023-01-03"), ("2023-09-28", "2023-11-06")):
+        records[cutoff] = {
+            "cutoff": cutoff,
+            "inputs": {"CLEAN": {"cutoff": cutoff}},
+            "label": {"available_at": available},
+            "input_issues": {"CLEAN": []},
+            "label_issues": [],
+        }
+    fit, exam, counts = select_records(records, window)
+    assert [r["cutoff"] for r in fit] == ["2022-11-30"]
+    assert [r["cutoff"] for r in exam] == ["2023-09-28"]
+    assert counts["scorable_count"] == 1
+    records["2023-09-28"]["label"]["available_at"] = "2023-11-07"
+    assert select_records(records, window)[2]["scorable_count"] == 0
+
+
+def coverage_exam_records(winner):
+    protocol = specification_for(COVERAGE_VERSION)
+    predictions, answers = [], []
+    for window in protocol["windows"]:
+        for i, cutoff in enumerate(planned_dates(COVERAGE_VERSION, window)):
+            future = load_calendar().future_sessions(cutoff, 21)
+            for fund in FUNDS:
+                y = i % 2
+                answers.append(
+                    {
+                        "window": window["name"],
+                        "sample_key": f"{fund}:{cutoff}",
+                        "answer": {
+                            "fund": fund,
+                            "cutoff": str(cutoff),
+                            "end": str(future[19]),
+                            "available_at": str(future[20]),
+                            "y": y,
+                            "future_return": "0.01" if y else "-0.01",
+                        },
+                    }
+                )
+                for branch in (*COVERAGE_BRANCHES, *BASELINES):
+                    score = 0.9 if (branch == "ALWAYS_UP" or winner and branch == "DROP_60D_GROUP_L2" and y) else 0.1
+                    predictions.append(
+                        {
+                            "window": window["name"],
+                            "sample_key": f"{fund}:{cutoff}",
+                            "fund": fund,
+                            "cutoff": str(cutoff),
+                            "branch": branch,
+                            "score": score,
+                            "predicted_up": int(score > 0.5),
+                            "status": "PREDICTED",
+                        }
+                    )
+    return protocol, predictions, answers
+
+
+@pytest.mark.parametrize("winner", [False, True])
+def test_full_quarter_evaluation_counts_all_mature_targets_and_keeps_original_gates(winner):
+    protocol, predictions, answers = coverage_exam_records(winner)
+    assert protocol["selection"] == specification_v1()["selection"]
+    assert not protocol["parameter_search"] and protocol["research_fit_budget"]["maximum_models"] == 16
+    result = evaluate(protocol, predictions, answers)
+    assert result["same_question_count"] == 1389 and len(result["valid_windows"]) == 8
+    assert result["time_blocks"]["count"] == 19
+    assert result["selected_candidate"] == ("DROP_60D_GROUP_L2" if winner else None)
+    decision = runner.decision(protocol, result, "a" * 64)
+    assert not decision["independent_test_run"] and not decision["model_released"]
+    assert decision["current_snapshot_combination_search"] == "CLOSED"
+    for row in predictions:
+        if row["branch"] == "DROP_60D_GROUP_L2" and row["window"] == protocol["windows"][0]["name"]:
+            row.update(status="FAILED", score=None, predicted_up=None)
+    failed = evaluate(protocol, predictions, answers)
+    assert failed["selected_candidate"] is None and failed["failures"]["DROP_60D_GROUP_L2"]["FAILED"] == 177
+
+
+def test_full_quarter_blocks_never_compress_a_missing_date():
+    from app.services.direction_training_evaluation import complete_blocks
+
+    protocol, _, answers = coverage_exam_records(False)
+    common = {(r["window"], r["sample_key"]) for r in answers}
+    plans = {w["name"]: planned_dates(COVERAGE_VERSION, w) for w in protocol["windows"]}
+    blocks, _ = complete_blocks(protocol, common, planned_by_window=plans)
+    first = blocks[0]
+    common.remove(first["keys"][0])
+    reduced, excluded = complete_blocks(protocol, common, planned_by_window=plans)
+    assert len(reduced) == 18 and excluded[first["window"]]["incomplete_blocks"] == 1
+    assert reduced[0] == blocks[1]
+
+
+def test_full_quarter_answers_cannot_be_exported_before_prediction_seal(tmp_path, monkeypatch):
+    from app.services import direction_linear_coverage as coverage
+
+    monkeypatch.setattr(runner, "load_plan", lambda _: (specification_for(COVERAGE_VERSION), {}))
+    monkeypatch.setattr(
+        coverage, "export_answers", lambda *_: pytest.fail("answers exported before predictions sealed")
+    )
+    with pytest.raises(FileNotFoundError):
+        runner.score(tmp_path)
+
+
+@pytest.mark.parametrize("mutation", ["none", "score", "answer"])
+def test_full_quarter_old_cohort_requires_same_answers_and_predictions(tmp_path, monkeypatch, mutation):
+    from app.services import direction_linear_coverage as coverage
+    from app.services.direction_training_artifacts import write_json, write_jsonl
+
+    prior = tmp_path / "prior"
+    current = tmp_path / "current"
+    prior.mkdir()
+    current.mkdir()
+    window = study_windows(COVERAGE_VERSION)[2]
+    protocol = {"version": COVERAGE_VERSION, "branches": ["REFERENCE"], "windows": [window]}
+    answer = {"y": 1, "available_at": "2023-07-31", "future_return": "0.01"}
+    old = {
+        "window": "OLD",
+        "sample_key": "001632:2023-07-03",
+        "fund": "001632",
+        "branch": "REFERENCE",
+        "score": 0.6,
+        "predicted_up": 1,
+        "status": "PREDICTED",
+    }
+    write_json(prior / "linear-plan.json", {"windows": [{"name": "OLD", "exam_end": "2023-09-30"}]})
+    write_jsonl(prior / "linear-answers.jsonl", [{"window": "OLD", "sample_key": old["sample_key"], "answer": answer}])
+    write_jsonl(prior / "linear-predictions.jsonl", [old])
+    row = {**old, "window": window["name"], "score": 0.7 if mutation == "score" else 0.6}
+    write_jsonl(current / "linear-predictions.jsonl", [row])
+    answers = [
+        {
+            "window": window["name"],
+            "sample_key": row["sample_key"],
+            "answer": {**answer, "future_return": "0.02"} if mutation == "answer" else answer,
+        }
+    ]
+    monkeypatch.setattr(coverage, "prior_study", lambda: prior)
+    monkeypatch.setattr(coverage, "regularization_diagnostics", lambda *_: {})
+    if mutation != "none":
+        with pytest.raises(ValueError, match="PREVIOUS_SCORED_ROW_CHANGED"):
+            coverage.diagnostics(current, protocol, answers)
+    else:
+        report = coverage.diagnostics(current, protocol, answers)
+        assert report["previous_scored_parity"]["REFERENCE"]["verified_count"] == 1
+        assert report["previous_scored_parity"]["REFERENCE"]["complete"]
+        assert report["cohorts"]["ADDED_DEVELOPMENT_ROWS"]["REFERENCE"]["sample_weighted"] is None

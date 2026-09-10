@@ -12,7 +12,10 @@ from app.services.direction_linear_models import validate_job
 from app.services.direction_linear_protocol import (
     ABLATION_VERSION,
     BASELINES,
+    COMBINATION_VERSION,
+    COVERAGE_VERSION,
     RECENCY_VERSION,
+    REGULARIZATION_VERSION,
     SOURCE_HASH,
     SOURCE_RUN,
     VERSION,
@@ -64,7 +67,25 @@ def freeze(version=VERSION):
             folder / "linear-independence-review.json", independence_review(prior)
         )
         protocol["evidence_hashes"] = dict(files)
-    if version == RECENCY_VERSION:
+    if version == REGULARIZATION_VERSION:
+        from app.services.direction_linear_evidence import regularization_evidence
+
+        files["linear-hypothesis-evidence.json"] = write_json(
+            folder / "linear-hypothesis-evidence.json", regularization_evidence()
+        )
+    if version == COMBINATION_VERSION:
+        from app.services.direction_linear_combination import combination_evidence
+
+        files["linear-hypothesis-evidence.json"] = write_json(
+            folder / "linear-hypothesis-evidence.json", combination_evidence()
+        )
+    if version == COVERAGE_VERSION:
+        from app.services.direction_linear_coverage import evidence
+
+        files["linear-hypothesis-evidence.json"] = write_json(
+            folder / "linear-hypothesis-evidence.json", evidence(protocol)
+        )
+    if version in (RECENCY_VERSION, REGULARIZATION_VERSION, COMBINATION_VERSION, COVERAGE_VERSION):
         from app.services.direction_linear_evidence import independence_review
 
         diagnosis = {
@@ -98,7 +119,7 @@ def load_plan(folder):
         or protocol["diagnosis_hash"] != frozen["files"]["linear-diagnosis.json"]
     ):
         raise ValueError("LINEAR_PROTOCOL_LINK")
-    if protocol["version"] == ABLATION_VERSION:
+    if protocol["version"] in (ABLATION_VERSION, REGULARIZATION_VERSION, COMBINATION_VERSION, COVERAGE_VERSION):
         expected = {
             n: frozen["files"][n] for n in ("linear-hypothesis-evidence.json", "linear-independence-review.json")
         }
@@ -126,6 +147,10 @@ def make_job(bundle, branch, version=VERSION):
 
 def prepare(folder):
     protocol, frozen = load_plan(folder)
+    if protocol["version"] == COVERAGE_VERSION:
+        from app.services.direction_linear_coverage import prepare as prepare_coverage
+
+        return prepare_coverage(folder, protocol, frozen, source())
     original, files, coverage = source(), {}, {}
     old_coverage = read_json(original / "nav-coverage.json")
     recency_sources = None
@@ -156,10 +181,10 @@ def prepare(folder):
                 }
             except ValueError as exc:
                 coverage[name]["branches"][branch] = {"status": "FAILED", "reason": str(exc)[:240]}
-        if protocol["version"] == ABLATION_VERSION:
+        if protocol["version"] in (ABLATION_VERSION, REGULARIZATION_VERSION, COMBINATION_VERSION):
             ready = [v for v in coverage[name]["branches"].values() if v["status"] == "READY"]
             if len({v["fit_keys_hash"] for v in ready}) > 1 or len({v["exam_keys_hash"] for v in ready}) > 1:
-                raise ValueError("ABLATION_SAMPLE_KEYS_CHANGED")
+                raise ValueError("PAIRED_LINEAR_SAMPLE_KEYS_CHANGED")
         if protocol["version"] == RECENCY_VERSION:
             ready = [v for v in coverage[name]["branches"].values() if v["status"] == "READY"]
             if len({v["exam_keys_hash"] for v in ready}) > 1:
@@ -238,10 +263,14 @@ def predict(folder):
                     index[(branch, item["fund"], item["cutoff"])] = (value, item["input_hash"])
             old = {
                 r["sample_key"]: r["score"]
-                for r in read_jsonl(original / f"nav-predictions-{name}.jsonl")
+                for r in (
+                    read_jsonl(original / f"nav-predictions-{name}.jsonl")
+                    if protocol["version"] != COVERAGE_VERSION
+                    else []
+                )
                 if r["scenario"] == "COMPLETE_CLEAN" and r["score"] is not None
             }
-            if outputs["REFERENCE"].get("status") == "PREDICTED":
+            if outputs["REFERENCE"].get("status") == "PREDICTED" and protocol["version"] != COVERAGE_VERSION:
                 differences = [
                     abs(value - old[f"{fund}:{cutoff}"])
                     for (branch, fund, cutoff), (value, _) in index.items()
@@ -289,6 +318,18 @@ def predict(folder):
         ("linear-reference-parity.json", parity, write_json),
     ):
         files[filename] = writer(folder / filename, value)
+    if protocol["version"] == COMBINATION_VERSION:
+        from app.services.direction_linear_combination import control_parity
+
+        files["linear-control-parity.json"] = write_json(
+            folder / "linear-control-parity.json", control_parity(folder, protocol)
+        )
+    if protocol["version"] == COVERAGE_VERSION:
+        from app.services.direction_linear_coverage import control_parity
+
+        files["linear-control-parity.json"] = write_json(
+            folder / "linear-control-parity.json", control_parity(folder, protocol)
+        )
     return seal(
         folder,
         "linear-predicted.json",
@@ -304,10 +345,15 @@ def score(folder):
     protocol, _ = load_plan(folder)
     predicted = read_seal(folder, "linear-predicted.json")  # 全部预测先封存，再生成本轮评分产物。
     original = source()
-    answers = [
-        {k: r[k] for k in ("window", "fund", "cutoff", "sample_key", "answer", "issues")}
-        for r in read_jsonl(original / "nav-answers.jsonl")
-    ]
+    if protocol["version"] == COVERAGE_VERSION:
+        from app.services.direction_linear_coverage import export_answers
+
+        answers = export_answers(protocol, original)
+    else:
+        answers = [
+            {k: r[k] for k in ("window", "fund", "cutoff", "sample_key", "answer", "issues")}
+            for r in read_jsonl(original / "nav-answers.jsonl")
+        ]
     files = {"linear-answers.jsonl": write_jsonl(folder / "linear-answers.jsonl", answers)}
     result = evaluate(protocol, read_jsonl(folder / "linear-predictions.jsonl"), answers)
     files["linear-metrics.json"] = write_json(folder / "linear-metrics.json", result)
@@ -316,6 +362,24 @@ def score(folder):
 
         files["linear-time-diagnosis.json"] = write_json(
             folder / "linear-time-diagnosis.json", diagnostic_report(folder, original, protocol, answers)
+        )
+    if protocol["version"] == REGULARIZATION_VERSION:
+        from app.services.direction_linear_analysis import regularization_diagnostics
+
+        files["linear-regularization-diagnosis.json"] = write_json(
+            folder / "linear-regularization-diagnosis.json", regularization_diagnostics(folder, protocol, answers)
+        )
+    if protocol["version"] == COMBINATION_VERSION:
+        from app.services.direction_linear_combination import combination_diagnostics
+
+        files["linear-combination-diagnosis.json"] = write_json(
+            folder / "linear-combination-diagnosis.json", combination_diagnostics(folder, protocol, answers, result)
+        )
+    if protocol["version"] == COVERAGE_VERSION:
+        from app.services.direction_linear_coverage import diagnostics
+
+        files["linear-expanded-diagnosis.json"] = write_json(
+            folder / "linear-expanded-diagnosis.json", diagnostics(folder, protocol, answers)
         )
     return seal(
         folder,
@@ -332,6 +396,11 @@ def score(folder):
 def decision(protocol, result, scored_hash):
     candidate = result["selected_candidate"]
     return {
+        **(
+            {"current_snapshot_combination_search": "CLOSED", "automatic_followup_training": False}
+            if protocol["version"] in (COMBINATION_VERSION, COVERAGE_VERSION)
+            else {}
+        ),
         "version": protocol["version"],
         "development_scored_hash": scored_hash,
         "selected_candidate": candidate,
@@ -418,6 +487,52 @@ def verify(folder):
         report = diagnostic_report(folder, source(), protocol, read_jsonl(folder / "linear-answers.jsonl"))
         if report != read_json(folder / "linear-time-diagnosis.json"):
             raise ValueError("RECENCY_DIAGNOSTICS_CHANGED")
+    if protocol["version"] == REGULARIZATION_VERSION:
+        from app.services.direction_linear_analysis import regularization_diagnostics
+        from app.services.direction_linear_evidence import independence_review, regularization_evidence
+
+        evidence = regularization_evidence()
+        if evidence != read_json(folder / "linear-hypothesis-evidence.json"):
+            raise ValueError("REGULARIZATION_EVIDENCE_CHANGED")
+        if independence_review(evidence) != read_json(folder / "linear-independence-review.json"):
+            raise ValueError("LINEAR_INDEPENDENCE_REVIEW_CHANGED")
+        report = regularization_diagnostics(folder, protocol, read_jsonl(folder / "linear-answers.jsonl"))
+        if report != read_json(folder / "linear-regularization-diagnosis.json"):
+            raise ValueError("REGULARIZATION_DIAGNOSTICS_CHANGED")
+    if protocol["version"] == COMBINATION_VERSION:
+        from app.services.direction_linear_combination import (
+            combination_diagnostics,
+            combination_evidence,
+            control_parity,
+        )
+        from app.services.direction_linear_evidence import independence_review
+
+        evidence = combination_evidence()
+        if evidence != read_json(folder / "linear-hypothesis-evidence.json"):
+            raise ValueError("COMBINATION_EVIDENCE_CHANGED")
+        if independence_review(evidence) != read_json(folder / "linear-independence-review.json"):
+            raise ValueError("LINEAR_INDEPENDENCE_REVIEW_CHANGED")
+        if control_parity(folder, protocol) != read_json(folder / "linear-control-parity.json"):
+            raise ValueError("COMBINATION_PARITY_CHANGED")
+        report = combination_diagnostics(folder, protocol, read_jsonl(folder / "linear-answers.jsonl"), result)
+        if report != read_json(folder / "linear-combination-diagnosis.json"):
+            raise ValueError("COMBINATION_DIAGNOSTICS_CHANGED")
+    if protocol["version"] == COVERAGE_VERSION:
+        from app.services.direction_linear_coverage import control_parity, diagnostics, evidence, export_answers
+        from app.services.direction_linear_evidence import independence_review
+
+        prior = evidence(protocol)
+        if prior != read_json(folder / "linear-hypothesis-evidence.json"):
+            raise ValueError("COVERAGE_EVIDENCE_CHANGED")
+        if independence_review(prior) != read_json(folder / "linear-independence-review.json"):
+            raise ValueError("LINEAR_INDEPENDENCE_REVIEW_CHANGED")
+        if control_parity(folder, protocol) != read_json(folder / "linear-control-parity.json"):
+            raise ValueError("COVERAGE_PARITY_CHANGED")
+        answers = read_jsonl(folder / "linear-answers.jsonl")
+        if export_answers(protocol, source()) != answers:
+            raise ValueError("COVERAGE_ANSWERS_CHANGED")
+        if diagnostics(folder, protocol, answers) != read_json(folder / "linear-expanded-diagnosis.json"):
+            raise ValueError("COVERAGE_DIAGNOSTICS_CHANGED")
     source()
     return stages["complete"]
 

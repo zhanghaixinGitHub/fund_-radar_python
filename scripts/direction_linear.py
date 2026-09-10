@@ -5,7 +5,14 @@ import json
 from uuid import UUID
 
 from app.services import direction_linear_runner as runner
-from app.services.direction_linear_protocol import ABLATION_VERSION, RECENCY_VERSION, VERSION
+from app.services.direction_linear_protocol import (
+    ABLATION_VERSION,
+    COMBINATION_VERSION,
+    COVERAGE_VERSION,
+    RECENCY_VERSION,
+    REGULARIZATION_VERSION,
+    VERSION,
+)
 from app.services.direction_training_artifacts import run_folder
 
 
@@ -15,7 +22,14 @@ def main():
     parser.add_argument("--run", type=UUID)
     parser.add_argument(
         "--study",
-        choices=("refinement", "feature-ablation", "mature-recency"),
+        choices=(
+            "refinement",
+            "feature-ablation",
+            "mature-recency",
+            "regularization",
+            "feature-regularization",
+            "full-quarter-coverage",
+        ),
         help="Only for freeze; every later stage uses the sealed protocol.",
     )
     args = parser.parse_args()
@@ -23,7 +37,13 @@ def main():
         if args.run:
             parser.error("freeze creates a new run")
         result = runner.freeze(
-            {"feature-ablation": ABLATION_VERSION, "mature-recency": RECENCY_VERSION}.get(args.study, VERSION)
+            {
+                "feature-ablation": ABLATION_VERSION,
+                "mature-recency": RECENCY_VERSION,
+                "regularization": REGULARIZATION_VERSION,
+                "feature-regularization": COMBINATION_VERSION,
+                "full-quarter-coverage": COVERAGE_VERSION,
+            }.get(args.study, VERSION)
         )
     else:
         if args.study is not None:

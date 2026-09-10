@@ -69,13 +69,17 @@ def grouped_metrics(records, funds):
     }
 
 
-def complete_blocks(protocol, common_keys):
+def complete_blocks(protocol, common_keys, *, planned_by_window=None):
     funds = protocol["funds"]
     size = protocol["bootstrap"]["sessions"]
     blocks, exclusions = [], {}
     for window in protocol["windows"]:
         name = window["name"]
-        _, planned = exam_dates(date.fromisoformat(window["cal_end"]), date.fromisoformat(window["exam_end"]))
+        planned = (
+            planned_by_window[name]
+            if planned_by_window is not None
+            else exam_dates(date.fromisoformat(window["cal_end"]), date.fromisoformat(window["exam_end"]))[1]
+        )
         candidate_count, discarded = len(planned) // size, 0
         for start in range(0, candidate_count * size, size):
             dates = [str(d) for d in planned[start : start + size]]

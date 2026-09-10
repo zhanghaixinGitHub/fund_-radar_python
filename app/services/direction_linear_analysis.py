@@ -2,13 +2,21 @@
 
 import math
 from collections import Counter
-from datetime import date
 from fractions import Fraction
 
-from app.schemas.direction_training import DirectionAnswer
-from app.services.direction_linear_protocol import BASELINES, VERSION, study_rules
+from app.schemas.direction_training import DirectionAnswer, DirectionInput
+from app.services.direction_linear_protocol import (
+    BASELINES,
+    COMBINATION_VERSION,
+    COVERAGE_VERSION,
+    REGULARIZATION_VERSION,
+    VERSION,
+    evaluation_asof,
+    planned_dates,
+    study_rules,
+)
 from app.services.direction_training_artifacts import read_json, read_jsonl
-from app.services.direction_training_dataset import FUNDS, exam_dates
+from app.services.direction_training_dataset import FUNDS
 from app.services.direction_training_evaluation import complete_blocks, grouped_metrics, metrics, paired_interval
 from app.services.trading_calendar import load_calendar
 
@@ -128,10 +136,7 @@ def evaluate(protocol, predictions, answers):
     scenarios = (*branches, *BASELINES)
     windows = {w["name"]: w for w in protocol["windows"]}
     planned = {
-        (w["name"], f"{f}:{d}")
-        for w in windows.values()
-        for f in FUNDS
-        for d in exam_dates(date.fromisoformat(w["cal_end"]), date.fromisoformat(w["exam_end"]))[1]
+        (w["name"], f"{f}:{d}") for w in windows.values() for f in FUNDS for d in planned_dates(protocol["version"], w)
     }
     answer_map = {(r["window"], r["sample_key"]): r["answer"] for r in answers}
     if len(answer_map) != len(answers) or set(answer_map) != planned:
@@ -161,7 +166,7 @@ def evaluate(protocol, predictions, answers):
             raise ValueError("LINEAR_PREDICTION_STATE")
         elif answer is None:
             reason = "ANSWER_UNAVAILABLE"
-        elif answer["available_at"] > windows[row["window"]]["exam_end"]:
+        elif answer["available_at"] > evaluation_asof(windows[row["window"]]):
             reason = "ANSWER_NOT_MATURE"
         if reason:
             failures[branch][reason] += 1
@@ -195,7 +200,11 @@ def evaluate(protocol, predictions, answers):
             for v in coverage[w].values()
         )
     ]
-    blocks, exclusions = complete_blocks(protocol, common)
+    blocks, exclusions = complete_blocks(
+        protocol,
+        common,
+        planned_by_window={w["name"]: planned_dates(protocol["version"], w) for w in protocol["windows"]},
+    )
     enough = (
         len(valid) >= protocol["minimum_windows"]
         and len(blocks) >= protocol["bootstrap"]["minimum_complete_blocks"]
@@ -285,4 +294,70 @@ def evaluate(protocol, predictions, answers):
         "failures": {b: dict(v) for b, v in failures.items()},
         "independent_test": False,
         "model_released": False,
+    }
+
+
+def regularization_diagnostics(folder, protocol, answers):
+    """约束强度是否生效与训练/考试差距；只在全部预测封存后调用。"""
+    from app.services.direction_linear_models import predict_model
+
+    if protocol["version"] not in (REGULARIZATION_VERSION, COMBINATION_VERSION, COVERAGE_VERSION):
+        raise ValueError("REGULARIZATION_DIAGNOSTIC_VERSION")
+    answer_map = {(r["window"], r["sample_key"]): r["answer"] for r in answers}
+    windows = {}
+    for window in protocol["windows"]:
+        name = window["name"]
+        bundle = read_json(folder / f"linear-prepared-{name}.json")
+        if not bundle["complete"]:
+            windows[name] = {"status": "INSUFFICIENT_DATA"}
+            continue
+        outputs = read_json(folder / f"linear-models-{name}.json")
+        fit, exam = bundle["complete"]["fit"], []
+        for item in bundle["complete"]["exam"]["CLEAN"]:
+            answer = answer_map[(name, f"{item['fund']}:{item['cutoff']}")]
+            if answer and answer["available_at"] <= evaluation_asof(window):
+                exam.append({"input": item, "answer": answer})
+        details = {}
+        for branch in protocol["branches"]:
+            output = outputs[branch]
+            if output["status"] != "PREDICTED":
+                details[branch] = {"status": output["status"]}
+                continue
+            model, stages = output["models"]["POOLED"], {}
+            for stage, rows in (("FIT", fit), ("EXAM", exam)):
+                inputs = [DirectionInput.model_validate(r["input"]) for r in rows]
+                scores = predict_model(model, inputs)
+                stages[stage] = grouped_metrics(
+                    [
+                        {"fund": r["input"]["fund"], "y": r["answer"]["y"], "score": s}
+                        for r, s in zip(rows, scores, strict=True)
+                    ],
+                    FUNDS,
+                )
+            details[branch] = {
+                "status": "DIAGNOSED",
+                "C": model["C"],
+                "solver_iterations": model["solver_iterations"],
+                "coefficient_l2_norm": math.sqrt(sum(c * c for c in model["coefficients"])),
+                "coefficients": dict(
+                    zip([protocol["features"][i] for i in model["indices"]], model["coefficients"], strict=True)
+                ),
+                "intercept": model["intercept"],
+                "train_hash": model["train_hash"],
+                "stages": stages,
+                "accuracy_gap_fit_minus_exam": {
+                    f: stages["FIT"]["per_fund"][f]["accuracy"] - stages["EXAM"]["per_fund"][f]["accuracy"]
+                    if stages["EXAM"]["per_fund"][f]
+                    else None
+                    for f in FUNDS
+                },
+            }
+        windows[name] = {"status": "DIAGNOSED", "branches": details}
+    return {
+        "version": protocol["version"],
+        "purpose": "DESCRIPTIVE_TRAIN_EXAM_GAP_AND_SHRINKAGE_CHECK_NOT_NEW_SELECTION_CRITERIA",
+        "fit_metrics_in_sample": True,
+        "exam_previously_observed": True,
+        "independent_test": False,
+        "windows": windows,
     }

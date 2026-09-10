@@ -6,9 +6,19 @@ from collections import Counter
 from datetime import date
 
 from app.schemas.direction_training import DirectionAnswer, DirectionInput
-from app.services.direction_linear_protocol import BRANCHES, fit_boundary, study_rules
+from app.services.direction_linear_protocol import (
+    BRANCHES,
+    COMBINATION_VERSION,
+    COVERAGE_VERSION,
+    REGULARIZATION_VERSION,
+    fit_boundary,
+    planned_dates,
+    regularization_c,
+    study_rules,
+    study_windows,
+)
 from app.services.direction_training_artifacts import digest
-from app.services.direction_training_dataset import FUNDS, WINDOWS
+from app.services.direction_training_dataset import FUNDS
 from app.services.direction_training_models import recent_lower
 from app.services.historical_nav_training import sigmoid
 from app.services.trading_calendar import load_calendar
@@ -26,7 +36,7 @@ def validate_job(payload):
         raise ValueError("LINEAR_JOB_FIELDS")
     branches, _ = study_rules(payload["version"])
     branch, window = payload["branch"], payload["window"]
-    allowed = [dict(name=n, fit_end=f, cal_end=c, exam_end=e) for n, f, c, e in WINDOWS]
+    allowed = study_windows(payload["version"])
     if branch not in branches or window not in allowed:
         raise ValueError("LINEAR_PROTOCOL_OR_WINDOW")
     fit_end = date.fromisoformat(fit_boundary(payload["version"], branch, window))
@@ -47,6 +57,10 @@ def validate_job(payload):
     exam = [DirectionInput.model_validate(r) for r in payload["exam"]]
     if len({i.key for i in exam}) != len(exam) or any(not cal_end < i.cutoff <= exam_end for i in exam):
         raise ValueError("LINEAR_EXAM_BOUNDARY")
+    if payload["version"] == COVERAGE_VERSION:
+        allowed_dates = set(planned_dates(payload["version"], window))
+        if any(i.cutoff not in allowed_dates for i in exam):
+            raise ValueError("LINEAR_EXAM_PROTECTED_LABEL_PERIOD")
     lower = recent_lower(fit_end)
     if branch == "RECENT_18M":
         fit = [(i, a) for i, a in fit if i.cutoff > lower]
@@ -57,7 +71,7 @@ def validate_job(payload):
 
 
 def restore(model):
-    if set(model) != {
+    fields = {
         "version",
         "branch",
         "fund",
@@ -70,11 +84,21 @@ def restore(model):
         "train_counts",
         "fit_end",
         "hash",
-    }:
+    }
+    if model.get("version") in (REGULARIZATION_VERSION, COMBINATION_VERSION, COVERAGE_VERSION):
+        fields |= {"C", "penalty", "solver_iterations"}
+    if set(model) != fields:
         raise ValueError("LINEAR_MODEL_FIELDS")
     branches, feature_indices = study_rules(model["version"])
     if model["branch"] not in branches:
         raise ValueError("LINEAR_MODEL_VERSION")
+    if model["version"] in (REGULARIZATION_VERSION, COMBINATION_VERSION, COVERAGE_VERSION) and (
+        model["C"] != regularization_c(model["version"], model["branch"])
+        or model["penalty"] != "L2"
+        or type(model["solver_iterations"]) is not int
+        or not 1 <= model["solver_iterations"] < 1000
+    ):
+        raise ValueError("LINEAR_MODEL_REGULARIZATION")
     if model["indices"] != list(feature_indices[model["branch"]]):
         raise ValueError("LINEAR_MODEL_FEATURES")
     if model["fund"] not in (FUNDS if model["branch"] == "PER_FUND" else ("POOLED",)):
@@ -134,7 +158,7 @@ def execute_job(payload):
             warnings.simplefilter("error", RuntimeWarning)
             scaler = StandardScaler().fit(x, sample_weight=weights)
             estimator = LogisticRegression(
-                C=1.0,
+                C=regularization_c(payload["version"], branch),
                 l1_ratio=0.0,
                 solver="lbfgs",
                 tol=1e-8,
@@ -161,6 +185,12 @@ def execute_job(payload):
             "train_counts": dict(counts),
             "fit_end": fit_boundary(payload["version"], branch, payload["window"]),
         }
+        if payload["version"] in (REGULARIZATION_VERSION, COMBINATION_VERSION, COVERAGE_VERSION):
+            model.update(
+                C=regularization_c(payload["version"], branch),
+                penalty="L2",
+                solver_iterations=int(estimator.n_iter_[0]),
+            )
         model["hash"] = digest(model)
         models[group] = model
         values = predict_model(model, inputs)

@@ -44,7 +44,10 @@ logger = get_logger(__name__)
 def get_latest_internal_feature(
     fund_code: Annotated[str, Query(alias="fundCode", min_length=6, max_length=6, pattern=r"^\d{6}$")],
 ) -> InternalFeatureStatus:
-    """返回已持久化特征或正常的不可用状态；不运行模型或数据同步。"""
+    """供基金详情页的“历史统计输入”区域展示统计数据。
+
+    包括近 5／20／60 日收益、20 日波动率、60 日最大回撤，以及数据日期和完整度。
+    """
     payload = get_latest_stock_feature_status(fund_code)
     logger.info(
         "features.get_latest_internal_feature >>> returned feature status, trace_id=%s, fund_code=%s, status=%s",
@@ -81,7 +84,10 @@ def preview_stored_historical_nav(
         # 正常业务拒绝：缺基金/缺指定日净值为404；品类不适用/来源未就绪为409。
         logger.warning(
             "features.preview_stored_historical_nav >>> unavailable, trace_id=%s, fund_code=%s, as_of_date=%s, code=%s",
-            get_trace_id(), fund_code, as_of_date, error.code,
+            get_trace_id(),
+            fund_code,
+            as_of_date,
+            error.code,
         )
         status_code = 404 if error.code in {"FUND_NOT_FOUND", "NAV_NOT_FOUND"} else 409
         raise HTTPException(status_code=status_code, detail={"code": error.code, "message": str(error)}) from error
@@ -89,21 +95,29 @@ def preview_stored_historical_nav(
         # 数据库连接失败、超时等暂时性故障：日志保留堆栈，HTTP只返回简洁原因，不暴露连接细节。
         logger.exception(
             "features.preview_stored_historical_nav >>> database read failed, trace_id=%s, fund_code=%s, as_of_date=%s",
-            get_trace_id(), fund_code, as_of_date,
+            get_trace_id(),
+            fund_code,
+            as_of_date,
         )
         raise HTTPException(status_code=503, detail="数据库暂时不可用，请稍后重试。") from error
     except (ValueError, ArithmeticError) as error:
         # 已存数据进入计算后仍可能数值异常；转为422，让调用者知道是数据问题而非预测结论。
         logger.exception(
             "features.preview_stored_historical_nav >>> invalid stored NAV, trace_id=%s, fund_code=%s, as_of_date=%s",
-            get_trace_id(), fund_code, as_of_date,
+            get_trace_id(),
+            fund_code,
+            as_of_date,
         )
         raise HTTPException(status_code=422, detail="该日期净值无法计算，请检查数据质量。") from error
     # TraceID用于把这次请求与日志对应起来；仅记录身份、日期、状态和耗时。
     logger.info(
         "features.preview_stored_historical_nav >>> preview completed, trace_id=%s, fund_code=%s, "
         "as_of_date=%s, status=%s, elapsed_ms=%.2f",
-        get_trace_id(), fund_code, as_of_date, sample.eligibility_status, (perf_counter() - started_at) * 1000,
+        get_trace_id(),
+        fund_code,
+        as_of_date,
+        sample.eligibility_status,
+        (perf_counter() - started_at) * 1000,
     )
     # FastAPI按response_model输出JSON：date成为日期字符串，Decimal成为小数字符串。
     # HTTP 200只表示请求已处理；样本是否可用还要看eligibility_status。
@@ -126,7 +140,9 @@ def dry_run_historical_nav_samples(
     except HistoricalNavPreviewReadError as error:
         logger.warning(
             "features.dry_run_historical_nav_samples >>> unavailable, trace_id=%s, fund_code=%s, code=%s",
-            get_trace_id(), request.fund_code, error.code,
+            get_trace_id(),
+            request.fund_code,
+            error.code,
         )
         status_code = 404 if error.code == "FUND_NOT_FOUND" else 409
         raise HTTPException(status_code=status_code, detail={"code": error.code, "message": str(error)}) from error
@@ -135,14 +151,19 @@ def dry_run_historical_nav_samples(
         logger.exception(
             "features.dry_run_historical_nav_samples >>> read failed, trace_id=%s, fund_code=%s, "
             "start_date=%s, end_date=%s, page_size=%s, elapsed_ms=%.2f",
-            get_trace_id(), request.fund_code, request.start_date, request.end_date, request.page_size,
+            get_trace_id(),
+            request.fund_code,
+            request.start_date,
+            request.end_date,
+            request.page_size,
             (perf_counter() - started_at) * 1000,
         )
         raise HTTPException(status_code=503, detail="批量预览暂时不可用或超时，请缩短日期范围后重试。") from error
     except (ValueError, ArithmeticError) as error:
         logger.exception(
             "features.dry_run_historical_nav_samples >>> invalid NAV, trace_id=%s, fund_code=%s",
-            get_trace_id(), request.fund_code,
+            get_trace_id(),
+            request.fund_code,
         )
         raise HTTPException(status_code=422, detail="该范围净值无法计算，请检查数据质量。") from error
     # 一次请求只记一条完成摘要，不逐日打印 INFO，不记录净值明细或服务 Token。
@@ -150,9 +171,17 @@ def dry_run_historical_nav_samples(
         "features.dry_run_historical_nav_samples >>> completed, trace_id=%s, fund_code=%s, "
         "start_date=%s, end_date=%s, page_size=%s, page_count=%s, samples=%s, "
         "scorable=%s, insufficient=%s, pending=%s, elapsed_ms=%.2f",
-        get_trace_id(), request.fund_code, request.start_date, request.end_date, result.page_size,
-        result.page_count, result.sample_count, result.scorable_count, result.data_insufficient_count,
-        result.label_not_matured_count, (perf_counter() - started_at) * 1000,
+        get_trace_id(),
+        request.fund_code,
+        request.start_date,
+        request.end_date,
+        result.page_size,
+        result.page_count,
+        result.sample_count,
+        result.scorable_count,
+        result.data_insufficient_count,
+        result.label_not_matured_count,
+        (perf_counter() - started_at) * 1000,
     )
     return result
 
@@ -184,7 +213,9 @@ def preview_historical_nav_samples(request: HistoricalNavPreviewRequest) -> Hist
     except (ValueError, ArithmeticError) as error:
         logger.exception(
             "features.preview_historical_nav_samples >>> calculation rejected, trace_id=%s, fund_code=%s, nav_count=%s",
-            get_trace_id(), request.fund_code, len(request.nav_points),
+            get_trace_id(),
+            request.fund_code,
+            len(request.nav_points),
         )
         raise HTTPException(status_code=422, detail="NAV sample calculation failed; check dates and values.") from error
     # 这里只筛选展示结果，不改计算时的公告截止日；未指定日期则保留全部样本。
@@ -203,8 +234,13 @@ def preview_historical_nav_samples(request: HistoricalNavPreviewRequest) -> Hist
     logger.info(
         "features.preview_historical_nav_samples >>> preview completed, trace_id=%s, fund_code=%s, "
         "nav_count=%s, sample_count=%s, scorable=%s, insufficient=%s, label_pending=%s, elapsed_ms=%.2f",
-        get_trace_id(), request.fund_code, payload.input_nav_count, payload.sample_count,
-        payload.scorable_count, payload.data_insufficient_count, payload.label_not_matured_count,
+        get_trace_id(),
+        request.fund_code,
+        payload.input_nav_count,
+        payload.sample_count,
+        payload.scorable_count,
+        payload.data_insufficient_count,
+        payload.label_not_matured_count,
         (perf_counter() - started_at) * 1000,
     )
     return payload
