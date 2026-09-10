@@ -42,6 +42,15 @@ def read_cash_history_inputs(
         or any((row[1] is None or not row[0] <= row[1] <= cutoff) and row[2] is not None for row in rows)
     ):
         raise ValueError("cash history is oversized, out of bounds, duplicated, unordered or contains hidden prices")
+    events = read_known_cash_dividends(session, fund_code=fund_code, source_id=source_id, start=start, cutoff=cutoff)
+    return tuple(CashNavPoint(*row) for row in rows), events
+
+
+def read_known_cash_dividends(
+    session: Session, *, fund_code: str, source_id: UUID, start: date, cutoff: date
+) -> tuple[CashDividend, ...]:
+    """有界读取已知分红；实验净值适配器也必须沿用相同事件可用性规则。"""
+    validate_history_read_bounds(start, cutoff)
     # 两个生效日期任一落入窗口都读取，避免漏掉日期冲突；未知生效日的已知事件仍交计算层拒收。
     events = session.execute(
         select(
@@ -77,4 +86,4 @@ def read_cash_history_inputs(
         )
     ):
         raise ValueError("cash history dividends are oversized, duplicated, outside window or not yet known")
-    return tuple(CashNavPoint(*row) for row in rows), tuple(CashDividend(*row) for row in events)
+    return tuple(CashDividend(*row) for row in events)

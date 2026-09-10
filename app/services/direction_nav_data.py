@@ -24,8 +24,8 @@ def history_dates(cutoff):
     return calendar.sessions[index - 61 : index] if index >= 61 else ()
 
 
-def assumed_available(day):
-    return load_calendar().future_sessions(day, 1)[0]
+def assumed_available(day, calendar=None):
+    return (calendar or load_calendar()).future_sessions(day, 1)[0]
 
 
 def known_events(events, cutoff):
@@ -57,7 +57,7 @@ def stress_dates(fund, cutoff, events, count):
     return tuple(dates[i] for i in sorted(chosen))
 
 
-def cash_series(dates, nav, events, cutoff, *, max_missing=0, hidden=()):
+def cash_series(dates, nav, events, cutoff, *, max_missing=0, hidden=(), calendar=None):
     """保留完整交易日序列，不将多日收益压成单日；标签一律 max_missing=0。"""
     if max_missing not in (0, 2) or len(dates) not in (21, 61) or len(set(dates)) != len(dates):
         raise ValueError("SERIES_POLICY_OR_SHAPE")
@@ -85,7 +85,7 @@ def cash_series(dates, nav, events, cutoff, *, max_missing=0, hidden=()):
         point = nav[day]
         if point.unit_nav is None or not point.unit_nav.is_finite() or point.unit_nav <= 0:
             return None, None, ["UNIT_NAV_INVALID"]
-        available = assumed_available(day)
+        available = assumed_available(day, calendar)
         if available > cutoff:
             return None, None, ["NAV_AFTER_ASSUMED_CUTOFF"]
         values.append(point.unit_nav)

@@ -15,12 +15,14 @@ from app.schemas.cash_policy_freeze import CashFrozenPolicy, CashPolicyDescripto
 from app.schemas.cash_prediction_attempt import CashPredictionAttempt, CashPredictionAttemptRequest
 from app.schemas.cash_prediction_check import CashPredictionCheck, CashPredictionCheckRequest
 from app.schemas.cash_release_review import CashReleaseReview
+from app.schemas.direction_experiment import DirectionExperiment
 from app.schemas.watchlist_prediction import WatchlistPrediction
 from app.services.cash_forecast import generate_cash_forecast, get_cash_forecast
 from app.services.cash_policy_freeze import describe_cash_policy, freeze_cash_policy, get_cash_policy_freeze
 from app.services.cash_prediction_attempt import get_cash_prediction_attempt, save_cash_prediction_attempt
 from app.services.cash_prediction_check import check_cash_prediction
 from app.services.cash_release_review import review_cash_release
+from app.services.direction_experiment import get_direction_experiment
 from app.services.watchlist_prediction import get_watchlist_prediction
 
 router = APIRouter(dependencies=[Depends(require_service_token)])
@@ -188,5 +190,24 @@ def read_prediction(fund_code: Annotated[str, Path(pattern=r"^\d{6}$")], respons
         get_trace_id(),
         fund_code,
         result.status,
+    )
+    return result
+
+
+@router.get("/{fund_code}/experiment", response_model=DirectionExperiment)
+def read_direction_experiment(fund_code: Annotated[str, Path(pattern=r"^\d{6}$")], response: Response):
+    """仅供本人关注页面实验推理；独立于正式预测，不训练或写入。"""
+    started = perf_counter()
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        result = get_direction_experiment(fund_code)
+    except ERRORS as error:
+        raise cash_http_error(error, "read_direction_experiment") from error
+    logger.info(
+        "watchlist_prediction.read_direction_experiment >>> trace_id=%s, fund=%s, status=%s, elapsed_ms=%.2f",
+        get_trace_id(),
+        fund_code,
+        result.status,
+        (perf_counter() - started) * 1000,
     )
     return result
