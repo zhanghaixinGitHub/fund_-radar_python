@@ -17,6 +17,7 @@ from app.services.direction_linear_protocol import (
     FULL_QUARTER_VERSIONS,
     MARKET_VERSION,
     REGULARIZATION_VERSION,
+    ROLLING_VERSION,
     VOLUME_VERSION,
     fit_boundary,
     planned_dates,
@@ -39,6 +40,10 @@ def select_fit(rows, branch, fit_end):
 
 
 def validate_job(payload):
+    if payload.get("version") == "DIRECTION_ETF_SHARE_CHANGE_V1":
+        raise ValueError("ETF_SHARE_REQUIRES_DEDICATED_WORKER")
+    if payload.get("version") == ROLLING_VERSION:
+        raise ValueError("ROLLING_REQUIRES_DEDICATED_WORKER")
     if set(payload) != {"version", "branch", "window", "fit", "exam"}:
         raise ValueError("LINEAR_JOB_FIELDS")
     branches, _ = study_rules(payload["version"])
@@ -104,6 +109,10 @@ def input_dimensions(version, branch):
 
 
 def restore(model):
+    if model.get("version") == "DIRECTION_ETF_SHARE_CHANGE_V1":
+        raise ValueError("ETF_SHARE_REQUIRES_DEDICATED_RESTORE")
+    if model.get("version") == ROLLING_VERSION:
+        raise ValueError("ROLLING_REQUIRES_DEDICATED_RESTORE")
     if model.get("version") == ALGORITHM_VERSION and model.get("branch") not in ("REFERENCE", "AMOUNT_ACTIVITY"):
         raise ValueError("LINEAR_MODEL_ALGORITHM_BRANCH")
     fields = {

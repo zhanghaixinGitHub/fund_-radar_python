@@ -44,7 +44,19 @@ ALGORITHM_VERSION = "DIRECTION_ALGORITHM_VOLUME_V1"
 ALGORITHM_BRANCHES = ("REFERENCE", "AMOUNT_ACTIVITY", "TREE_NAV", "TREE_AMOUNT")
 BREADTH_VERSION = "DIRECTION_MARKET_BREADTH_V1"
 BREADTH_BRANCHES = ("REFERENCE", "MARKET_BREADTH")
-FULL_QUARTER_VERSIONS = (COVERAGE_VERSION, MARKET_VERSION, VOLUME_VERSION, ALGORITHM_VERSION, BREADTH_VERSION)
+ROLLING_VERSION = "DIRECTION_ROLLING_UPDATE_V1"
+ROLLING_BRANCHES = ("REFERENCE", "QUARTER_ALL", "QUARTER_252", "MONTH_ALL", "MONTH_252")
+ETF_SHARE_VERSION = "DIRECTION_ETF_SHARE_CHANGE_V1"
+ETF_SHARE_BRANCHES = ("REFERENCE", "ETF_SHARE_CHANGE")
+FULL_QUARTER_VERSIONS = (
+    COVERAGE_VERSION,
+    MARKET_VERSION,
+    VOLUME_VERSION,
+    ALGORITHM_VERSION,
+    BREADTH_VERSION,
+    ROLLING_VERSION,
+    ETF_SHARE_VERSION,
+)
 COMBINATION_RUN = "0bf0104f-9f25-4787-901c-f71dddc92e35"
 COMBINATION_HASH = "887ae19234d1dfdb655ed6158afbde8602dd71ddfa2d4ea19b618108eaec1f24"
 
@@ -71,7 +83,7 @@ def study_windows(version):
         for q in range(4):
             window = dict(
                 name=f"DEV_{year}_Q{q + 1}_FULL_V1",
-                fit_end=str(fits[q]),
+                fit_end=str(bounds[q] if version == ETF_SHARE_VERSION else fits[q]),
                 cal_end=str(bounds[q]),
                 exam_end=str(bounds[q + 1]),
             )
@@ -82,6 +94,8 @@ def study_windows(version):
 
 
 def study_rules(version):
+    if version == ETF_SHARE_VERSION:
+        return ETF_SHARE_BRANCHES, {"REFERENCE": tuple(range(7)), "ETF_SHARE_CHANGE": tuple(range(8))}
     if version == VERSION:
         return BRANCHES, FEATURE_INDICES
     if version == ABLATION_VERSION:
@@ -102,6 +116,8 @@ def study_rules(version):
         return ALGORITHM_BRANCHES, {b: tuple(range(7 + i % 2)) for i, b in enumerate(ALGORITHM_BRANCHES)}
     if version == BREADTH_VERSION:
         return BREADTH_BRANCHES, {b: tuple(range(7 + i)) for i, b in enumerate(BREADTH_BRANCHES)}
+    if version == ROLLING_VERSION:
+        return ROLLING_BRANCHES, dict.fromkeys(ROLLING_BRANCHES, tuple(range(7)))
     raise ValueError("LINEAR_STUDY_VERSION")
 
 
@@ -194,7 +210,14 @@ def specification_v1():
 
 def specification_for(version):
     study_rules(version)
-    if version in (MARKET_VERSION, VOLUME_VERSION, ALGORITHM_VERSION, BREADTH_VERSION):
+    if version in (
+        MARKET_VERSION,
+        VOLUME_VERSION,
+        ALGORITHM_VERSION,
+        BREADTH_VERSION,
+        ROLLING_VERSION,
+        ETF_SHARE_VERSION,
+    ):
         raise ValueError("MARKET_STUDY_REQUIRES_MAPPING_AND_DEDICATED_FREEZE")
     original = specification_v1()
     if version == VERSION:
