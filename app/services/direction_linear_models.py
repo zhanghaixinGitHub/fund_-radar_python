@@ -9,7 +9,9 @@ from app.schemas.direction_market import MarketDirectionInput
 from app.schemas.direction_training import DirectionAnswer, DirectionInput
 from app.schemas.direction_volume import VolumeDirectionInput
 from app.services.direction_linear_protocol import (
+    ALGORITHM_VERSION,
     BRANCHES,
+    BREADTH_VERSION,
     COMBINATION_VERSION,
     COVERAGE_VERSION,
     FULL_QUARTER_VERSIONS,
@@ -48,9 +50,12 @@ def validate_job(payload):
     cal_end, exam_end = (date.fromisoformat(window[k]) for k in ("cal_end", "exam_end"))
     if not 1 <= len(payload["fit"]) <= 10000 or not 1 <= len(payload["exam"]) <= 10000:
         raise ValueError("LINEAR_ROW_BUDGET")
-    input_type = {MARKET_VERSION: MarketDirectionInput, VOLUME_VERSION: VolumeDirectionInput}.get(
-        payload["version"], DirectionInput
-    )
+    input_type = {
+        MARKET_VERSION: MarketDirectionInput,
+        VOLUME_VERSION: VolumeDirectionInput,
+        ALGORITHM_VERSION: VolumeDirectionInput,
+        BREADTH_VERSION: VolumeDirectionInput,
+    }.get(payload["version"], DirectionInput)
     dimensions = input_dimensions(payload["version"], branch)
     fit, identities = [], set()
     for row in payload["fit"]:
@@ -68,7 +73,7 @@ def validate_job(payload):
     exam = [input_type.model_validate(r) for r in payload["exam"]]
     if any(len(i.x) != dimensions for i in exam):
         raise ValueError("LINEAR_INPUT_DIMENSIONS")
-    if payload["version"] in (MARKET_VERSION, VOLUME_VERSION):
+    if payload["version"] in (MARKET_VERSION, VOLUME_VERSION, ALGORITHM_VERSION, BREADTH_VERSION):
         # 两个市场组都只能看到信息截止日前一交易日收盘，不能错用当日指数。
         calendar = load_calendar()
         if any(
@@ -93,12 +98,14 @@ def validate_job(payload):
 
 def input_dimensions(version, branch):
     """新协议严格使用冻结的7/8/9或7/10维；旧删减实验仍接收原七列再选列。"""
-    if version in (MARKET_VERSION, VOLUME_VERSION):
+    if version in (MARKET_VERSION, VOLUME_VERSION, ALGORITHM_VERSION, BREADTH_VERSION):
         return len(study_rules(version)[1][branch])
     return 7
 
 
 def restore(model):
+    if model.get("version") == ALGORITHM_VERSION and model.get("branch") not in ("REFERENCE", "AMOUNT_ACTIVITY"):
+        raise ValueError("LINEAR_MODEL_ALGORITHM_BRANCH")
     fields = {
         "version",
         "branch",
@@ -119,6 +126,8 @@ def restore(model):
         COVERAGE_VERSION,
         MARKET_VERSION,
         VOLUME_VERSION,
+        ALGORITHM_VERSION,
+        BREADTH_VERSION,
     ):
         fields |= {"C", "penalty", "solver_iterations"}
     if set(model) != fields:
@@ -132,6 +141,8 @@ def restore(model):
         COVERAGE_VERSION,
         MARKET_VERSION,
         VOLUME_VERSION,
+        ALGORITHM_VERSION,
+        BREADTH_VERSION,
     ) and (
         model["C"] != regularization_c(model["version"], model["branch"])
         or model["penalty"] != "L2"
@@ -183,6 +194,8 @@ def execute_job(payload):
     from sklearn.preprocessing import StandardScaler
     from threadpoolctl import threadpool_limits
 
+    if payload.get("version") == ALGORITHM_VERSION and payload.get("branch") not in ("REFERENCE", "AMOUNT_ACTIVITY"):
+        raise ValueError("LINEAR_WORKER_ALGORITHM_BRANCH")
     fit, exam = validate_job(payload)
     _, feature_indices = study_rules(payload["version"])
     branch, indices = payload["branch"], feature_indices[payload["branch"]]
@@ -232,6 +245,8 @@ def execute_job(payload):
             COVERAGE_VERSION,
             MARKET_VERSION,
             VOLUME_VERSION,
+            ALGORITHM_VERSION,
+            BREADTH_VERSION,
         ):
             model.update(
                 C=regularization_c(payload["version"], branch),
