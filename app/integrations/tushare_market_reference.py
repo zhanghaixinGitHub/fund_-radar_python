@@ -211,9 +211,23 @@ class TushareMarketReferenceClient:
             records_by_code[item.classification_code] = item
         return tuple(records_by_code[code] for code in sorted(records_by_code))
 
-    def list_index_daily(
-        self, index_code: str, *, start_date: date, end_date: date
-    ) -> tuple[TushareIndexDaily, ...]:
+    def get_index_basic(self, index_code: str) -> TushareIndexBasic | None:
+        """按已核实的指数代码补查目录，供有限研究补齐本地缺失的指数身份。
+
+        只查一只指数，不扩大成全市场同步；无记录返回 None，代码不符或重复则拒收。
+        目录只证明来源中的身份，基金与指数的历史对应关系仍须由基金披露资料确认。
+        """
+        rows = self._query("index_basic", params={"ts_code": index_code}, fields=_INDEX_BASIC_FIELDS)
+        if len(rows) > 1:
+            raise TushareIntegrationError("index_basic", "single-index query returned multiple records")
+        if not rows:
+            return None
+        item = _to_index_basic(rows[0])
+        if item.index_code != index_code:
+            raise TushareIntegrationError("index_basic", "single-index query returned another index")
+        return item
+
+    def list_index_daily(self, index_code: str, *, start_date: date, end_date: date) -> tuple[TushareIndexDaily, ...]:
         """读取一条已批准指数的日线，返回代码必须与请求完全一致。"""
         if start_date > end_date:
             raise ValueError("start_date must not be after end_date.")
@@ -259,9 +273,7 @@ class TushareMarketReferenceClient:
                 api_name, f"entity={entity_key} reached configured row limit; refusing partial response"
             )
 
-    def _query(
-        self, api_name: str, *, params: Mapping[str, str], fields: str
-    ) -> tuple[dict[str, Any], ...]:
+    def _query(self, api_name: str, *, params: Mapping[str, str], fields: str) -> tuple[dict[str, Any], ...]:
         payload = {"api_name": api_name, "token": self._token, "params": dict(params), "fields": fields}
         last_error: BaseException | None = None
         for attempt in range(self._max_retries + 1):

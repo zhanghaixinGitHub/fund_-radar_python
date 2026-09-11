@@ -5,11 +5,14 @@ import warnings
 from collections import Counter
 from datetime import date
 
+from app.schemas.direction_market import MarketDirectionInput
 from app.schemas.direction_training import DirectionAnswer, DirectionInput
 from app.services.direction_linear_protocol import (
     BRANCHES,
     COMBINATION_VERSION,
     COVERAGE_VERSION,
+    FULL_QUARTER_VERSIONS,
+    MARKET_VERSION,
     REGULARIZATION_VERSION,
     fit_boundary,
     planned_dates,
@@ -43,21 +46,35 @@ def validate_job(payload):
     cal_end, exam_end = (date.fromisoformat(window[k]) for k in ("cal_end", "exam_end"))
     if not 1 <= len(payload["fit"]) <= 10000 or not 1 <= len(payload["exam"]) <= 10000:
         raise ValueError("LINEAR_ROW_BUDGET")
+    input_type = MarketDirectionInput if payload["version"] == MARKET_VERSION else DirectionInput
+    dimensions = 10 if payload["version"] == MARKET_VERSION and branch != "REFERENCE" else 7
     fit, identities = [], set()
     for row in payload["fit"]:
         if set(row) != {"input", "answer"}:
             raise ValueError("LINEAR_TRAIN_FIELDS")
-        item, answer = DirectionInput.model_validate(row["input"]), DirectionAnswer.model_validate(row["answer"])
+        item, answer = input_type.model_validate(row["input"]), DirectionAnswer.model_validate(row["answer"])
+        if len(item.x) != dimensions:
+            raise ValueError("LINEAR_INPUT_DIMENSIONS")
         if item.key != answer.key or item.key in identities or not item.cutoff < answer.available_at <= fit_end:
             raise ValueError("LINEAR_FIT_BOUNDARY")
         if answer.end != load_calendar().future_sessions(item.cutoff)[-1]:
             raise ValueError("LINEAR_LABEL_HORIZON")
         identities.add(item.key)
         fit.append((item, answer))
-    exam = [DirectionInput.model_validate(r) for r in payload["exam"]]
+    exam = [input_type.model_validate(r) for r in payload["exam"]]
+    if any(len(i.x) != dimensions for i in exam):
+        raise ValueError("LINEAR_INPUT_DIMENSIONS")
+    if payload["version"] == MARKET_VERSION:
+        # 两个市场组都只能看到信息截止日前一交易日收盘，不能错用当日指数。
+        calendar = load_calendar()
+        if any(
+            i.anchor != calendar.sessions[calendar.at_or_before_index(i.cutoff) - 1]
+            for i in [*(i for i, _ in fit), *exam]
+        ):
+            raise ValueError("MARKET_ANCHOR_MISMATCH")
     if len({i.key for i in exam}) != len(exam) or any(not cal_end < i.cutoff <= exam_end for i in exam):
         raise ValueError("LINEAR_EXAM_BOUNDARY")
-    if payload["version"] == COVERAGE_VERSION:
+    if payload["version"] in FULL_QUARTER_VERSIONS:
         allowed_dates = set(planned_dates(payload["version"], window))
         if any(i.cutoff not in allowed_dates for i in exam):
             raise ValueError("LINEAR_EXAM_PROTECTED_LABEL_PERIOD")
@@ -85,14 +102,14 @@ def restore(model):
         "fit_end",
         "hash",
     }
-    if model.get("version") in (REGULARIZATION_VERSION, COMBINATION_VERSION, COVERAGE_VERSION):
+    if model.get("version") in (REGULARIZATION_VERSION, COMBINATION_VERSION, COVERAGE_VERSION, MARKET_VERSION):
         fields |= {"C", "penalty", "solver_iterations"}
     if set(model) != fields:
         raise ValueError("LINEAR_MODEL_FIELDS")
     branches, feature_indices = study_rules(model["version"])
     if model["branch"] not in branches:
         raise ValueError("LINEAR_MODEL_VERSION")
-    if model["version"] in (REGULARIZATION_VERSION, COMBINATION_VERSION, COVERAGE_VERSION) and (
+    if model["version"] in (REGULARIZATION_VERSION, COMBINATION_VERSION, COVERAGE_VERSION, MARKET_VERSION) and (
         model["C"] != regularization_c(model["version"], model["branch"])
         or model["penalty"] != "L2"
         or type(model["solver_iterations"]) is not int
@@ -119,7 +136,8 @@ def restore(model):
 
 def predict_model(model, items):
     model = restore(model)
-    if any(len(i.x) != 7 or (model["fund"] != "POOLED" and i.fund != model["fund"]) for i in items):
+    dimensions = 10 if model["version"] == MARKET_VERSION and model["branch"] != "REFERENCE" else 7
+    if any(len(i.x) != dimensions or (model["fund"] != "POOLED" and i.fund != model["fund"]) for i in items):
         raise ValueError("LINEAR_PREDICT_SCOPE")
     return [
         sigmoid(
@@ -185,7 +203,7 @@ def execute_job(payload):
             "train_counts": dict(counts),
             "fit_end": fit_boundary(payload["version"], branch, payload["window"]),
         }
-        if payload["version"] in (REGULARIZATION_VERSION, COMBINATION_VERSION, COVERAGE_VERSION):
+        if payload["version"] in (REGULARIZATION_VERSION, COMBINATION_VERSION, COVERAGE_VERSION, MARKET_VERSION):
             model.update(
                 C=regularization_c(payload["version"], branch),
                 penalty="L2",

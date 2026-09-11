@@ -36,13 +36,16 @@ REGULARIZATION_RUN = "f5905e47-097f-4df7-bf85-3c3fdbc64c16"
 REGULARIZATION_HASH = "1a6dc576e79dcb30a04df0a226222dd7a7469523e9401b188d4e87c796f2bacd"
 COVERAGE_VERSION = "DIRECTION_LINEAR_FULL_QUARTERS_V1"
 COVERAGE_BRANCHES = ("REFERENCE", "DROP_60D_GROUP_L2")
+MARKET_VERSION = "DIRECTION_MATCHED_MARKET_V1"
+MARKET_BRANCHES = ("REFERENCE", "SHARED_MARKET", "MATCHED_MARKET")
+FULL_QUARTER_VERSIONS = (COVERAGE_VERSION, MARKET_VERSION)
 COMBINATION_RUN = "0bf0104f-9f25-4787-901c-f71dddc92e35"
 COMBINATION_HASH = "887ae19234d1dfdb655ed6158afbde8602dd71ddfa2d4ea19b618108eaec1f24"
 
 
 def planned_dates(version, window):
     lower, upper = (date.fromisoformat(window[k]) for k in ("cal_end", "exam_end"))
-    if version != COVERAGE_VERSION:
+    if version not in FULL_QUARTER_VERSIONS:
         return exam_dates(lower, upper)[1]
     calendar = load_calendar()
     return [d for d in calendar.sessions if lower < d <= upper and calendar.future_sessions(d, 21)[-1] <= END]
@@ -53,7 +56,7 @@ def evaluation_asof(window):
 
 
 def study_windows(version):
-    if version != COVERAGE_VERSION:
+    if version not in FULL_QUARTER_VERSIONS:
         return [dict(name=n, fit_end=f, cal_end=c, exam_end=e) for n, f, c, e in WINDOWS]
     result = []
     for year in (2023, 2024):
@@ -85,6 +88,8 @@ def study_rules(version):
         return COMBINATION_BRANCHES, COMBINATION_INDICES
     if version == COVERAGE_VERSION:
         return COVERAGE_BRANCHES, {b: COMBINATION_INDICES[b] for b in COVERAGE_BRANCHES}
+    if version == MARKET_VERSION:
+        return MARKET_BRANCHES, {b: tuple(range(7 if b == "REFERENCE" else 10)) for b in MARKET_BRANCHES}
     raise ValueError("LINEAR_STUDY_VERSION")
 
 
@@ -177,6 +182,8 @@ def specification_v1():
 
 def specification_for(version):
     study_rules(version)
+    if version == MARKET_VERSION:
+        raise ValueError("MARKET_STUDY_REQUIRES_MAPPING_AND_DEDICATED_FREEZE")
     original = specification_v1()
     if version == VERSION:
         return original

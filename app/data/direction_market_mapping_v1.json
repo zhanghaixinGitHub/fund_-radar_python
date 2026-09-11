@@ -1,0 +1,39 @@
+{
+  "version": "DIRECTION_MARKET_MAPPING_V1",
+  "research_start": "2021-01-01",
+  "research_end": "2024-12-31",
+  "selection_rule": "USE_THE_EQUITY_INDEX_EXPLICITLY_NAMED_IN_PRE_EXISTING_FUND_DISCLOSURES_NOT_BACKTEST_RANKING",
+  "shared_index": "000300.SH",
+  "funds": {
+    "001632": {
+      "index_code": "930653.CSI",
+      "index_name": "中证食品饮料指数",
+      "provider_name": "CS食品饮",
+      "benchmark_note": "合同为95%指数收益加5%税后活期存款利率；本实验仅取其中股票指数的价格日线，非完整合同基准。",
+      "history_note": "2020年资料已明确中证食品饮料指数；2021-11-04转型为同一标的指数的ETF联接基金，保留该事件但不更换指数。",
+      "evidence": ["tianhong-2020.pdf", "tianhong-transition-2021.html", "food-index-methodology.pdf"]
+    },
+    "006730": {
+      "index_code": "000905.SH",
+      "index_name": "中证500指数",
+      "provider_name": "中证500",
+      "benchmark_note": "合同为95%中证500指数收益加5%税后一年期人民币定存利率；只使用股票指数价格日线作为市场输入。",
+      "history_note": "2019年第3号招募说明书摘要第26页已明确中证500；指数增强允许主动偏离，并不把该指数当成真实逐日持仓。",
+      "evidence": ["wanjia-2019.pdf"]
+    },
+    "008888": {
+      "index_code": "980017.SZ",
+      "index_name": "国证半导体芯片指数",
+      "provider_name": "国证芯片",
+      "benchmark_note": "合同为95%国证半导体芯片指数收益加5%税后活期存款利率；只使用股票指数价格日线作为市场输入。",
+      "history_note": "2020年发行页面及2021-05资料概要明确国证半导体芯片指数；指数发布机构2020-04公告确认交易代码980017。",
+      "evidence": ["huaxia-launch-2020.html", "huaxia-2021.pdf", "chip-code-2020.html"]
+    }
+  },
+  "limitations": [
+    "历史披露用于确定映射；未宣称已完成所有历史公告的穷尽审计，未根据回测成绩替换指数。",
+    "所有市场输入使用价格指数，与现金分红再投基金的收益差是相对强弱，不是严格超额收益。",
+    "来源返回的历史收盘价为当前获取版本；逐日历史首次版本和实际首次可得时间仍未证实。",
+    "映射资料搜索曾返回2025/2026网页摘要，不能宣称全项目未见保留期信息；本轮训练与评分只用2021—2024。"
+  ]
+}
