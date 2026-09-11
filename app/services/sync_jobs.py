@@ -40,10 +40,17 @@ from app.services.tushare_market_reference_sync import MarketReferenceSyncInProg
 
 logger = get_logger(__name__)
 
+MARKET_ALL_JOB_TYPE = "MARKET_ALL"
 MARKET_NAV_INCREMENTAL_JOB_TYPE = "MARKET_NAV_INCREMENTAL"
 MARKET_DETAIL_JOB_TYPE = "MARKET_DETAIL"
 STOCK_FEATURE_SNAPSHOT_JOB_TYPE = "STOCK_FEATURE_SNAPSHOT"
 MARKET_FREE_DATA_COMPLETION_JOB_TYPE = "MARKET_FREE_DATA_COMPLETION"
+_ALL_JOB_STAGES = (
+    (MARKET_DETAIL_JOB_TYPE, "完整资料"),
+    (MARKET_FREE_DATA_COMPLETION_JOB_TYPE, "免费数据补齐"),
+    (MARKET_NAV_INCREMENTAL_JOB_TYPE, "净值增量"),
+    (STOCK_FEATURE_SNAPSHOT_JOB_TYPE, "特征快照"),
+)
 _ACTIVE_STATUSES = frozenset({"QUEUED", "RUNNING"})
 _SYNC_TYPES_BY_JOB_TYPE = {
     MARKET_NAV_INCREMENTAL_JOB_TYPE: ("MARKET_NAV_INCREMENTAL",),
@@ -109,160 +116,144 @@ class LocalSyncJobManager:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fund-sync-job")
         self._jobs: dict[UUID, SyncJobSnapshot] = {}
         self._latest_job_ids: dict[str, UUID] = {}
+        self._batch_child_ids: dict[UUID, tuple[UUID, ...]] = {}
         self._active_job_id: UUID | None = None
         self._lock = Lock()
         self._closed = False
 
     def start_market_nav_incremental(self) -> SyncJobSnapshot:
-        """创建并提交基金市场增量任务；已有活动任务时返回受控冲突。"""
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("sync job manager is stopped")
-            if self._active_job_id is not None:
-                active = self._jobs.get(self._active_job_id)
-                if active is not None and active.status in _ACTIVE_STATUSES:
-                    raise SyncJobInProgressError("a local sync job is already running")
-            snapshot = SyncJobSnapshot(
-                job_id=uuid4(),
-                job_type=MARKET_NAV_INCREMENTAL_JOB_TYPE,
-                status="QUEUED",
-                requested_nav_date=date.today(),
-                fund_codes=(),
-                progress_current=0,
-                progress_total=0,
-                current_fund_code=None,
-                progress_message="任务已创建，等待读取基金市场范围",
-                sync_run_id=None,
-                fetched_count=0,
-                created_count=0,
-                updated_count=0,
-                skipped_count=0,
-                error_code=None,
-                error_message=None,
-                started_at=None,
-                finished_at=None,
-            )
-            self._jobs[snapshot.job_id] = snapshot
-            self._latest_job_ids[MARKET_NAV_INCREMENTAL_JOB_TYPE] = snapshot.job_id
-            self._active_job_id = snapshot.job_id
-            self._executor.submit(self._run_market_nav_incremental, snapshot.job_id)
-            return snapshot
+        """创建净值任务，单独执行时保留原有自动特征阶段。"""
+        return self._start_job(MARKET_NAV_INCREMENTAL_JOB_TYPE, self._run_market_nav_incremental)
 
     def start_market_details(self) -> SyncJobSnapshot:
-        """创建完整资料基线同步任务；与净值任务共用单并发保护。"""
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("sync job manager is stopped")
-            if self._active_job_id is not None:
-                active = self._jobs.get(self._active_job_id)
-                if active is not None and active.status in _ACTIVE_STATUSES:
-                    raise SyncJobInProgressError("a local sync job is already running")
-            snapshot = SyncJobSnapshot(
-                job_id=uuid4(),
-                job_type=MARKET_DETAIL_JOB_TYPE,
-                status="QUEUED",
-                requested_nav_date=date.today(),
-                fund_codes=(),
-                progress_current=0,
-                progress_total=0,
-                current_fund_code=None,
-                progress_message="任务已创建，等待读取基金市场范围",
-                sync_run_id=None,
-                fetched_count=0,
-                created_count=0,
-                updated_count=0,
-                skipped_count=0,
-                error_code=None,
-                error_message=None,
-                started_at=None,
-                finished_at=None,
-            )
-            self._jobs[snapshot.job_id] = snapshot
-            self._latest_job_ids[MARKET_DETAIL_JOB_TYPE] = snapshot.job_id
-            self._active_job_id = snapshot.job_id
-            self._executor.submit(self._run_market_details, snapshot.job_id)
-            return snapshot
+        """创建完整资料任务，与其他同步共用互斥保护。"""
+        return self._start_job(MARKET_DETAIL_JOB_TYPE, self._run_market_details)
 
     def start_stock_feature_snapshots(self) -> SyncJobSnapshot:
-        """创建特征快照手动重试任务；只读取已落库数据，不触发外部拉取。"""
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("sync job manager is stopped")
-            if self._active_job_id is not None:
-                active = self._jobs.get(self._active_job_id)
-                if active is not None and active.status in _ACTIVE_STATUSES:
-                    raise SyncJobInProgressError("a local sync job is already running")
-            snapshot = SyncJobSnapshot(
-                job_id=uuid4(),
-                job_type=STOCK_FEATURE_SNAPSHOT_JOB_TYPE,
-                status="QUEUED",
-                requested_nav_date=date.today(),
-                fund_codes=(),
-                progress_current=0,
-                progress_total=0,
-                current_fund_code=None,
-                progress_message="任务已创建，等待读取已同步净值",
-                sync_run_id=None,
-                fetched_count=0,
-                created_count=0,
-                updated_count=0,
-                skipped_count=0,
-                error_code=None,
-                error_message=None,
-                started_at=None,
-                finished_at=None,
-            )
-            self._jobs[snapshot.job_id] = snapshot
-            self._latest_job_ids[STOCK_FEATURE_SNAPSHOT_JOB_TYPE] = snapshot.job_id
-            self._active_job_id = snapshot.job_id
-            self._executor.submit(self._run_stock_feature_snapshots, snapshot.job_id)
-            return snapshot
+        """创建已落库净值的独立特征快照任务。"""
+        return self._start_job(STOCK_FEATURE_SNAPSHOT_JOB_TYPE, self._run_stock_feature_snapshots)
 
     def start_market_free_data_completion(self) -> SyncJobSnapshot:
-        """创建 2000 积分已授权数据补齐任务；只允许管理员通过同步中心显式提交。"""
+        """创建管理员显式提交的已授权免费数据补齐任务。"""
+        return self._start_job(MARKET_FREE_DATA_COMPLETION_JOB_TYPE, self._run_market_free_data_completion)
+
+    def start_all(self) -> SyncJobSnapshot:
+        """原子登记整个批次及四个子任务，后台串行执行且不依赖浏览器存活。"""
         with self._lock:
-            if self._closed:
-                raise RuntimeError("sync job manager is stopped")
-            if self._active_job_id is not None:
-                active = self._jobs.get(self._active_job_id)
-                if active is not None and active.status in _ACTIVE_STATUSES:
-                    raise SyncJobInProgressError("a local sync job is already running")
-            snapshot = SyncJobSnapshot(
-                job_id=uuid4(),
-                job_type=MARKET_FREE_DATA_COMPLETION_JOB_TYPE,
-                status="QUEUED",
-                requested_nav_date=date.today(),
-                fund_codes=(),
-                progress_current=0,
-                progress_total=0,
-                current_fund_code=None,
-                progress_message="任务已创建，等待管理员补齐当前已授权免费数据",
-                sync_run_id=None,
-                fetched_count=0,
-                created_count=0,
-                updated_count=0,
-                skipped_count=0,
-                error_code=None,
-                error_message=None,
-                started_at=None,
-                finished_at=None,
+            self._require_idle()
+            parent = replace(
+                self._new_job(MARKET_ALL_JOB_TYPE),
+                progress_total=len(_ALL_JOB_STAGES),
+                progress_message="一键同步已创建，等待依次执行四类任务",
             )
+            children = tuple(self._new_job(job_type) for job_type, _ in _ALL_JOB_STAGES)
+            for snapshot in (parent, *children):
+                self._jobs[snapshot.job_id] = snapshot
+                self._latest_job_ids[snapshot.job_type] = snapshot.job_id
+            self._batch_child_ids[parent.job_id] = tuple(child.job_id for child in children)
+            self._active_job_id = parent.job_id
+            self._executor.submit(self._run_all, parent.job_id)
+            return parent
+
+    def _require_idle(self) -> None:
+        """调用方持有锁；直到实际执行与资源清理结束才允许下一次提交。"""
+        if self._closed:
+            raise RuntimeError("sync job manager is stopped")
+        if self._active_job_id is not None:
+            raise SyncJobInProgressError("a local sync job is already running")
+
+    @staticmethod
+    def _new_job(job_type: str) -> SyncJobSnapshot:
+        return SyncJobSnapshot(
+            job_id=uuid4(), job_type=job_type, status="QUEUED", requested_nav_date=date.today(),
+            fund_codes=(), progress_current=0, progress_total=0, current_fund_code=None,
+            progress_message="任务已创建，等待执行", sync_run_id=None,
+            fetched_count=0, created_count=0, updated_count=0, skipped_count=0,
+            error_code=None, error_message=None, started_at=None, finished_at=None,
+        )
+
+    def _start_job(self, job_type: str, runner: Callable[[UUID], None]) -> SyncJobSnapshot:
+        with self._lock:
+            self._require_idle()
+            snapshot = self._new_job(job_type)
             self._jobs[snapshot.job_id] = snapshot
-            self._latest_job_ids[MARKET_FREE_DATA_COMPLETION_JOB_TYPE] = snapshot.job_id
+            self._latest_job_ids[job_type] = snapshot.job_id
             self._active_job_id = snapshot.job_id
-            self._executor.submit(self._run_market_free_data_completion, snapshot.job_id)
+            self._executor.submit(runner, snapshot.job_id)
             return snapshot
+
+    def _run_all(self, job_id: UUID) -> None:
+        """失败不掩盖成功事实；尝试每项一次，最后统一汇总结果。"""
+        self._replace_job(job_id, status="RUNNING", started_at=datetime.now(UTC))
+        runners = (
+            self._run_market_details,
+            self._run_market_free_data_completion,
+            lambda child_id: self._run_market_nav_incremental(child_id, build_features=False),
+            self._run_stock_feature_snapshots,
+        )
+        try:
+            child_ids = self._batch_child_ids[job_id]
+            for index, (child_id, runner) in enumerate(zip(child_ids, runners, strict=True)):
+                logger.info("sync_jobs._run_all >>> stage started, job_id=%s, child_job_id=%s", job_id, child_id)
+                try:
+                    runner(child_id)
+                except Exception:
+                    logger.exception(
+                        "sync_jobs._run_all >>> stage failed, job_id=%s, child_job_id=%s", job_id, child_id
+                    )
+                    self._fail_job(child_id, "SYNC_STAGE_FAILED", "本项同步未完整结束，请稍后单独重试。")
+                self._replace_job(job_id, progress_current=index + 1)
+            children = [self._required_job(child_id) for child_id in child_ids]
+            failed_names = [
+                title for child, (_, title) in zip(children, _ALL_JOB_STAGES, strict=True)
+                if child.status != "SUCCEEDED"
+            ]
+            success_count = len(children) - len(failed_names)
+            result_status = "SUCCEEDED" if not failed_names else "PARTIAL_SUCCESS" if success_count else "FAILED"
+            message = f"一键同步已结束：成功 {success_count} 项，未完成 {len(failed_names)} 项"
+            self._replace_job(
+                job_id, status=result_status, progress_message=message, current_fund_code=None,
+                error_code="SYNC_ALL_INCOMPLETE" if failed_names else None,
+                error_message=("未完成：" + "、".join(failed_names) + "。请查看对应任务详情并单独重试。")
+                if failed_names else None,
+                finished_at=datetime.now(UTC),
+            )
+            logger.info("sync_jobs._run_all >>> completed, job_id=%s, status=%s", job_id, result_status)
+        except Exception:
+            logger.exception("sync_jobs._run_all >>> batch failed, job_id=%s", job_id)
+            for child_id in self._batch_child_ids[job_id]:
+                if self._required_job(child_id).status in _ACTIVE_STATUSES:
+                    self._fail_job(child_id, "SYNC_ALL_INTERRUPTED", "一键同步中断，本项未完成，请单独重试。")
+            self._fail_job(job_id, "SYNC_ALL_FAILED", "一键同步未完整结束，请检查各项任务状态。")
+        finally:
+            with self._lock:
+                if self._active_job_id == job_id:
+                    self._active_job_id = None
+
+    def _snapshot(self, job_id: UUID | None) -> SyncJobSnapshot | None:
+        """调用方持有锁；批次进度附带当前子任务的真实步骤，不估算完成时间。"""
+        snapshot = self._jobs.get(job_id) if job_id else None
+        if snapshot and snapshot.job_type == MARKET_ALL_JOB_TYPE and snapshot.status in _ACTIVE_STATUSES:
+            for index, child_id in enumerate(self._batch_child_ids[job_id]):
+                child = self._jobs[child_id]
+                if child.status == "RUNNING":
+                    return replace(
+                        snapshot, current_fund_code=child.current_fund_code,
+                        progress_message=f"第 {index + 1}/{len(_ALL_JOB_STAGES)} 项 · {_ALL_JOB_STAGES[index][1]}："
+                        f"{child.progress_message}（{child.progress_current}/{child.progress_total} 步）",
+                    )
+        return snapshot
 
     def get_job(self, job_id: UUID) -> SyncJobSnapshot | None:
         """按任务标识读取最新进度。"""
         with self._lock:
-            return self._jobs.get(job_id)
+            return self._snapshot(job_id)
 
     def get_latest_job(self, job_type: str = MARKET_NAV_INCREMENTAL_JOB_TYPE) -> SyncJobSnapshot | None:
         """读取当前进程中指定类型最近一次创建的同步任务。"""
         with self._lock:
             job_id = self._latest_job_ids.get(job_type)
-            return self._jobs.get(job_id) if job_id else None
+            return self._snapshot(job_id)
 
     def close(self) -> None:
         """停止接受新任务；不阻断进行中的同步写库。"""
@@ -280,7 +271,7 @@ class LocalSyncJobManager:
         with Session(get_engine()) as session:
             return get_latest_successful_sync_time(session, sync_types=sync_types)
 
-    def _run_market_nav_incremental(self, job_id: UUID) -> None:
+    def _run_market_nav_incremental(self, job_id: UUID, *, build_features: bool = True) -> None:
         service: TushareFundSyncService | None = None
         self._replace_job(job_id, status="RUNNING", started_at=datetime.now(UTC), progress_message="正在准备同步")
         try:
@@ -290,6 +281,9 @@ class LocalSyncJobManager:
                     job_id, current, total, fund_code, message
                 ),
             )
+            if not build_features:
+                self._complete_job(job_id, outcome, completion_message="净值增量同步完成，特征将在批次末尾生成")
+                return
             self._record_source_outcome(job_id, outcome)
             try:
                 feature_summary = self._build_feature_snapshots(job_id)
@@ -332,11 +326,13 @@ class LocalSyncJobManager:
             logger.exception("sync_jobs._run_market_nav_incremental >>> unexpected task failure, job_id=%s", job_id)
             self._fail_job(job_id, "MARKET_SYNC_FAILED", "基金市场净值同步未完成，请稍后重试。")
         finally:
-            if service is not None:
-                service.close()
-            with self._lock:
-                if self._active_job_id == job_id:
-                    self._active_job_id = None
+            try:
+                if service is not None:
+                    service.close()
+            finally:
+                with self._lock:
+                    if self._active_job_id == job_id:
+                        self._active_job_id = None
 
     def _run_stock_feature_snapshots(self, job_id: UUID) -> None:
         """手动重试特征构建；来源未就绪时不写入、不伪造成功状态。"""
@@ -404,11 +400,13 @@ class LocalSyncJobManager:
             logger.exception("sync_jobs._run_market_details >>> unexpected task failure, job_id=%s", job_id)
             self._fail_job(job_id, "MARKET_DETAIL_SYNC_FAILED", "基金完整资料同步未完成，请稍后重试。")
         finally:
-            if service is not None:
-                service.close()
-            with self._lock:
-                if self._active_job_id == job_id:
-                    self._active_job_id = None
+            try:
+                if service is not None:
+                    service.close()
+            finally:
+                with self._lock:
+                    if self._active_job_id == job_id:
+                        self._active_job_id = None
 
     def _run_market_free_data_completion(self, job_id: UUID) -> None:
         """执行一次已验权数据补齐，并将父运行汇总映射为同步中心状态。"""
@@ -454,11 +452,13 @@ class LocalSyncJobManager:
             )
             self._fail_job(job_id, "FREE_DATA_SYNC_FAILED", "免费数据补齐未完成，请稍后重试。")
         finally:
-            if service is not None:
-                service.close()
-            with self._lock:
-                if self._active_job_id == job_id:
-                    self._active_job_id = None
+            try:
+                if service is not None:
+                    service.close()
+            finally:
+                with self._lock:
+                    if self._active_job_id == job_id:
+                        self._active_job_id = None
 
     def _update_progress(
         self, job_id: UUID, current: int, total: int, fund_code: str | None, message: str

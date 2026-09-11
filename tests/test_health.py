@@ -679,6 +679,7 @@ def test_internal_market_detail_sync_job_returns_progress_and_last_success(monke
     assert success_response.json() == [
         {"job_type": "MARKET_NAV_INCREMENTAL", "last_successful_at": None},
         {"job_type": "MARKET_DETAIL", "last_successful_at": "2026-08-27T12:00:00Z"},
+        {"job_type": "MARKET_FREE_DATA_COMPLETION", "last_successful_at": None},
     ]
     get_settings.cache_clear()
 

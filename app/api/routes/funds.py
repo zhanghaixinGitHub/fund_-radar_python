@@ -31,6 +31,7 @@ from app.services.fund_catalog_read import (
     list_funds,
 )
 from app.services.sync_jobs import (
+    MARKET_ALL_JOB_TYPE,
     MARKET_DETAIL_JOB_TYPE,
     MARKET_FREE_DATA_COMPLETION_JOB_TYPE,
     MARKET_NAV_INCREMENTAL_JOB_TYPE,
@@ -99,6 +100,39 @@ async def list_internal_fund_summaries_by_codes(
         len(fund_codes),
     )
     return get_funds_by_codes(tuple(fund_codes))
+
+
+@router.post(
+    "/sync-jobs/all",
+    response_model=InternalSyncJobStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_service_token)],
+)
+def start_internal_all_sync_jobs() -> InternalSyncJobStatus:
+    """由 Java 管理员入口创建后台串行批次，不等待任何来源请求完成。"""
+    try:
+        snapshot = get_sync_job_manager().start_all()
+        logger.info(
+            "funds.start_internal_all_sync_jobs >>> batch created, job_id=%s, trace_id=%s",
+            snapshot.job_id, get_trace_id(),
+        )
+    except SyncJobInProgressError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "MARKET_SYNC_IN_PROGRESS", "message": "已有同步任务正在执行，请结束后再一键同步。"},
+        ) from error
+    return _to_internal_sync_job_status(snapshot)
+
+
+@router.get(
+    "/sync-jobs/all/latest",
+    response_model=InternalSyncJobStatus | None,
+    dependencies=[Depends(require_service_token)],
+)
+def get_latest_internal_all_sync_jobs() -> InternalSyncJobStatus | None:
+    """页面刷新后恢复当前 Python 进程最近批次，不重新创建同步任务。"""
+    snapshot = get_sync_job_manager().get_latest_job(MARKET_ALL_JOB_TYPE)
+    return _to_internal_sync_job_status(snapshot) if snapshot else None
 
 
 @router.post(
