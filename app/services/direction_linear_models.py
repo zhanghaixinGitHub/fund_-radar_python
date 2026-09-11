@@ -7,6 +7,7 @@ from datetime import date
 
 from app.schemas.direction_market import MarketDirectionInput
 from app.schemas.direction_training import DirectionAnswer, DirectionInput
+from app.schemas.direction_volume import VolumeDirectionInput
 from app.services.direction_linear_protocol import (
     BRANCHES,
     COMBINATION_VERSION,
@@ -14,6 +15,7 @@ from app.services.direction_linear_protocol import (
     FULL_QUARTER_VERSIONS,
     MARKET_VERSION,
     REGULARIZATION_VERSION,
+    VOLUME_VERSION,
     fit_boundary,
     planned_dates,
     regularization_c,
@@ -46,8 +48,10 @@ def validate_job(payload):
     cal_end, exam_end = (date.fromisoformat(window[k]) for k in ("cal_end", "exam_end"))
     if not 1 <= len(payload["fit"]) <= 10000 or not 1 <= len(payload["exam"]) <= 10000:
         raise ValueError("LINEAR_ROW_BUDGET")
-    input_type = MarketDirectionInput if payload["version"] == MARKET_VERSION else DirectionInput
-    dimensions = 10 if payload["version"] == MARKET_VERSION and branch != "REFERENCE" else 7
+    input_type = {MARKET_VERSION: MarketDirectionInput, VOLUME_VERSION: VolumeDirectionInput}.get(
+        payload["version"], DirectionInput
+    )
+    dimensions = input_dimensions(payload["version"], branch)
     fit, identities = [], set()
     for row in payload["fit"]:
         if set(row) != {"input", "answer"}:
@@ -64,7 +68,7 @@ def validate_job(payload):
     exam = [input_type.model_validate(r) for r in payload["exam"]]
     if any(len(i.x) != dimensions for i in exam):
         raise ValueError("LINEAR_INPUT_DIMENSIONS")
-    if payload["version"] == MARKET_VERSION:
+    if payload["version"] in (MARKET_VERSION, VOLUME_VERSION):
         # 两个市场组都只能看到信息截止日前一交易日收盘，不能错用当日指数。
         calendar = load_calendar()
         if any(
@@ -87,6 +91,13 @@ def validate_job(payload):
     return fit, exam
 
 
+def input_dimensions(version, branch):
+    """新协议严格使用冻结的7/8/9或7/10维；旧删减实验仍接收原七列再选列。"""
+    if version in (MARKET_VERSION, VOLUME_VERSION):
+        return len(study_rules(version)[1][branch])
+    return 7
+
+
 def restore(model):
     fields = {
         "version",
@@ -102,14 +113,26 @@ def restore(model):
         "fit_end",
         "hash",
     }
-    if model.get("version") in (REGULARIZATION_VERSION, COMBINATION_VERSION, COVERAGE_VERSION, MARKET_VERSION):
+    if model.get("version") in (
+        REGULARIZATION_VERSION,
+        COMBINATION_VERSION,
+        COVERAGE_VERSION,
+        MARKET_VERSION,
+        VOLUME_VERSION,
+    ):
         fields |= {"C", "penalty", "solver_iterations"}
     if set(model) != fields:
         raise ValueError("LINEAR_MODEL_FIELDS")
     branches, feature_indices = study_rules(model["version"])
     if model["branch"] not in branches:
         raise ValueError("LINEAR_MODEL_VERSION")
-    if model["version"] in (REGULARIZATION_VERSION, COMBINATION_VERSION, COVERAGE_VERSION, MARKET_VERSION) and (
+    if model["version"] in (
+        REGULARIZATION_VERSION,
+        COMBINATION_VERSION,
+        COVERAGE_VERSION,
+        MARKET_VERSION,
+        VOLUME_VERSION,
+    ) and (
         model["C"] != regularization_c(model["version"], model["branch"])
         or model["penalty"] != "L2"
         or type(model["solver_iterations"]) is not int
@@ -136,7 +159,7 @@ def restore(model):
 
 def predict_model(model, items):
     model = restore(model)
-    dimensions = 10 if model["version"] == MARKET_VERSION and model["branch"] != "REFERENCE" else 7
+    dimensions = input_dimensions(model["version"], model["branch"])
     if any(len(i.x) != dimensions or (model["fund"] != "POOLED" and i.fund != model["fund"]) for i in items):
         raise ValueError("LINEAR_PREDICT_SCOPE")
     return [
@@ -203,7 +226,13 @@ def execute_job(payload):
             "train_counts": dict(counts),
             "fit_end": fit_boundary(payload["version"], branch, payload["window"]),
         }
-        if payload["version"] in (REGULARIZATION_VERSION, COMBINATION_VERSION, COVERAGE_VERSION, MARKET_VERSION):
+        if payload["version"] in (
+            REGULARIZATION_VERSION,
+            COMBINATION_VERSION,
+            COVERAGE_VERSION,
+            MARKET_VERSION,
+            VOLUME_VERSION,
+        ):
             model.update(
                 C=regularization_c(payload["version"], branch),
                 penalty="L2",

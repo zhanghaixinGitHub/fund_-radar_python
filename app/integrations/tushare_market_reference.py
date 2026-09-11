@@ -91,6 +91,16 @@ class TushareIndexDaily:
 
 
 @dataclass(frozen=True)
+class TushareIndexActivity:
+    """量价研究日线；成交额单位为千元，缺失保留 None，不按零或收盘价替代。"""
+
+    index_code: str
+    trade_date: date
+    close_price: Decimal
+    amount: Decimal | None
+
+
+@dataclass(frozen=True)
 class TushareIndexWeight:
     """一条指数成分股权重记录。"""
 
@@ -226,6 +236,35 @@ class TushareMarketReferenceClient:
         if item.index_code != index_code:
             raise TushareIntegrationError("index_basic", "single-index query returned another index")
         return item
+
+    def list_index_activity(
+        self, index_code: str, *, start_date: date, end_date: date
+    ) -> tuple[TushareIndexActivity, ...]:
+        """读取已批准指数的成交额，保留收盘价供旧快照核对；不改变旧价格接口返回类型。"""
+        if start_date > end_date:
+            raise ValueError("start_date must not be after end_date.")
+        rows = self._query(
+            "index_daily",
+            params={
+                "ts_code": index_code,
+                "start_date": start_date.strftime("%Y%m%d"),
+                "end_date": end_date.strftime("%Y%m%d"),
+            },
+            fields="ts_code,trade_date,close,amount",
+        )
+        self._ensure_not_truncated("index_daily", rows, index_code)
+        records = tuple(
+            TushareIndexActivity(
+                index_code=_required_text(r, "ts_code", "index_daily"),
+                trade_date=_required_date(r.get("trade_date"), "trade_date", "index_daily"),
+                close_price=_required_decimal(r.get("close"), "close", "index_daily"),
+                amount=_optional_decimal(r.get("amount"), "amount", "index_daily"),
+            )
+            for r in rows
+        )
+        if any(r.index_code != index_code for r in records):
+            raise TushareIntegrationError("index_daily", "activity response contains another index")
+        return tuple(sorted(records, key=lambda r: r.trade_date))
 
     def list_index_daily(self, index_code: str, *, start_date: date, end_date: date) -> tuple[TushareIndexDaily, ...]:
         """读取一条已批准指数的日线，返回代码必须与请求完全一致。"""

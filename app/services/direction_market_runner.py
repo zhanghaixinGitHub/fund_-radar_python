@@ -182,29 +182,33 @@ def acquire(folder):
     )
 
 
-def build_window(old_bundle, mapping, market, protocol, old_coverage):
+def build_window(old_bundle, mapping, market, protocol, old_coverage, *, augment_inputs=None):
     """仅处理原先已封存的训练标签和考试输入，三个分支严格使用相同题键。"""
     window = old_bundle["window"]
-    fit = {b: [] for b in MARKET_BRANCHES}
-    exam = {b: [] for b in MARKET_BRANCHES}
+    branches = tuple(protocol.get("branches", MARKET_BRANCHES))
+    fit = {b: [] for b in branches}
+    exam = {b: [] for b in branches}
     excluded = []
     for phase, rows in (("FIT", old_bundle["complete"]["fit"]), ("EXAM", old_bundle["complete"]["exam"]["CLEAN"])):
         for original in rows:
             item = original["input"] if phase == "FIT" else original
-            shared, error_b = data.augment(item, market["prices"][mapping["shared_index"]])
-            matched, error_c = data.augment(item, market["prices"][mapping["funds"][item["fund"]]["index_code"]])
+            if augment_inputs is None:
+                shared, error_b = data.augment(item, market["prices"][mapping["shared_index"]])
+                matched, error_c = data.augment(item, market["prices"][mapping["funds"][item["fund"]]["index_code"]])
+            else:
+                shared, matched, error_b, error_c = augment_inputs(item, mapping, market)
             if error_b or error_c:
                 excluded.append(
                     {
                         "phase": phase,
                         "fund": item["fund"],
                         "cutoff": item["cutoff"],
-                        "SHARED_MARKET": error_b,
-                        "MATCHED_MARKET": error_c,
+                        branches[1]: error_b,
+                        branches[2]: error_c,
                     }
                 )
                 continue
-            inputs = dict(zip(MARKET_BRANCHES, (item, shared, matched), strict=True))
+            inputs = dict(zip(branches, (item, shared, matched), strict=True))
             for branch, value in inputs.items():
                 if phase == "FIT":
                     fit[branch].append({"input": value, "answer": original["answer"]})
@@ -221,8 +225,14 @@ def build_window(old_bundle, mapping, market, protocol, old_coverage):
         for f in FUNDS
     )
     jobs = {
-        b: {"version": MARKET_VERSION, "branch": b, "window": window, "fit": fit[b], "exam": exam[b]}
-        for b in MARKET_BRANCHES
+        b: {
+            "version": protocol.get("version", MARKET_VERSION),
+            "branch": b,
+            "window": window,
+            "fit": fit[b],
+            "exam": exam[b],
+        }
+        for b in branches
     }
     if ready:
         for job in jobs.values():
@@ -232,7 +242,7 @@ def build_window(old_bundle, mapping, market, protocol, old_coverage):
             "fit": [(r["input"]["fund"], r["input"]["cutoff"]) for r in fit[b]],
             "exam": [(r["fund"], r["cutoff"]) for r in exam[b]],
         }
-        for b in MARKET_BRANCHES
+        for b in branches
     }
     if len({digest(v) for v in keys.values()}) != 1:
         raise ValueError("MARKET_COMMON_INPUT_KEYS_CHANGED")
@@ -277,7 +287,7 @@ def prepare(folder):
     )
 
 
-def window_predictions(bundle, outputs):
+def window_predictions(bundle, outputs, *, branches=MARKET_BRANCHES):
     """完整计划日期保留；缺输入或作业失败不删题，简单对照使用相同训练样本。"""
     index = {}
     for branch, result in outputs.items():
@@ -300,7 +310,7 @@ def window_predictions(bundle, outputs):
         for branch, score in scores.items():
             index[(branch, item["fund"], item["cutoff"])] = (score, item["input_hash"])
     result = []
-    for branch in (*MARKET_BRANCHES, *BASELINES):
+    for branch in (*branches, *BASELINES):
         for fund in FUNDS:
             for cutoff in bundle["planned"]:
                 value, identity = index.get((branch, fund, cutoff), (None, None))
@@ -402,7 +412,8 @@ def all_predictions(folder, protocol):
 def diagnostics(protocol, predictions, answers):
     answer_map = {(r["window"], r["sample_key"]): r["answer"] for r in answers}
     windows = {w["name"]: w for w in protocol["windows"]}
-    rows = {b: {} for b in MARKET_BRANCHES}
+    branches = tuple(protocol["branches"])
+    rows = {b: {} for b in branches}
     for p in predictions:
         a = answer_map[(p["window"], p["sample_key"])]
         if (
@@ -418,7 +429,9 @@ def diagnostics(protocol, predictions, answers):
             }
     common = set.intersection(*(set(v) for v in rows.values()))
     blocks, _ = complete_blocks(
-        protocol, common, planned_by_window={w["name"]: planned_dates(MARKET_VERSION, w) for w in protocol["windows"]}
+        protocol,
+        common,
+        planned_by_window={w["name"]: planned_dates(protocol["version"], w) for w in protocol["windows"]},
     )
     errors, changes = {}, {}
     for branch, values in rows.items():
@@ -431,25 +444,25 @@ def diagnostics(protocol, predictions, answers):
                 "missed_up": sum(r["y"] == 1 and r["predicted_up"] == 0 for r in group),
                 "false_up": sum(r["y"] == 0 and r["predicted_up"] == 1 for r in group),
             }
-    for right in ("REFERENCE", "SHARED_MARKET"):
+    for right in branches[:2]:
         changes[right] = {
             f: {
                 "wrong_to_right": sum(
-                    rows[right][k]["correct"] == 0 and rows["MATCHED_MARKET"][k]["correct"] == 1
+                    rows[right][k]["correct"] == 0 and rows[branches[2]][k]["correct"] == 1
                     for k in common
                     if rows[right][k]["fund"] == f
                 ),
                 "right_to_wrong": sum(
-                    rows[right][k]["correct"] == 1 and rows["MATCHED_MARKET"][k]["correct"] == 0
+                    rows[right][k]["correct"] == 1 and rows[branches[2]][k]["correct"] == 0
                     for k in common
                     if rows[right][k]["fund"] == f
                 ),
             }
             for f in FUNDS
         }
-    cb = paired_interval(protocol, blocks, rows["MATCHED_MARKET"], rows["SHARED_MARKET"])
-    left = grouped_metrics([rows["MATCHED_MARKET"][k] for k in sorted(common)], FUNDS)
-    right = grouped_metrics([rows["SHARED_MARKET"][k] for k in sorted(common)], FUNDS)
+    cb = paired_interval(protocol, blocks, rows[branches[2]], rows[branches[1]])
+    left = grouped_metrics([rows[branches[2]][k] for k in sorted(common)], FUNDS)
+    right = grouped_metrics([rows[branches[1]][k] for k in sorted(common)], FUNDS)
     return {
         "same_questions": len(common),
         "errors": errors,
