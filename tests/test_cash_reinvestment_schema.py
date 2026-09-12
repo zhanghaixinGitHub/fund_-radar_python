@@ -11,7 +11,9 @@ TABLES = (CashSampleBatch.__table__, CashSampleRecord.__table__, CashSampleLabel
 
 def test_cash_migration_is_single_head():
     script = ScriptDirectory(str(ROOT / "alembic"))
-    assert script.get_heads() == ["20260909_19"]
+    # 允许后续模块追加迁移，但不允许产生并行head或断开现金研究迁移链。
+    assert len(script.get_heads()) == 1
+    assert "20260909_19" in {revision.revision for revision in script.walk_revisions()}
     assert migration_module().down_revision == "20260907_13"
 
 

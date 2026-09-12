@@ -6,6 +6,7 @@ from app.api.routes.analysis import router as analysis_router
 from app.api.routes.cash_reinvestment_batch import router as cash_reinvestment_batch_router
 from app.api.routes.cash_reinvestment_samples import router as cash_reinvestment_samples_router
 from app.api.routes.cash_reinvestment_storage import router as cash_reinvestment_storage_router
+from app.api.routes.direction_1d import router as direction_1d_router
 from app.api.routes.events import router as events_router
 from app.api.routes.features import router as features_router
 from app.api.routes.funds import router as funds_router
@@ -24,6 +25,7 @@ from app.api.routes.watchlist_prediction import router as watchlist_prediction_r
 
 """内部 API 根路由；由应用入口统一加上 `/internal/v1` 前缀。"""
 api_router = APIRouter()
+api_router.include_router(direction_1d_router, prefix="/direction-1d", tags=["direction-1d"])
 api_router.include_router(portfolio_advice_router, prefix="/portfolio-advice", tags=["portfolio-advice"])
 api_router.include_router(simulation_market_router, prefix="/simulation", tags=["simulation-market"])
 

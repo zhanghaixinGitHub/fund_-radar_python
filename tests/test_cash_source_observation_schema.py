@@ -27,7 +27,8 @@ def test_model_and_migration_match_and_never_backfill():
 
     migration = migration_module()
     assert migration.down_revision == "20260909_18"
-    assert ScriptDirectory(str(ROOT / "alembic")).get_heads() == ["20260909_19"]
+    # 后续独立模块可追加迁移；仍要求唯一主线，并保留本迁移自身的上下游断言。
+    assert len(ScriptDirectory(str(ROOT / "alembic")).get_heads()) == 1
     recorder = Recorder()
     migration.op = recorder
     migration.upgrade()
