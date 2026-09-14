@@ -62,7 +62,7 @@ def infer(code: str) -> dict:
         ps = repo.profiles(c, [code])
         if not ps:
             raise ValueError("SOURCE_UNAVAILABLE")
-        mapping = classify(ps[0])
+        mapping = classify(ps[0], prediction=True)
         if not mapping["group_id"]:
             raise ValueError(mapping["classification_reason"])
         all_models = [m for m in repo.models(c) if m["group_id"] == mapping["group_id"]]
@@ -128,6 +128,8 @@ def infer(code: str) -> dict:
             key = f"{PROTOCOL}:{cohort}:{code}:{w['target_nav_date']}"
             snapshot = {
                 "fund_code": code,
+                # 保存当时准入依据；旧预测原文保持不变，不用后来规则重解释旧记录。
+                "group_evidence": mapping["group_evidence"],
                 "target_definition": TARGET,
                 "feature_version": FEATURE_VERSION,
                 "base_nav_date": w["base_nav_date"],

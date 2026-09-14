@@ -13,7 +13,13 @@ from app.services.tushare_free_data_completion import FreeDataCompletionResult
 from app.services.tushare_fund_sync import MarketDetailSyncResult, SyncOutcome
 from fastapi.testclient import TestClient
 
-STAGES = ("MARKET_DETAIL", "MARKET_FREE_DATA_COMPLETION", "MARKET_NAV_INCREMENTAL", "STOCK_FEATURE_SNAPSHOT")
+STAGES = (
+    "SPX_MANUAL",
+    "MARKET_DETAIL",
+    "MARKET_FREE_DATA_COMPLETION",
+    "MARKET_NAV_INCREMENTAL",
+    "STOCK_FEATURE_SNAPSHOT",
+)
 
 
 def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambda _: None):
@@ -29,11 +35,11 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
         stage = None
 
         def sync_market_details(self, *, progress_reporter):
-            self.stage = STAGES[0]
+            self.stage = "MARKET_DETAIL"
             return MarketDetailSyncResult(run(self.stage, progress_reporter), ())
 
         def sync_market_nav_incremental(self, *, progress_reporter):
-            self.stage = STAGES[2]
+            self.stage = "MARKET_NAV_INCREMENTAL"
             return run(self.stage, progress_reporter)
 
         def close(self):
@@ -41,21 +47,38 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
 
     class FreeService:
         def sync(self, *, progress_reporter):
-            return FreeDataCompletionResult(run(STAGES[1], progress_reporter), ())
+            return FreeDataCompletionResult(run("MARKET_FREE_DATA_COMPLETION", progress_reporter), ())
 
         def close(self):
-            close_hook(STAGES[1])
+            close_hook("MARKET_FREE_DATA_COMPLETION")
 
     class FeatureService:
         def build(self, *, progress_reporter):
-            run(STAGES[3], progress_reporter)
+            run("STOCK_FEATURE_SNAPSHOT", progress_reporter)
             return StockFeatureBuildSummary(
-                status="COMPLETED", source_code="TUSHARE_PRO_FUND", source_sync_run_id=uuid4(),
-                attempted_fund_count=2, scorable_count=1, data_insufficient_count=1, no_nav_count=0,
-                created_count=1, updated_count=0, skipped_count=1,
+                status="COMPLETED",
+                source_code="TUSHARE_PRO_FUND",
+                source_sync_run_id=uuid4(),
+                attempted_fund_count=2,
+                scorable_count=1,
+                data_insufficient_count=1,
+                no_nav_count=0,
+                created_count=1,
+                updated_count=0,
+                skipped_count=1,
             )
 
-    return LocalSyncJobManager(FundService, FeatureService, FreeService)
+    def spx_sync():
+        calls.append("SPX_MANUAL")
+        stage_hook("SPX_MANUAL")
+        if "SPX_MANUAL" in failures:
+            return {"performedNow": False, "message": "模拟每日次数受限"}
+        return {
+            "performedNow": True,
+            "lastAttempt": {"state": "REFERENCE_ONLY", "rowCount": 2, "message": "非交易日资料参考，不能计为早间输入"},
+        }
+
+    return LocalSyncJobManager(FundService, FeatureService, FreeService, spx_sync)
 
 
 def wait_finished(manager, job_id):
@@ -78,8 +101,8 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
         started = manager.start_all()
         result = wait_finished(manager, started.job_id)
         assert calls == list(STAGES)  # 特征只在全部来源完成后生成一次。
-        assert result.status == ("SUCCEEDED" if not failures else "FAILED" if len(failures) == 4 else "PARTIAL_SUCCESS")
-        assert (result.progress_current, result.progress_total) == (4, 4)
+        assert result.status == ("SUCCEEDED" if not failures else "FAILED" if len(failures) == 5 else "PARTIAL_SUCCESS")
+        assert (result.progress_current, result.progress_total) == (5, 5)
         assert result.started_at and result.finished_at
         assert manager.get_latest_job(MARKET_ALL_JOB_TYPE) == result
         assert bool(result.error_message) == bool(failures)
@@ -87,11 +110,37 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
             child = manager.get_latest_job(stage)
             assert child.status == ("FAILED" if stage in failures else "SUCCEEDED")
             assert child.started_at and child.finished_at
-            if stage not in failures:
+            if stage not in failures and stage != "SPX_MANUAL":
                 assert child.sync_run_id is not None
         next_batch = manager.start_all()
         assert next_batch.job_id != started.job_id
         wait_finished(manager, next_batch.job_id)
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize(
+    ("performed", "state", "expected"),
+    [
+        (False, "ON_TIME", "FAILED"),  # 旧成功不能冒充本次额度受限后的新请求。
+        (True, "LATE", "SUCCEEDED"),  # 晚到可算资料同步成功，不能更改原回执的时间资格。
+        (True, "INCOMPLETE", "FAILED"),
+    ],
+)
+def test_spx_batch_preserves_actual_attempt_and_timing_result(performed, state, expected):
+    calls = []
+    manager = make_manager(calls)
+    manager._spx_synchronizer = lambda: {
+        "performedNow": performed,
+        "message": "本轮未请求",
+        "lastAttempt": {"state": state, "message": "原时间状态保持", "rowCount": 2, "usableBeforeU08": False},
+    }
+    try:
+        result = wait_finished(manager, manager.start_all().job_id)
+        assert manager.get_latest_job("SPX_MANUAL").status == expected
+        assert calls == list(STAGES[1:])
+        assert result.progress_current == result.progress_total == 5
+        assert result.status == ("SUCCEEDED" if expected == "SUCCEEDED" else "PARTIAL_SUCCESS")
     finally:
         manager.close()
 
@@ -113,14 +162,17 @@ def test_batch_holds_exclusion_across_every_stage_and_restores_live_progress():
             assert parent.job_id == started.job_id
             assert parent.status == "RUNNING"
             assert parent.progress_current == index
-            assert parent.current_fund_code == "000001.OF"
-            assert "1/2" in parent.progress_message
+            assert parent.current_fund_code == (None if stage == "SPX_MANUAL" else "000001.OF")
+            assert ("0/1" if stage == "SPX_MANUAL" else "1/2") in parent.progress_message
             assert manager.get_latest_job(stage).status == "RUNNING"
-            for next_stage in STAGES[index + 1:]:
+            for next_stage in STAGES[index + 1 :]:
                 assert manager.get_latest_job(next_stage).status == "QUEUED"
             for start in (
-                manager.start_all, manager.start_market_details, manager.start_market_free_data_completion,
-                manager.start_market_nav_incremental, manager.start_stock_feature_snapshots,
+                manager.start_all,
+                manager.start_market_details,
+                manager.start_market_free_data_completion,
+                manager.start_market_nav_incremental,
+                manager.start_stock_feature_snapshots,
             ):
                 with pytest.raises(SyncJobInProgressError):
                     start()
@@ -136,7 +188,7 @@ def test_running_single_job_rejects_batch_and_cleanup_failure_does_not_drop_late
     entered, release = Event(), Event()
 
     def hold_close(stage):
-        if stage == STAGES[0]:
+        if stage == "MARKET_DETAIL":
             entered.set()
             assert release.wait(3)
 
@@ -156,14 +208,14 @@ def test_running_single_job_rejects_batch_and_cleanup_failure_does_not_drop_late
     calls = []
 
     def failing_close(stage):
-        if stage == STAGES[0]:
+        if stage == "MARKET_DETAIL":
             raise RuntimeError("test close failure")
 
     manager = make_manager(calls, close_hook=failing_close)
     try:
         result = wait_finished(manager, manager.start_all().job_id)
         assert result.status == "PARTIAL_SUCCESS"
-        assert manager.get_latest_job(STAGES[0]).error_code == "SYNC_STAGE_FAILED"
+        assert manager.get_latest_job("MARKET_DETAIL").error_code == "SYNC_STAGE_FAILED"
         assert calls == list(STAGES)
     finally:
         manager.close()

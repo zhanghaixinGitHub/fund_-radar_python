@@ -11,8 +11,13 @@ from app.services.direction_1d_protocol import calendar, digest, features, input
 from app.services.direction_1d_selection import available_at_prediction
 
 
-def classify(p: dict) -> dict:
-    """正向核验境内基准；跨境成分、商品、FOF等保留独立原因，不用名称作准入正证据。"""
+def classify(p: dict, *, prediction: bool = False) -> dict:
+    """按可信档案选择资产组，日常预测不再要求基准文字命中指定关键词。
+
+    prediction=True 仅用于当前覆盖检查和真实预测：保留来源、运作状态、产品身份与
+    特殊投向限制，并返回具体缺口。默认仍采用原研究规则，避免改变已冻结的训练范围。
+    基准只用于识别已知的跨境/商品暴露；它不是七项净值特征的计算输入。
+    """
     description = " ".join(str(p.get(k) or "") for k in ("fund_name", "source_fund_type", "invest_type", "benchmark"))
     reason, group = None, None
     if re.search(
@@ -23,11 +28,11 @@ def classify(p: dict) -> dict:
         reason = "SPECIAL_POLICY_REQUIRED"
     elif not p.get("profile_hash") or p.get("source_code") != "TUSHARE_PRO_FUND" or p.get("status") != "ACTIVE":
         reason = "GROUP_UNVERIFIED"
-    elif not re.search(
+    elif not prediction and not re.search(
         r"沪深|中证|国证|中国A股|上证|上海证券|中国债|申银万国|中债|iBoxx亚债基金中国指数", p.get("benchmark") or ""
     ):
         reason = "GROUP_UNVERIFIED"
-    elif p["fund_type"] in {"STOCK", "MIXED", "BOND"}:
+    elif p.get("fund_type") in {"STOCK", "MIXED", "BOND"}:
         group = {"STOCK": "CN_EQUITY", "MIXED": "CN_MIXED", "BOND": "CN_BOND"}[p["fund_type"]]
     else:
         reason = "SPECIAL_POLICY_REQUIRED"
@@ -35,7 +40,7 @@ def classify(p: dict) -> dict:
     family = str(p["fund_master_id"]) if p.get("fund_master_id") and p.get("master_name") else None
     if not family:
         reason, group = "GROUP_UNVERIFIED", None
-    return {
+    result = {
         "group_id": group,
         "product_family_id": family,
         "classification_reason": reason,
@@ -44,12 +49,35 @@ def classify(p: dict) -> dict:
             "profile_hash": p.get("profile_hash"),
             "benchmark": p.get("benchmark"),
             "invest_type": p.get("invest_type"),
-            "rule": "DOMESTIC_BENCHMARK_ASSET_TYPE_V1",
+            "rule": "PROFILE_ASSET_TYPE_V2" if prediction else "DOMESTIC_BENCHMARK_ASSET_TYPE_V1",
             "historical_mapping_evidence": "CURRENT_PROFILE_ASSUMED",
         },
         "currency": "CNY" if group else "UNVERIFIED",
         "cross_border": reason == "SPECIAL_POLICY_REQUIRED",
     }
+    if prediction:
+        # 原状态码继续用于兼容 Java；附加原因让页面解释每只基金具体卡在哪里。
+        details = []
+        for pattern, code in (
+            (r"QDII|美元|港元|港股|恒生|海外|越南|日本|纳斯达克|全球|标普石油", "CROSS_MARKET_MODEL_REQUIRED"),
+            (r"黄金|原油|商品|标普石油", "COMMODITY_MODEL_REQUIRED"),
+            (r"FOF", "FOF_MODEL_REQUIRED"),
+            (r"货币", "MONEY_MARKET_TARGET_REQUIRED"),
+            (r"REIT", "REIT_MODEL_REQUIRED"),
+        ):
+            if re.search(pattern, description, re.I):
+                details.append(code)
+        if not p.get("profile_hash") or p.get("source_code") != "TUSHARE_PRO_FUND":
+            details.append("PROFILE_SOURCE_UNVERIFIED")
+        if p.get("status") != "ACTIVE":
+            details.append("FUND_NOT_ACTIVE")
+        if not family:
+            details.append("PRODUCT_IDENTITY_UNVERIFIED")
+        if reason == "SPECIAL_POLICY_REQUIRED" and not details:
+            details.append("ASSET_MODEL_UNSUPPORTED")
+        result["classification_details"] = details
+        result["cross_border"] = "CROSS_MARKET_MODEL_REQUIRED" in details
+    return result
 
 
 def inventory(codes: list[str], now: datetime | None = None) -> dict:
@@ -104,7 +132,7 @@ def inventory(codes: list[str], now: datetime | None = None) -> dict:
                     }
                 )
                 continue
-            mapping = classify(p)
+            mapping = classify(p, prediction=True)
             rows = repo.navs(c, code, source["source_id"], wanted[0], wanted[-1])
             points = {r["nav_date"]: r for r in rows}
             missing = [str(d) for d in wanted if d not in points]
@@ -117,7 +145,11 @@ def inventory(codes: list[str], now: datetime | None = None) -> dict:
                 .mappings()
                 .one()
             )
-            reasons = [mapping["classification_reason"]] if mapping["classification_reason"] else []
+            reasons = (
+                [mapping["classification_reason"], *mapping["classification_details"]]
+                if mapping["classification_reason"]
+                else []
+            )
             if counts["count"] < 61:
                 reasons.append("HISTORY_TOO_SHORT")
             elif missing:

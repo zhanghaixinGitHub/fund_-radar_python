@@ -20,6 +20,7 @@ from app.db.session import get_engine
 from app.integrations.tushare import TushareIntegrationError
 from app.repositories.fund_sync import get_latest_successful_sync_time
 from app.repositories.market_reference_sync import SourceCapabilityError
+from app.services.direction_1d_spx_manual import synchronize as synchronize_spx
 from app.services.stock_feature_snapshot import (
     FeatureSnapshotBuildInProgressError,
     StockFeatureBuildSummary,
@@ -45,7 +46,10 @@ MARKET_NAV_INCREMENTAL_JOB_TYPE = "MARKET_NAV_INCREMENTAL"
 MARKET_DETAIL_JOB_TYPE = "MARKET_DETAIL"
 STOCK_FEATURE_SNAPSHOT_JOB_TYPE = "STOCK_FEATURE_SNAPSHOT"
 MARKET_FREE_DATA_COMPLETION_JOB_TYPE = "MARKET_FREE_DATA_COMPLETION"
+SPX_MANUAL_JOB_TYPE = "SPX_MANUAL"
 _ALL_JOB_STAGES = (
+    # SPX有早上08:00的观测边界，先取这一小份数据，避免被较长的全市场同步拖到截止后。
+    (SPX_MANUAL_JOB_TYPE, "标普500"),
     (MARKET_DETAIL_JOB_TYPE, "完整资料"),
     (MARKET_FREE_DATA_COMPLETION_JOB_TYPE, "免费数据补齐"),
     (MARKET_NAV_INCREMENTAL_JOB_TYPE, "净值增量"),
@@ -109,10 +113,12 @@ class LocalSyncJobManager:
         service_factory: SyncServiceFactory = TushareFundSyncService,
         feature_service_factory: FeatureServiceFactory = StockFeatureSnapshotService,
         free_data_completion_service_factory: FreeDataCompletionServiceFactory = TushareFreeDataCompletionService,
+        spx_synchronizer: Callable[[], dict] = synchronize_spx,
     ) -> None:
         self._service_factory = service_factory
         self._feature_service_factory = feature_service_factory
         self._free_data_completion_service_factory = free_data_completion_service_factory
+        self._spx_synchronizer = spx_synchronizer
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fund-sync-job")
         self._jobs: dict[UUID, SyncJobSnapshot] = {}
         self._latest_job_ids: dict[str, UUID] = {}
@@ -138,13 +144,13 @@ class LocalSyncJobManager:
         return self._start_job(MARKET_FREE_DATA_COMPLETION_JOB_TYPE, self._run_market_free_data_completion)
 
     def start_all(self) -> SyncJobSnapshot:
-        """原子登记整个批次及四个子任务，后台串行执行且不依赖浏览器存活。"""
+        """原子登记五个子任务；先同步SPX，再保持原四项顺序，后台运行不依赖浏览器存活。"""
         with self._lock:
             self._require_idle()
             parent = replace(
                 self._new_job(MARKET_ALL_JOB_TYPE),
                 progress_total=len(_ALL_JOB_STAGES),
-                progress_message="一键同步已创建，等待依次执行四类任务",
+                progress_message="一键同步已创建，等待依次执行五类任务",
             )
             children = tuple(self._new_job(job_type) for job_type, _ in _ALL_JOB_STAGES)
             for snapshot in (parent, *children):
@@ -165,11 +171,24 @@ class LocalSyncJobManager:
     @staticmethod
     def _new_job(job_type: str) -> SyncJobSnapshot:
         return SyncJobSnapshot(
-            job_id=uuid4(), job_type=job_type, status="QUEUED", requested_nav_date=date.today(),
-            fund_codes=(), progress_current=0, progress_total=0, current_fund_code=None,
-            progress_message="任务已创建，等待执行", sync_run_id=None,
-            fetched_count=0, created_count=0, updated_count=0, skipped_count=0,
-            error_code=None, error_message=None, started_at=None, finished_at=None,
+            job_id=uuid4(),
+            job_type=job_type,
+            status="QUEUED",
+            requested_nav_date=date.today(),
+            fund_codes=(),
+            progress_current=0,
+            progress_total=0,
+            current_fund_code=None,
+            progress_message="任务已创建，等待执行",
+            sync_run_id=None,
+            fetched_count=0,
+            created_count=0,
+            updated_count=0,
+            skipped_count=0,
+            error_code=None,
+            error_message=None,
+            started_at=None,
+            finished_at=None,
         )
 
     def _start_job(self, job_type: str, runner: Callable[[UUID], None]) -> SyncJobSnapshot:
@@ -186,6 +205,7 @@ class LocalSyncJobManager:
         """失败不掩盖成功事实；尝试每项一次，最后统一汇总结果。"""
         self._replace_job(job_id, status="RUNNING", started_at=datetime.now(UTC))
         runners = (
+            self._run_spx_manual,
             self._run_market_details,
             self._run_market_free_data_completion,
             lambda child_id: self._run_market_nav_incremental(child_id, build_features=False),
@@ -205,17 +225,22 @@ class LocalSyncJobManager:
                 self._replace_job(job_id, progress_current=index + 1)
             children = [self._required_job(child_id) for child_id in child_ids]
             failed_names = [
-                title for child, (_, title) in zip(children, _ALL_JOB_STAGES, strict=True)
+                title
+                for child, (_, title) in zip(children, _ALL_JOB_STAGES, strict=True)
                 if child.status != "SUCCEEDED"
             ]
             success_count = len(children) - len(failed_names)
             result_status = "SUCCEEDED" if not failed_names else "PARTIAL_SUCCESS" if success_count else "FAILED"
             message = f"一键同步已结束：成功 {success_count} 项，未完成 {len(failed_names)} 项"
             self._replace_job(
-                job_id, status=result_status, progress_message=message, current_fund_code=None,
+                job_id,
+                status=result_status,
+                progress_message=message,
+                current_fund_code=None,
                 error_code="SYNC_ALL_INCOMPLETE" if failed_names else None,
                 error_message=("未完成：" + "、".join(failed_names) + "。请查看对应任务详情并单独重试。")
-                if failed_names else None,
+                if failed_names
+                else None,
                 finished_at=datetime.now(UTC),
             )
             logger.info("sync_jobs._run_all >>> completed, job_id=%s, status=%s", job_id, result_status)
@@ -238,7 +263,8 @@ class LocalSyncJobManager:
                 child = self._jobs[child_id]
                 if child.status == "RUNNING":
                     return replace(
-                        snapshot, current_fund_code=child.current_fund_code,
+                        snapshot,
+                        current_fund_code=child.current_fund_code,
                         progress_message=f"第 {index + 1}/{len(_ALL_JOB_STAGES)} 项 · {_ALL_JOB_STAGES[index][1]}："
                         f"{child.progress_message}（{child.progress_current}/{child.progress_total} 步）",
                     )
@@ -333,6 +359,34 @@ class LocalSyncJobManager:
                 with self._lock:
                     if self._active_job_id == job_id:
                         self._active_job_id = None
+
+    def _run_spx_manual(self, job_id: UUID) -> None:
+        """与独立按钮共享真实时钟、文件锁和每日预算；旧成功记录不能冒充本批次新取数。"""
+        self._replace_job(
+            job_id,
+            status="RUNNING",
+            started_at=datetime.now(UTC),
+            progress_total=1,
+            progress_message="正在获取并保存标普500行情",
+        )
+        # synchronize返回安全状态；异常由批次外层记录为本项失败，后续四项仍继续。
+        result = self._spx_synchronizer()
+        attempt = result.get("lastAttempt") or {}
+        if not result.get("performedNow"):
+            self._fail_job(job_id, "SPX_NOT_EXECUTED", result.get("message") or "标普500本次未执行，请查看采集状态。")
+            return
+        if attempt.get("state") not in {"ON_TIME", "LATE", "REFERENCE_ONLY"}:
+            self._fail_job(job_id, "SPX_SYNC_INCOMPLETE", attempt.get("message") or "标普500所需行情未完整取得。")
+            return
+        # 同步成功与早间输入合格分开：晚到、非交易日可算取数成功，资格由SPX详情回执说明。
+        self._replace_job(
+            job_id,
+            status="SUCCEEDED",
+            progress_current=1,
+            fetched_count=attempt["rowCount"],
+            finished_at=datetime.now(UTC),
+            progress_message=attempt["message"],
+        )
 
     def _run_stock_feature_snapshots(self, job_id: UUID) -> None:
         """手动重试特征构建；来源未就绪时不写入、不伪造成功状态。"""
@@ -460,9 +514,7 @@ class LocalSyncJobManager:
                     if self._active_job_id == job_id:
                         self._active_job_id = None
 
-    def _update_progress(
-        self, job_id: UUID, current: int, total: int, fund_code: str | None, message: str
-    ) -> None:
+    def _update_progress(self, job_id: UUID, current: int, total: int, fund_code: str | None, message: str) -> None:
         self._replace_job(
             job_id,
             progress_current=current,
@@ -491,9 +543,7 @@ class LocalSyncJobManager:
             progress_message="基金市场净值同步完成，正在生成特征快照",
         )
 
-    def _complete_job(
-        self, job_id: UUID, outcome: SyncOutcome, *, completion_message: str = "同步完成"
-    ) -> None:
+    def _complete_job(self, job_id: UUID, outcome: SyncOutcome, *, completion_message: str = "同步完成") -> None:
         snapshot = self._required_job(job_id)
         self._replace_job(
             job_id,

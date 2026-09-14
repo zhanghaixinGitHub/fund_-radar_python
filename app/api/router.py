@@ -20,11 +20,13 @@ from app.api.routes.portfolio_advice import router as portfolio_advice_router
 from app.api.routes.signals import router as signals_router
 from app.api.routes.simulation_market import router as simulation_market_router
 from app.api.routes.sources import router as sources_router
+from app.api.routes.spx_manual import router as spx_manual_router
 from app.api.routes.trading_nav_window import router as trading_nav_window_router
 from app.api.routes.watchlist_prediction import router as watchlist_prediction_router
 
 """内部 API 根路由；由应用入口统一加上 `/internal/v1` 前缀。"""
 api_router = APIRouter()
+api_router.include_router(spx_manual_router, prefix="/spx-manual", tags=["spx-manual"])
 api_router.include_router(direction_1d_router, prefix="/direction-1d", tags=["direction-1d"])
 api_router.include_router(portfolio_advice_router, prefix="/portfolio-advice", tags=["portfolio-advice"])
 api_router.include_router(simulation_market_router, prefix="/simulation", tags=["simulation-market"])
