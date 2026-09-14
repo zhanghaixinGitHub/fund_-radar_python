@@ -1,0 +1,16 @@
+{
+  "calendar_id": "NYSE_CASH_2025_SPRINT_V1",
+  "timezone": "America/New_York",
+  "start": "2025-01-01",
+  "end": "2025-12-31",
+  "regular_close": "16:00",
+  "early_close": "13:00",
+  "sources": [
+    "https://ir.theice.com/press/news-details/2023/NYSE-Group-Announces-2024-2025-and-2026-Holiday-and-Early-Closings-Calendar/default.aspx",
+    "https://ir.theice.com/press/news-details/2024/The-New-York-Stock-Exchange-Will-Close-Markets-on-January-9-to-Honor-the-Passing-of-Former-President-Jimmy-Carter-on-National-Day-of-Mourning/default.aspx"
+  ],
+  "verified_on": "2026-09-14",
+  "note": "股票现金市场，含2025年1月9日临时休市；证明市场收盘事件，不证明供应商发布时刻。",
+  "holidays": ["2025-01-01", "2025-01-09", "2025-01-20", "2025-02-17", "2025-04-18", "2025-05-26", "2025-06-19", "2025-07-04", "2025-09-01", "2025-11-27", "2025-12-25"],
+  "early_closes": ["2025-07-03", "2025-11-28", "2025-12-24"]
+}
