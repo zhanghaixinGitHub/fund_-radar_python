@@ -7,10 +7,24 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
 from app.api.dependencies import require_service_token
 from app.repositories.historical_nav import HistoricalNavPreviewReadError
-from app.schemas.portfolio_advice import AdviceOutcome
-from app.services.portfolio_advice import get_advice_outcome
+from app.schemas.portfolio_advice import AdviceOutcome, DiagnosisFacts
+from app.services.portfolio_advice import get_advice_outcome, get_diagnosis_facts
 
 router = APIRouter(dependencies=[Depends(require_service_token)])
+
+
+@router.get("/{fund_code}/diagnosis-facts", response_model=DiagnosisFacts)
+def diagnosis_facts(
+    fund_code: Annotated[str, Path(pattern=r"^[0-9]{6}$")],
+    as_of_date: Annotated[date | None, Query(alias="asOfDate")] = None,
+) -> DiagnosisFacts:
+    """七项持仓诊断的公共事实；只读、不含用户身份，基线对比由 Java 报告侧完成。"""
+    try:
+        return get_diagnosis_facts(fund_code, as_of_date)
+    except HistoricalNavPreviewReadError as error:
+        if error.code == "FUND_NOT_FOUND":
+            raise HTTPException(404, "数据库中没有这只基金。") from error
+        raise HTTPException(503, "基金来源资料暂时无法核验。") from error
 
 
 @router.get("/{fund_code}/outcome", response_model=AdviceOutcome)
