@@ -6,6 +6,7 @@ alembic==1.19.1
 psycopg[binary]==3.3.4
 celery[redis]==5.6.3
 httpx==0.28.1
+beautifulsoup4==4.15.0
 pytest==9.1.1
 ruff==0.16.3
 # 离线候选训练的完整数值依赖组；与模型产物一起记录版本以便复现。
