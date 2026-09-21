@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     app_host: str = "127.0.0.1"
     app_port: int = 8000
     ai_service_token: SecretStr = SecretStr("")
+    # 费率后台任务回写 Java 的地址；令牌复用 AI_SERVICE_TOKEN，禁止从浏览器传入回调地址。
+    core_service_base_url: str = "http://127.0.0.1:8080"
     ai_database_url: str = "postgresql+psycopg://fund_ai_app:change-me@localhost:54329/fund_ai"
     celery_broker_url: str = "redis://localhost:6379/1"
     celery_result_backend: str = "redis://localhost:6379/2"

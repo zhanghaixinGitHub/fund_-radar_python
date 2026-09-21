@@ -21,6 +21,7 @@ from app.integrations.tushare import TushareIntegrationError
 from app.repositories.fund_sync import get_latest_successful_sync_time
 from app.repositories.market_reference_sync import SourceCapabilityError
 from app.services.direction_1d_spx_manual import synchronize as synchronize_spx
+from app.services.simulation_fee_sync import SimulationFeeSyncService
 from app.services.stock_feature_snapshot import (
     FeatureSnapshotBuildInProgressError,
     StockFeatureBuildSummary,
@@ -47,6 +48,7 @@ MARKET_DETAIL_JOB_TYPE = "MARKET_DETAIL"
 STOCK_FEATURE_SNAPSHOT_JOB_TYPE = "STOCK_FEATURE_SNAPSHOT"
 MARKET_FREE_DATA_COMPLETION_JOB_TYPE = "MARKET_FREE_DATA_COMPLETION"
 SPX_MANUAL_JOB_TYPE = "SPX_MANUAL"
+SIMULATION_FEE_JOB_TYPE = "SIMULATION_FEES"
 _ALL_JOB_STAGES = (
     # SPX有早上08:00的观测边界，先取这一小份数据，避免被较长的全市场同步拖到截止后。
     (SPX_MANUAL_JOB_TYPE, "标普500"),
@@ -54,6 +56,7 @@ _ALL_JOB_STAGES = (
     (MARKET_FREE_DATA_COMPLETION_JOB_TYPE, "免费数据补齐"),
     (MARKET_NAV_INCREMENTAL_JOB_TYPE, "净值增量"),
     (STOCK_FEATURE_SNAPSHOT_JOB_TYPE, "特征快照"),
+    (SIMULATION_FEE_JOB_TYPE, "模拟费率"),
 )
 _ACTIVE_STATUSES = frozenset({"QUEUED", "RUNNING"})
 _SYNC_TYPES_BY_JOB_TYPE = {
@@ -114,11 +117,13 @@ class LocalSyncJobManager:
         feature_service_factory: FeatureServiceFactory = StockFeatureSnapshotService,
         free_data_completion_service_factory: FreeDataCompletionServiceFactory = TushareFreeDataCompletionService,
         spx_synchronizer: Callable[[], dict] = synchronize_spx,
+        fee_service_factory: Callable[[], SimulationFeeSyncService] = SimulationFeeSyncService,
     ) -> None:
         self._service_factory = service_factory
         self._feature_service_factory = feature_service_factory
         self._free_data_completion_service_factory = free_data_completion_service_factory
         self._spx_synchronizer = spx_synchronizer
+        self._fee_service_factory = fee_service_factory
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fund-sync-job")
         self._jobs: dict[UUID, SyncJobSnapshot] = {}
         self._latest_job_ids: dict[str, UUID] = {}
@@ -143,14 +148,18 @@ class LocalSyncJobManager:
         """创建管理员显式提交的已授权免费数据补齐任务。"""
         return self._start_job(MARKET_FREE_DATA_COMPLETION_JOB_TYPE, self._run_market_free_data_completion)
 
+    def start_simulation_fees(self, fund_code: str | None = None) -> SyncJobSnapshot:
+        """单只刷新和全量初始化都使用同一任务互斥与进度机制。"""
+        return self._start_job(SIMULATION_FEE_JOB_TYPE, lambda job_id: self._run_simulation_fees(job_id, fund_code))
+
     def start_all(self) -> SyncJobSnapshot:
-        """原子登记五个子任务；先同步SPX，再保持原四项顺序，后台运行不依赖浏览器存活。"""
+        """原子登记六个子任务；保持原五项顺序，最后同步模拟费率，不依赖浏览器存活。"""
         with self._lock:
             self._require_idle()
             parent = replace(
                 self._new_job(MARKET_ALL_JOB_TYPE),
                 progress_total=len(_ALL_JOB_STAGES),
-                progress_message="一键同步已创建，等待依次执行五类任务",
+                progress_message=f"一键同步已创建，等待依次执行 {len(_ALL_JOB_STAGES)} 类任务",
             )
             children = tuple(self._new_job(job_type) for job_type, _ in _ALL_JOB_STAGES)
             for snapshot in (parent, *children):
@@ -210,6 +219,7 @@ class LocalSyncJobManager:
             self._run_market_free_data_completion,
             lambda child_id: self._run_market_nav_incremental(child_id, build_features=False),
             self._run_stock_feature_snapshots,
+            self._run_simulation_fees,
         )
         try:
             child_ids = self._batch_child_ids[job_id]
@@ -505,6 +515,48 @@ class LocalSyncJobManager:
                 job_id,
             )
             self._fail_job(job_id, "FREE_DATA_SYNC_FAILED", "免费数据补齐未完成，请稍后重试。")
+        finally:
+            try:
+                if service is not None:
+                    service.close()
+            finally:
+                with self._lock:
+                    if self._active_job_id == job_id:
+                        self._active_job_id = None
+
+    def _run_simulation_fees(self, job_id: UUID, fund_code: str | None = None) -> None:
+        """按实际保存回执累计进度；部分失败保留成功计数，整批仍继续汇总。"""
+        service = None
+        self._replace_job(
+            job_id, status="RUNNING", started_at=datetime.now(UTC),
+            fund_codes=(fund_code,) if fund_code else (), progress_message="正在读取费率同步范围",
+        )
+        try:
+            service = self._fee_service_factory()
+            result = service.sync(
+                fund_code,
+                progress_reporter=lambda current, total, code, message: self._update_progress(
+                    job_id, current, total, code, message
+                ),
+            )
+            status = "SUCCEEDED" if not result.failures else "PARTIAL_SUCCESS" if result.updated else "FAILED"
+            self._replace_job(
+                job_id, status=status, progress_current=result.total, progress_total=result.total,
+                current_fund_code=None, fetched_count=result.total, updated_count=result.updated,
+                progress_message=(
+                    f"费率同步结束：共 {result.total} 只，成功 {result.updated} 只，失败 {len(result.failures)} 只"
+                ),
+                error_code="SIM_FEE_SYNC_INCOMPLETE" if result.failures else None,
+                error_message="；".join(result.failures) if result.failures else None,
+                finished_at=datetime.now(UTC),
+            )
+            logger.info(
+                "sync_jobs._run_simulation_fees >>> completed, job_id=%s, status=%s, total=%s, saved=%s, failed=%s",
+                job_id, status, result.total, result.updated, len(result.failures),
+            )
+        except Exception:
+            logger.exception("sync_jobs._run_simulation_fees >>> task failed, job_id=%s", job_id)
+            self._fail_job(job_id, "SIM_FEE_SYNC_FAILED", "费率同步未完成，请检查核心服务连接或稍后重试。")
         finally:
             try:
                 if service is not None:

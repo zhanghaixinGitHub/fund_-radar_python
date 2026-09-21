@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 from app.core.config import get_settings
+from app.services.simulation_fee_sync import FeeSyncResult
 from app.services.stock_feature_snapshot import StockFeatureBuildSummary
 from app.services.sync_jobs import MARKET_ALL_JOB_TYPE, LocalSyncJobManager, SyncJobInProgressError
 from app.services.tushare_free_data_completion import FreeDataCompletionResult
@@ -19,6 +20,7 @@ STAGES = (
     "MARKET_FREE_DATA_COMPLETION",
     "MARKET_NAV_INCREMENTAL",
     "STOCK_FEATURE_SNAPSHOT",
+    "SIMULATION_FEES",
 )
 
 
@@ -78,7 +80,15 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
             "lastAttempt": {"state": "REFERENCE_ONLY", "rowCount": 2, "message": "非交易日资料参考，不能计为早间输入"},
         }
 
-    return LocalSyncJobManager(FundService, FeatureService, FreeService, spx_sync)
+    class FeeService:
+        def sync(self, fund_code=None, *, progress_reporter):
+            run("SIMULATION_FEES", progress_reporter)
+            return FeeSyncResult(2, 2, ())
+
+        def close(self):
+            close_hook("SIMULATION_FEES")
+
+    return LocalSyncJobManager(FundService, FeatureService, FreeService, spx_sync, FeeService)
 
 
 def wait_finished(manager, job_id):
@@ -101,8 +111,8 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
         started = manager.start_all()
         result = wait_finished(manager, started.job_id)
         assert calls == list(STAGES)  # 特征只在全部来源完成后生成一次。
-        assert result.status == ("SUCCEEDED" if not failures else "FAILED" if len(failures) == 5 else "PARTIAL_SUCCESS")
-        assert (result.progress_current, result.progress_total) == (5, 5)
+        assert result.status == ("SUCCEEDED" if not failures else "FAILED" if len(failures) == 6 else "PARTIAL_SUCCESS")
+        assert (result.progress_current, result.progress_total) == (6, 6)
         assert result.started_at and result.finished_at
         assert manager.get_latest_job(MARKET_ALL_JOB_TYPE) == result
         assert bool(result.error_message) == bool(failures)
@@ -110,7 +120,7 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
             child = manager.get_latest_job(stage)
             assert child.status == ("FAILED" if stage in failures else "SUCCEEDED")
             assert child.started_at and child.finished_at
-            if stage not in failures and stage != "SPX_MANUAL":
+            if stage not in failures and stage not in {"SPX_MANUAL", "SIMULATION_FEES"}:
                 assert child.sync_run_id is not None
         next_batch = manager.start_all()
         assert next_batch.job_id != started.job_id
@@ -139,7 +149,7 @@ def test_spx_batch_preserves_actual_attempt_and_timing_result(performed, state, 
         result = wait_finished(manager, manager.start_all().job_id)
         assert manager.get_latest_job("SPX_MANUAL").status == expected
         assert calls == list(STAGES[1:])
-        assert result.progress_current == result.progress_total == 5
+        assert result.progress_current == result.progress_total == 6
         assert result.status == ("SUCCEEDED" if expected == "SUCCEEDED" else "PARTIAL_SUCCESS")
     finally:
         manager.close()
@@ -173,6 +183,7 @@ def test_batch_holds_exclusion_across_every_stage_and_restores_live_progress():
                 manager.start_market_free_data_completion,
                 manager.start_market_nav_incremental,
                 manager.start_stock_feature_snapshots,
+                manager.start_simulation_fees,
             ):
                 with pytest.raises(SyncJobInProgressError):
                     start()
@@ -244,6 +255,9 @@ def test_internal_batch_api_rejects_browser_and_duplicates_without_starting_more
             for invalid in ({}, {"X-Service-Token": "wrong"}, {**headers, "Origin": "http://localhost:5173"}):
                 assert client.post(base + "/all", headers=invalid).status_code == 403
                 assert client.get(base + "/all/latest", headers=invalid).status_code == 403
+                assert client.post(base + "/simulation-fees", headers=invalid).status_code == 403
+                assert client.get(base + "/simulation-fees/latest", headers=invalid).status_code == 403
+            assert client.post(base + "/simulation-fees?fundCode=invalid", headers=headers).status_code == 422
             assert manager.get_latest_job(MARKET_ALL_JOB_TYPE) is None
             response = client.post(base + "/all", headers=headers)
             assert response.status_code == 202
@@ -252,10 +266,39 @@ def test_internal_batch_api_rejects_browser_and_duplicates_without_starting_more
             conflict = client.post(base + "/all", headers=headers)
             assert conflict.status_code == 409
             assert conflict.json()["detail"]["code"] == "MARKET_SYNC_IN_PROGRESS"
+            assert client.post(base + "/simulation-fees?fundCode=008888", headers=headers).status_code == 409
             assert client.get(base + "/all/latest", headers=headers).json()["job_id"] == job_id
             assert client.get(base + "/" + job_id, headers=headers).json()["status"] == "RUNNING"
             release.set()
     finally:
         release.set()
+        manager.close()
+        get_settings.cache_clear()
+
+
+def test_internal_single_fee_api_returns_job_and_latest_without_expanding_scope(monkeypatch):
+    from app.api.routes import funds
+    from app.main import create_application
+
+    calls = []
+    manager = make_manager(calls)
+    monkeypatch.setenv("AI_SERVICE_TOKEN", "sync-fee-test-token")
+    get_settings.cache_clear()
+    monkeypatch.setattr(funds, "get_sync_job_manager", lambda: manager)
+    headers = {"X-Service-Token": "sync-fee-test-token"}
+    path = "/internal/v1/funds/sync-jobs/simulation-fees"
+    try:
+        with TestClient(create_application()) as client:
+            assert client.get(path + "/latest", headers=headers).json() is None
+            response = client.post(path, params={"fundCode": "008888"}, headers=headers)
+            assert response.status_code == 202
+            from uuid import UUID
+            result = wait_finished(manager, UUID(response.json()["job_id"]))
+            latest = client.get(path + "/latest", headers=headers).json()
+            assert latest["job_id"] == str(result.job_id)
+            assert latest["job_type"] == "SIMULATION_FEES"
+            assert latest["fund_codes"] == ["008888"]
+            assert calls == ["SIMULATION_FEES"]
+    finally:
         manager.close()
         get_settings.cache_clear()

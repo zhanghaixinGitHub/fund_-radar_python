@@ -35,6 +35,7 @@ from app.services.sync_jobs import (
     MARKET_DETAIL_JOB_TYPE,
     MARKET_FREE_DATA_COMPLETION_JOB_TYPE,
     MARKET_NAV_INCREMENTAL_JOB_TYPE,
+    SIMULATION_FEE_JOB_TYPE,
     STOCK_FEATURE_SNAPSHOT_JOB_TYPE,
     SyncJobInProgressError,
     SyncJobSnapshot,
@@ -132,6 +133,34 @@ def start_internal_all_sync_jobs() -> InternalSyncJobStatus:
 def get_latest_internal_all_sync_jobs() -> InternalSyncJobStatus | None:
     """页面刷新后恢复当前 Python 进程最近批次，不重新创建同步任务。"""
     snapshot = get_sync_job_manager().get_latest_job(MARKET_ALL_JOB_TYPE)
+    return _to_internal_sync_job_status(snapshot) if snapshot else None
+
+
+@router.post(
+    "/sync-jobs/simulation-fees", response_model=InternalSyncJobStatus,
+    status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_service_token)],
+)
+def start_internal_simulation_fee_job(
+    fund_code: Annotated[str | None, Query(alias="fundCode", pattern=r"^[0-9]{6}$")] = None,
+) -> InternalSyncJobStatus:
+    """只接受 Java 已授权入口的代码参数，单只与全量均立即返回后台任务。"""
+    try:
+        snapshot = get_sync_job_manager().start_simulation_fees(fund_code)
+    except SyncJobInProgressError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "MARKET_SYNC_IN_PROGRESS", "message": "已有同步任务正在执行，请稍后重试。"},
+        ) from error
+    return _to_internal_sync_job_status(snapshot)
+
+
+@router.get(
+    "/sync-jobs/simulation-fees/latest", response_model=InternalSyncJobStatus | None,
+    dependencies=[Depends(require_service_token)],
+)
+def get_latest_internal_simulation_fee_job() -> InternalSyncJobStatus | None:
+    """只读最近费率任务，刷新页面不重新抓取。"""
+    snapshot = get_sync_job_manager().get_latest_job(SIMULATION_FEE_JOB_TYPE)
     return _to_internal_sync_job_status(snapshot) if snapshot else None
 
 
