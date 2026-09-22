@@ -20,14 +20,11 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 def unsupported_reason(fund) -> str | None:
-    """只接纳已登记的普通场外净值基金；不以缺失资料推断可交易。"""
-    if fund.status != "ACTIVE" or fund.market != "O" or fund.profile_status != "SYNCED":
-        return "仅支持资料完整的存续场外基金。"
-    if fund.fund_type not in {"EQUITY", "STOCK", "MIXED", "HYBRID", "BOND", "INDEX"}:
-        return "这类基金的交易规则尚未纳入本次模拟范围。"
-    description = " ".join(filter(None, (fund.fund_name, fund.source_fund_type, fund.invest_type))).upper()
-    if re.search(r"QDII|FOF|货币|美元|港元|定开|定期开放|持有|封闭|滚动|养老|REIT", description):
-        return "首版暂不支持跨境、货币、FOF、持有期或定期开放等特殊产品。"
+    """所有已登记基金统一按净值模拟，只校验计算所需的行情基础。
+
+    类型、场内外、存续状态和资料同步状态不再决定模拟资格；这些属性不能
+    代表真实渠道是否允许交易。保留同源正净值校验，防止用演示值或零值算份额。
+    """
     if fund.data_source != TUSHARE_SOURCE_CODE or not fund.unit_nav or fund.unit_nav <= 0:
         return "尚无可核验的同源单位净值。"
     return None
@@ -152,7 +149,9 @@ def _refresh_one(code: str) -> None:
         if previous and now - previous < timedelta(minutes=30):
             return
         ts_code = session.scalar(select(FundShareClass.source_fund_code).where(FundShareClass.fund_code == code))
-        if not ts_code or not ts_code.endswith(".OF"):
+        # 目录登记的 .OF / .SH / .SZ 等来源代码均交给既有适配器处理，
+        # 避免场内基金放开下单后，因刷新被跳过而一直无法完成分红核验。
+        if not ts_code:
             return
         last = session.scalar(
             select(NavDaily.nav_date)

@@ -3,6 +3,7 @@
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from app.core.config import get_settings
@@ -116,16 +117,22 @@ def test_refresh_rejects_personal_payload_and_only_queues_registered_codes(clien
     [
         {"market": "E"},
         {"profile_status": "PENDING"},
-        {"unit_nav": None},
-        {"data_source": "DEMO"},
         {"fund_name": "示例QDII"},
+        {"fund_type": "QDII", "fund_name": "博时标普石油天然气勘探及生产精选行业指数(QDII)-C-CNY"},
+        {"fund_type": "FOF", "fund_name": "示例养老FOF"},
+        {"fund_type": "OTHER", "fund_name": "示例REIT"},
+        {"fund_type": "UNKNOWN", "profile_status": "PENDING"},
+        {"fund_name": "示例美元份额"},
+        {"fund_name": "示例港元份额"},
+        {"fund_name": "示例滚动持有"},
+        {"fund_name": "示例封闭基金"},
         {"fund_name": "示例一年持有"},
         {"fund_name": "示例定期开放"},
         {"fund_type": "MONEY"},
         {"status": "INACTIVE"},
     ],
 )
-def test_special_or_incomplete_products_are_not_assumed_supported(changes):
+def test_all_registered_product_types_use_the_same_nav_simulation(changes):
     values = dict(
         status="ACTIVE",
         market="O",
@@ -139,4 +146,39 @@ def test_special_or_incomplete_products_are_not_assumed_supported(changes):
     )
     assert unsupported_reason(SimpleNamespace(**values)) is None
     values.update(changes)
-    assert unsupported_reason(SimpleNamespace(**values)) is not None
+    assert unsupported_reason(SimpleNamespace(**values)) is None
+
+
+@pytest.mark.parametrize("nav", [None, Decimal("0"), Decimal("-1")])
+def test_open_product_scope_still_rejects_missing_or_invalid_nav(nav):
+    """取消类型限制不等于允许用空净值、零净值或负净值计算份额。"""
+    fund = SimpleNamespace(data_source="TUSHARE_PRO_FUND", unit_nav=nav)
+    assert unsupported_reason(fund) == "尚无可核验的同源单位净值。"
+
+
+def test_open_product_scope_does_not_admit_demo_prices():
+    fund = SimpleNamespace(data_source="DEMO", unit_nav=Decimal("1"))
+    assert unsupported_reason(fund) == "尚无可核验的同源单位净值。"
+
+
+@pytest.mark.parametrize("ts_code", ["018853.OF", "510050.SH", "159915.SZ"])
+def test_market_refresh_checks_nav_and_dividends_for_every_registered_market(monkeypatch, ts_code):
+    """放开场内外类型后，两种资料都必须进入刷新流程；测试不请求真实供应商。"""
+    from app.services import simulation_market as service
+
+    session = MagicMock()
+    session.__enter__.return_value = session
+    session.execute.return_value.scalar.return_value = None
+    session.scalar.side_effect = [ts_code, date(2026, 9, 17)]
+    monkeypatch.setattr(service, "Session", lambda _engine: session)
+    monkeypatch.setattr(service, "get_engine", lambda: None)
+    sync = MagicMock()
+    monkeypatch.setattr(service, "TushareFundSyncService", lambda: sync)
+
+    service._refresh_one(ts_code.split(".")[0])
+
+    sync.sync_market_nav_history.assert_called_once()
+    assert sync.sync_market_nav_history.call_args.args == ((ts_code,),)
+    sync.sync_market_dividends.assert_called_once_with((ts_code,))
+    sync.close.assert_called_once()
+    assert any("SUCCEEDED" in str(call.args[0]) for call in session.execute.call_args_list)
