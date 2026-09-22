@@ -16,7 +16,6 @@ from fastapi.testclient import TestClient
 
 STAGES = (
     "SPX_MANUAL",
-    "MARKET_DETAIL",
     "MARKET_FREE_DATA_COMPLETION",
     "MARKET_NAV_INCREMENTAL",
     "STOCK_FEATURE_SNAPSHOT",
@@ -111,8 +110,10 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
         started = manager.start_all()
         result = wait_finished(manager, started.job_id)
         assert calls == list(STAGES)  # 特征只在全部来源完成后生成一次。
-        assert result.status == ("SUCCEEDED" if not failures else "FAILED" if len(failures) == 6 else "PARTIAL_SUCCESS")
-        assert (result.progress_current, result.progress_total) == (6, 6)
+        assert result.status == ("SUCCEEDED" if not failures else "FAILED" if len(failures) == 5 else "PARTIAL_SUCCESS")
+        assert (result.progress_current, result.progress_total) == (5, 5)
+        # 资料更新服务负责完整资料；批次不能再创建独立任务重复抓取。
+        assert manager.get_latest_job("MARKET_DETAIL") is None
         assert result.started_at and result.finished_at
         assert manager.get_latest_job(MARKET_ALL_JOB_TYPE) == result
         assert bool(result.error_message) == bool(failures)
@@ -149,7 +150,7 @@ def test_spx_batch_preserves_actual_attempt_and_timing_result(performed, state, 
         result = wait_finished(manager, manager.start_all().job_id)
         assert manager.get_latest_job("SPX_MANUAL").status == expected
         assert calls == list(STAGES[1:])
-        assert result.progress_current == result.progress_total == 6
+        assert result.progress_current == result.progress_total == 5
         assert result.status == ("SUCCEEDED" if expected == "SUCCEEDED" else "PARTIAL_SUCCESS")
     finally:
         manager.close()
@@ -219,14 +220,14 @@ def test_running_single_job_rejects_batch_and_cleanup_failure_does_not_drop_late
     calls = []
 
     def failing_close(stage):
-        if stage == "MARKET_DETAIL":
+        if stage == "MARKET_FREE_DATA_COMPLETION":
             raise RuntimeError("test close failure")
 
     manager = make_manager(calls, close_hook=failing_close)
     try:
         result = wait_finished(manager, manager.start_all().job_id)
         assert result.status == "PARTIAL_SUCCESS"
-        assert manager.get_latest_job("MARKET_DETAIL").error_code == "SYNC_STAGE_FAILED"
+        assert manager.get_latest_job("MARKET_FREE_DATA_COMPLETION").error_code == "SYNC_STAGE_FAILED"
         assert calls == list(STAGES)
     finally:
         manager.close()

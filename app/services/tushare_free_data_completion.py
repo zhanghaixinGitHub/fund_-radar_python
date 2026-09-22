@@ -121,7 +121,7 @@ class TushareFreeDataCompletionService:
                     fetched_count=overall_outcome.fetched_count,
                     write_stats=all_stats,
                 )
-            _report(progress_reporter, 2, 2, None, "当前免费数据补齐完成")
+            _report(progress_reporter, 2, 2, None, "基金资料与市场数据更新完成")
             logger.info(
                 "tushare_free_data_completion.sync >>> completed parent_run_id=%s fetched=%s created=%s "
                 "updated=%s skipped=%s",

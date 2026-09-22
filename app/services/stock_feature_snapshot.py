@@ -126,7 +126,7 @@ class StockFeatureSnapshotService:
                         current,
                         len(inputs),
                         item.fund_code,
-                        f"正在生成 {item.fund_code} 的特征快照",
+                        f"正在计算 {item.fund_code} 的历史指标",
                     )
             snapshots = tuple(snapshots_list)
             no_nav_count = len(inputs) - len(snapshots)

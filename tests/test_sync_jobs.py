@@ -55,8 +55,8 @@ def test_local_sync_job_manager_reports_progress_and_final_counts() -> None:
 
     class StubFeatureService:
         def build(self, *, progress_reporter):
-            progress_reporter(1, 2, "002112.OF", "正在生成 002112.OF 的特征快照")
-            progress_reporter(2, 2, "010710.OF", "正在生成 010710.OF 的特征快照")
+            progress_reporter(1, 2, "002112.OF", "正在计算 002112.OF 的历史指标")
+            progress_reporter(2, 2, "010710.OF", "正在计算 010710.OF 的历史指标")
             return _completed_feature_summary()
 
     manager = LocalSyncJobManager(service_factory=StubService, feature_service_factory=StubFeatureService)
@@ -71,7 +71,7 @@ def test_local_sync_job_manager_reports_progress_and_final_counts() -> None:
     assert result.status == "SUCCEEDED"
     assert result.progress_current == 2
     assert result.progress_total == 2
-    assert result.progress_message == "特征快照同步完成：处理 2 只，新建 1，更新 0，未变化 1"
+    assert result.progress_message == "历史指标计算完成：处理 2 只，新建 1，更新 0，未变化 1"
     assert result.sync_run_id == UUID("00000000-0000-0000-0000-000000000303")
     assert (result.fetched_count, result.created_count, result.updated_count, result.skipped_count) == (4, 2, 1, 1)
 
@@ -120,8 +120,8 @@ def test_manual_feature_snapshot_job_reports_local_write_counts() -> None:
 
     class StubFeatureService:
         def build(self, *, progress_reporter):
-            progress_reporter(1, 2, "002112.OF", "正在生成 002112.OF 的特征快照")
-            progress_reporter(2, 2, "010710.OF", "正在生成 010710.OF 的特征快照")
+            progress_reporter(1, 2, "002112.OF", "正在计算 002112.OF 的历史指标")
+            progress_reporter(2, 2, "010710.OF", "正在计算 010710.OF 的历史指标")
             completed.set()
             return _completed_feature_summary()
 
@@ -212,7 +212,7 @@ def test_free_data_completion_job_reports_parent_run_summary() -> None:
     class StubFreeDataCompletionService:
         def sync(self, *, progress_reporter):
             progress_reporter(1, 2, "510300.SH", "正在同步场内基金日线")
-            progress_reporter(2, 2, None, "当前免费数据补齐完成")
+            progress_reporter(2, 2, None, "基金资料与市场数据更新完成")
             outcome = SyncOutcome(
                 sync_run_id=UUID("00000000-0000-0000-0000-000000000306"),
                 sync_type=MARKET_FREE_DATA_COMPLETION_JOB_TYPE,
@@ -239,6 +239,6 @@ def test_free_data_completion_job_reports_parent_run_summary() -> None:
     assert result.status == "SUCCEEDED"
     assert result.progress_current == 2
     assert result.progress_total == 2
-    assert result.progress_message == "当前 2000 积分已授权数据补齐完成"
+    assert result.progress_message == "基金资料与市场数据更新完成"
     assert result.sync_run_id == UUID("00000000-0000-0000-0000-000000000306")
     assert (result.fetched_count, result.created_count, result.updated_count, result.skipped_count) == (10, 7, 2, 1)

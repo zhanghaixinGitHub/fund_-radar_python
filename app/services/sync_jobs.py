@@ -52,10 +52,10 @@ SIMULATION_FEE_JOB_TYPE = "SIMULATION_FEES"
 _ALL_JOB_STAGES = (
     # SPX有早上08:00的观测边界，先取这一小份数据，避免被较长的全市场同步拖到截止后。
     (SPX_MANUAL_JOB_TYPE, "标普500"),
-    (MARKET_DETAIL_JOB_TYPE, "完整资料"),
-    (MARKET_FREE_DATA_COMPLETION_JOB_TYPE, "免费数据补齐"),
+    # 资料更新内部已执行完整资料同步，批次不再单独重复抓取同一批资料。
+    (MARKET_FREE_DATA_COMPLETION_JOB_TYPE, "基金资料与市场数据更新"),
     (MARKET_NAV_INCREMENTAL_JOB_TYPE, "净值增量"),
-    (STOCK_FEATURE_SNAPSHOT_JOB_TYPE, "特征快照"),
+    (STOCK_FEATURE_SNAPSHOT_JOB_TYPE, "历史指标计算"),
     (SIMULATION_FEE_JOB_TYPE, "模拟费率"),
 )
 _ACTIVE_STATUSES = frozenset({"QUEUED", "RUNNING"})
@@ -69,7 +69,7 @@ _SYNC_TYPES_BY_JOB_TYPE = {
 def _feature_completion_message(summary: StockFeatureBuildSummary) -> str:
     """返回可展示的特征构建结果摘要，不混淆为预测或回测结论。"""
     return (
-        "特征快照同步完成："
+        "历史指标计算完成："
         f"处理 {summary.attempted_fund_count} 只，新建 {summary.created_count}，"
         f"更新 {summary.updated_count}，未变化 {summary.skipped_count}"
     )
@@ -153,7 +153,7 @@ class LocalSyncJobManager:
         return self._start_job(SIMULATION_FEE_JOB_TYPE, lambda job_id: self._run_simulation_fees(job_id, fund_code))
 
     def start_all(self) -> SyncJobSnapshot:
-        """原子登记六个子任务；保持原五项顺序，最后同步模拟费率，不依赖浏览器存活。"""
+        """原子登记五个子任务；完整资料由资料更新覆盖，批次不依赖浏览器存活。"""
         with self._lock:
             self._require_idle()
             parent = replace(
@@ -215,7 +215,6 @@ class LocalSyncJobManager:
         self._replace_job(job_id, status="RUNNING", started_at=datetime.now(UTC))
         runners = (
             self._run_spx_manual,
-            self._run_market_details,
             self._run_market_free_data_completion,
             lambda child_id: self._run_market_nav_incremental(child_id, build_features=False),
             self._run_stock_feature_snapshots,
@@ -318,7 +317,7 @@ class LocalSyncJobManager:
                 ),
             )
             if not build_features:
-                self._complete_job(job_id, outcome, completion_message="净值增量同步完成，特征将在批次末尾生成")
+                self._complete_job(job_id, outcome, completion_message="净值增量同步完成，历史指标将在后续步骤计算")
                 return
             self._record_source_outcome(job_id, outcome)
             try:
@@ -407,7 +406,7 @@ class LocalSyncJobManager:
                 self._fail_job(
                     job_id,
                     "FEATURE_SOURCE_NOT_READY",
-                    "特征来源尚未就绪，请先完成基金市场净值同步后再重试。",
+                    "历史指标所需净值尚未就绪，请先完成净值同步后再重试。",
                 )
                 return
             self._complete_feature_job(job_id, feature_summary)
@@ -422,10 +421,10 @@ class LocalSyncJobManager:
                 feature_summary.skipped_count,
             )
         except FeatureSnapshotBuildInProgressError:
-            self._fail_job(job_id, "FEATURE_SYNC_IN_PROGRESS", "特征快照正在由其他任务生成，请稍后重试。")
+            self._fail_job(job_id, "FEATURE_SYNC_IN_PROGRESS", "历史指标正在由其他任务计算，请稍后重试。")
         except Exception:
             logger.exception("sync_jobs._run_stock_feature_snapshots >>> unexpected task failure, job_id=%s", job_id)
-            self._fail_job(job_id, "FEATURE_SNAPSHOT_BUILD_FAILED", "特征快照未完成，请稍后重试。")
+            self._fail_job(job_id, "FEATURE_SNAPSHOT_BUILD_FAILED", "历史指标计算未完成，请稍后重试。")
         finally:
             with self._lock:
                 if self._active_job_id == job_id:
@@ -486,7 +485,7 @@ class LocalSyncJobManager:
             self._complete_job(
                 job_id,
                 result.overall_outcome,
-                completion_message="当前 2000 积分已授权数据补齐完成",
+                completion_message="基金资料与市场数据更新完成",
             )
             logger.info(
                 "sync_jobs._run_market_free_data_completion >>> completed job_id=%s, sync_run_id=%s, "
@@ -498,7 +497,7 @@ class LocalSyncJobManager:
                 result.overall_outcome.updated_count,
             )
         except MarketReferenceSyncInProgressError:
-            self._fail_job(job_id, "FREE_DATA_SYNC_IN_PROGRESS", "已有免费数据补齐正在执行，请稍后重试。")
+            self._fail_job(job_id, "FREE_DATA_SYNC_IN_PROGRESS", "已有基金资料与市场数据更新任务正在执行，请稍后重试。")
         except SourceCapabilityError:
             self._fail_job(
                 job_id,
@@ -506,7 +505,7 @@ class LocalSyncJobManager:
                 "当前来源未完成接口授权核验，请先核对数据源能力登记。",
             )
         except TushareIntegrationError:
-            self._fail_job(job_id, "FREE_DATA_SYNC_FAILED", "免费数据补齐未完成，请检查来源限额或稍后重试。")
+            self._fail_job(job_id, "FREE_DATA_SYNC_FAILED", "基金资料与市场数据更新未完成，请检查来源限额或稍后重试。")
         except ValueError:
             self._fail_job(job_id, "FREE_DATA_SYNC_UNAVAILABLE", "数据源权限或本地配置尚未完成校验。")
         except Exception:
@@ -514,7 +513,7 @@ class LocalSyncJobManager:
                 "sync_jobs._run_market_free_data_completion >>> unexpected task failure, job_id=%s",
                 job_id,
             )
-            self._fail_job(job_id, "FREE_DATA_SYNC_FAILED", "免费数据补齐未完成，请稍后重试。")
+            self._fail_job(job_id, "FREE_DATA_SYNC_FAILED", "基金资料与市场数据更新未完成，请稍后重试。")
         finally:
             try:
                 if service is not None:
@@ -592,7 +591,7 @@ class LocalSyncJobManager:
             created_count=outcome.created_count,
             updated_count=outcome.updated_count,
             skipped_count=outcome.skipped_count,
-            progress_message="基金市场净值同步完成，正在生成特征快照",
+            progress_message="基金市场净值同步完成，正在计算历史指标",
         )
 
     def _complete_job(self, job_id: UUID, outcome: SyncOutcome, *, completion_message: str = "同步完成") -> None:
@@ -634,9 +633,9 @@ class LocalSyncJobManager:
             job_id,
             status="PARTIAL_SUCCESS",
             current_fund_code=None,
-            progress_message="基金市场净值同步完成，特征快照未更新",
+            progress_message="基金市场净值同步完成，历史指标尚未计算完成",
             error_code=error_code,
-            error_message="基金市场净值已同步，但特征快照未生成，可在同步中心单独重试。",
+            error_message="基金市场净值已同步，但历史指标尚未计算完成，可在同步中心的“历史指标计算”中重试。",
             finished_at=datetime.now(UTC),
         )
         logger.warning("sync_jobs._mark_feature_stage_partial >>> job_id=%s, code=%s", job_id, error_code)

@@ -254,7 +254,10 @@ def start_internal_market_free_data_completion_job() -> InternalSyncJobStatus:
         )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail={"code": "FREE_DATA_SYNC_IN_PROGRESS", "message": "已有免费数据补齐任务正在执行，请稍后重试。"},
+            detail={
+                "code": "FREE_DATA_SYNC_IN_PROGRESS",
+                "message": "已有基金资料与市场数据更新任务正在执行，请稍后重试。",
+            },
         ) from error
     except ValueError as error:
         logger.error(
@@ -263,7 +266,7 @@ def start_internal_market_free_data_completion_job() -> InternalSyncJobStatus:
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"code": "FREE_DATA_SYNC_UNAVAILABLE", "message": "免费数据补齐服务尚未完成配置。"},
+            detail={"code": "FREE_DATA_SYNC_UNAVAILABLE", "message": "基金资料与市场数据更新服务尚未完成配置。"},
         ) from error
     return _to_internal_sync_job_status(snapshot)
 
@@ -298,7 +301,7 @@ def start_internal_stock_feature_snapshot_job() -> InternalSyncJobStatus:
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"code": "FEATURE_SYNC_UNAVAILABLE", "message": "特征快照同步服务尚未完成配置。"},
+            detail={"code": "FEATURE_SYNC_UNAVAILABLE", "message": "历史指标计算服务尚未完成配置。"},
         ) from error
     return _to_internal_sync_job_status(snapshot)
 
