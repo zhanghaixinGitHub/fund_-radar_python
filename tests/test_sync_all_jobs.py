@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 from app.core.config import get_settings
+from app.services.direction_1d_sync import Direction1dSyncResult
 from app.services.simulation_fee_sync import FeeSyncResult
 from app.services.stock_feature_snapshot import StockFeatureBuildSummary
 from app.services.sync_jobs import MARKET_ALL_JOB_TYPE, LocalSyncJobManager, SyncJobInProgressError
@@ -19,6 +20,7 @@ STAGES = (
     "MARKET_FREE_DATA_COMPLETION",
     "MARKET_NAV_INCREMENTAL",
     "STOCK_FEATURE_SNAPSHOT",
+    "DIRECTION_1D_PREDICTIONS",
     "SIMULATION_FEES",
 )
 
@@ -87,7 +89,15 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
         def close(self):
             close_hook("SIMULATION_FEES")
 
-    return LocalSyncJobManager(FundService, FeatureService, FreeService, spx_sync, FeeService)
+    class PredictionService:
+        def sync(self, *, progress_reporter):
+            run("DIRECTION_1D_PREDICTIONS", progress_reporter)
+            return Direction1dSyncResult(date(2026, 9, 23), 2, 1, 1, ())
+
+        def close(self):
+            close_hook("DIRECTION_1D_PREDICTIONS")
+
+    return LocalSyncJobManager(FundService, FeatureService, FreeService, spx_sync, FeeService, PredictionService)
 
 
 def wait_finished(manager, job_id):
@@ -110,8 +120,8 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
         started = manager.start_all()
         result = wait_finished(manager, started.job_id)
         assert calls == list(STAGES)  # 特征只在全部来源完成后生成一次。
-        assert result.status == ("SUCCEEDED" if not failures else "FAILED" if len(failures) == 5 else "PARTIAL_SUCCESS")
-        assert (result.progress_current, result.progress_total) == (5, 5)
+        assert result.status == ("SUCCEEDED" if not failures else "FAILED" if len(failures) == 6 else "PARTIAL_SUCCESS")
+        assert (result.progress_current, result.progress_total) == (6, 6)
         # 资料更新服务负责完整资料；批次不能再创建独立任务重复抓取。
         assert manager.get_latest_job("MARKET_DETAIL") is None
         assert result.started_at and result.finished_at
@@ -121,7 +131,7 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
             child = manager.get_latest_job(stage)
             assert child.status == ("FAILED" if stage in failures else "SUCCEEDED")
             assert child.started_at and child.finished_at
-            if stage not in failures and stage not in {"SPX_MANUAL", "SIMULATION_FEES"}:
+            if stage not in failures and stage not in {"SPX_MANUAL", "SIMULATION_FEES", "DIRECTION_1D_PREDICTIONS"}:
                 assert child.sync_run_id is not None
         next_batch = manager.start_all()
         assert next_batch.job_id != started.job_id
@@ -150,7 +160,7 @@ def test_spx_batch_preserves_actual_attempt_and_timing_result(performed, state, 
         result = wait_finished(manager, manager.start_all().job_id)
         assert manager.get_latest_job("SPX_MANUAL").status == expected
         assert calls == list(STAGES[1:])
-        assert result.progress_current == result.progress_total == 5
+        assert result.progress_current == result.progress_total == 6
         assert result.status == ("SUCCEEDED" if expected == "SUCCEEDED" else "PARTIAL_SUCCESS")
     finally:
         manager.close()
@@ -185,6 +195,7 @@ def test_batch_holds_exclusion_across_every_stage_and_restores_live_progress():
                 manager.start_market_nav_incremental,
                 manager.start_stock_feature_snapshots,
                 manager.start_simulation_fees,
+                manager.start_direction_1d_predictions,
             ):
                 with pytest.raises(SyncJobInProgressError):
                     start()

@@ -21,6 +21,7 @@ from app.integrations.tushare import TushareIntegrationError
 from app.repositories.fund_sync import get_latest_successful_sync_time
 from app.repositories.market_reference_sync import SourceCapabilityError
 from app.services.direction_1d_spx_manual import synchronize as synchronize_spx
+from app.services.direction_1d_sync import Direction1dSyncService
 from app.services.simulation_fee_sync import SimulationFeeSyncService
 from app.services.stock_feature_snapshot import (
     FeatureSnapshotBuildInProgressError,
@@ -49,6 +50,7 @@ STOCK_FEATURE_SNAPSHOT_JOB_TYPE = "STOCK_FEATURE_SNAPSHOT"
 MARKET_FREE_DATA_COMPLETION_JOB_TYPE = "MARKET_FREE_DATA_COMPLETION"
 SPX_MANUAL_JOB_TYPE = "SPX_MANUAL"
 SIMULATION_FEE_JOB_TYPE = "SIMULATION_FEES"
+DIRECTION_1D_JOB_TYPE = "DIRECTION_1D_PREDICTIONS"
 _ALL_JOB_STAGES = (
     # SPX有早上08:00的观测边界，先取这一小份数据，避免被较长的全市场同步拖到截止后。
     (SPX_MANUAL_JOB_TYPE, "标普500"),
@@ -56,6 +58,8 @@ _ALL_JOB_STAGES = (
     (MARKET_FREE_DATA_COMPLETION_JOB_TYPE, "基金资料与市场数据更新"),
     (MARKET_NAV_INCREMENTAL_JOB_TYPE, "净值增量"),
     (STOCK_FEATURE_SNAPSHOT_JOB_TYPE, "历史指标计算"),
+    # 预测使用前面已同步净值；独立校验输入完整性，来源失败时不能默认算作预测成功。
+    (DIRECTION_1D_JOB_TYPE, "全部关注基金预测"),
     (SIMULATION_FEE_JOB_TYPE, "模拟费率"),
 )
 _ACTIVE_STATUSES = frozenset({"QUEUED", "RUNNING"})
@@ -118,12 +122,14 @@ class LocalSyncJobManager:
         free_data_completion_service_factory: FreeDataCompletionServiceFactory = TushareFreeDataCompletionService,
         spx_synchronizer: Callable[[], dict] = synchronize_spx,
         fee_service_factory: Callable[[], SimulationFeeSyncService] = SimulationFeeSyncService,
+        prediction_service_factory: Callable[[], Direction1dSyncService] = Direction1dSyncService,
     ) -> None:
         self._service_factory = service_factory
         self._feature_service_factory = feature_service_factory
         self._free_data_completion_service_factory = free_data_completion_service_factory
         self._spx_synchronizer = spx_synchronizer
         self._fee_service_factory = fee_service_factory
+        self._prediction_service_factory = prediction_service_factory
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fund-sync-job")
         self._jobs: dict[UUID, SyncJobSnapshot] = {}
         self._latest_job_ids: dict[str, UUID] = {}
@@ -152,8 +158,12 @@ class LocalSyncJobManager:
         """单只刷新和全量初始化都使用同一任务互斥与进度机制。"""
         return self._start_job(SIMULATION_FEE_JOB_TYPE, lambda job_id: self._run_simulation_fees(job_id, fund_code))
 
+    def start_direction_1d_predictions(self) -> SyncJobSnapshot:
+        """与一键同步共用后台队列，独立手动执行不要求任何个人实验开关。"""
+        return self._start_job(DIRECTION_1D_JOB_TYPE, self._run_direction_1d_predictions)
+
     def start_all(self) -> SyncJobSnapshot:
-        """原子登记五个子任务；完整资料由资料更新覆盖，批次不依赖浏览器存活。"""
+        """原子登记六个子任务；完整资料由资料更新覆盖，批次不依赖浏览器存活。"""
         with self._lock:
             self._require_idle()
             parent = replace(
@@ -218,6 +228,7 @@ class LocalSyncJobManager:
             self._run_market_free_data_completion,
             lambda child_id: self._run_market_nav_incremental(child_id, build_features=False),
             self._run_stock_feature_snapshots,
+            self._run_direction_1d_predictions,
             self._run_simulation_fees,
         )
         try:
@@ -514,6 +525,50 @@ class LocalSyncJobManager:
                 job_id,
             )
             self._fail_job(job_id, "FREE_DATA_SYNC_FAILED", "基金资料与市场数据更新未完成，请稍后重试。")
+        finally:
+            try:
+                if service is not None:
+                    service.close()
+            finally:
+                with self._lock:
+                    if self._active_job_id == job_id:
+                        self._active_job_id = None
+
+    def _run_direction_1d_predictions(self, job_id: UUID) -> None:
+        """只有 Java 确认留档才计为生成；部分不适用、缺数据、过期均作为未完成展示。"""
+        service = None
+        self._replace_job(
+            job_id, status="RUNNING", started_at=datetime.now(UTC), progress_message="正在读取全部关注基金",
+        )
+        try:
+            service = self._prediction_service_factory()
+            result = service.sync(progress_reporter=lambda current, total, code, message: self._update_progress(
+                job_id, current, total, code, message,
+            ))
+            status = (
+                "SUCCEEDED" if not result.issues
+                else "PARTIAL_SUCCESS" if result.created + result.existing else "FAILED"
+            )
+            self._replace_job(
+                job_id, status=status, requested_nav_date=result.target_date,
+                progress_current=result.total, progress_total=result.total, current_fund_code=None,
+                fetched_count=result.total, created_count=result.created, updated_count=result.existing,
+                skipped_count=len(result.issues),
+                progress_message=(
+                    f"目标日 {result.target_date}：共检查 {result.total} 只，新生成 {result.created}，"
+                    f"已有 {result.existing}，未生成 {len(result.issues)}"
+                ),
+                error_code="PREDICTION_INCOMPLETE" if result.issues else None,
+                error_message="；".join(result.issues[:100]) if result.issues else None,
+                finished_at=datetime.now(UTC),
+            )
+            logger.info(
+                "sync_jobs._run_direction_1d_predictions >>> job_id=%s, status=%s, total=%s, created=%s, existing=%s",
+                job_id, status, result.total, result.created, result.existing,
+            )
+        except Exception:
+            logger.exception("sync_jobs._run_direction_1d_predictions >>> task failed, job_id=%s", job_id)
+            self._fail_job(job_id, "PREDICTION_SYNC_FAILED", "预测任务未完成，请检查核心服务连接或稍后重试。")
         finally:
             try:
                 if service is not None:

@@ -31,6 +31,7 @@ from app.services.fund_catalog_read import (
     list_funds,
 )
 from app.services.sync_jobs import (
+    DIRECTION_1D_JOB_TYPE,
     MARKET_ALL_JOB_TYPE,
     MARKET_DETAIL_JOB_TYPE,
     MARKET_FREE_DATA_COMPLETION_JOB_TYPE,
@@ -133,6 +134,32 @@ def start_internal_all_sync_jobs() -> InternalSyncJobStatus:
 def get_latest_internal_all_sync_jobs() -> InternalSyncJobStatus | None:
     """页面刷新后恢复当前 Python 进程最近批次，不重新创建同步任务。"""
     snapshot = get_sync_job_manager().get_latest_job(MARKET_ALL_JOB_TYPE)
+    return _to_internal_sync_job_status(snapshot) if snapshot else None
+
+
+@router.post(
+    "/sync-jobs/direction-1d-predictions", response_model=InternalSyncJobStatus,
+    status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_service_token)],
+)
+def start_internal_direction_1d_predictions() -> InternalSyncJobStatus:
+    """Java 同步管理员已授权的批量预测入口；范围只能由 Java 的有效关注清单提供。"""
+    try:
+        snapshot = get_sync_job_manager().start_direction_1d_predictions()
+    except SyncJobInProgressError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "MARKET_SYNC_IN_PROGRESS", "message": "已有同步任务正在执行，请稍后重试。"},
+        ) from error
+    return _to_internal_sync_job_status(snapshot)
+
+
+@router.get(
+    "/sync-jobs/direction-1d-predictions/latest", response_model=InternalSyncJobStatus | None,
+    dependencies=[Depends(require_service_token)],
+)
+def get_latest_internal_direction_1d_predictions() -> InternalSyncJobStatus | None:
+    """恢复最近预测任务及未生成原因，读取不发起新计算。"""
+    snapshot = get_sync_job_manager().get_latest_job(DIRECTION_1D_JOB_TYPE)
     return _to_internal_sync_job_status(snapshot) if snapshot else None
 
 
