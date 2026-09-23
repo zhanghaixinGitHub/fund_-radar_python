@@ -9,7 +9,7 @@ from app.services import prediction_replay_inputs as inputs
 from app.services import prediction_replay_models as models
 from app.services.prediction_contract import PredictionFailure, fingerprint
 from app.services.prediction_models import FEATURES, baseline_package, route_key
-from tests.test_prediction_models import package
+from tests.test_prediction_models import three_package
 
 
 @pytest.fixture
@@ -17,7 +17,7 @@ def registry(monkeypatch):
     routes, packages = {}, {}
     for horizon in ("T5_V1", "T20_V1", "M6_V1"):
         base = baseline_package(horizon)
-        trained = package() | {"horizonId": horizon, "recipeVersion": "TOTAL_RETURN_LOGISTIC_V1"}
+        trained = three_package(horizon)
         for key, manifest in ((horizon + "base", base), (horizon + "trained", trained)):
             packages[key] = {"modelId": key, "modelHash": fingerprint(manifest), "manifest": manifest}
         routes[route_key(horizon)] = {"model_id": horizon + "base", "shadow_ids": [horizon + "trained"], "revision": 2}
@@ -91,7 +91,7 @@ def test_each_bundle_really_infers_its_own_model_on_identical_days(registry, mon
     current, candidate = result["modelComparisons"]
     assert len(current["frames"]) == len(candidate["frames"]) == 2
     assert {s["direction"] for s in current["frames"][0]["input"]["predictions"]} == {"UP"}
-    assert {s["direction"] for s in candidate["frames"][0]["input"]["predictions"]} == {"NON_UP"}
+    assert {s["direction"] for s in candidate["frames"][0]["input"]["predictions"]} == {"DOWN"}
     assert all(s["modelId"].endswith("trained") for s in candidate["frames"][0]["input"]["predictions"])
 
 
@@ -100,7 +100,7 @@ def test_one_inference_failure_excludes_whole_bundle_without_cherry_picking_date
     original = inputs.infer_package
 
     def infer(manifest, features):
-        if manifest["adapter"] == "LOGISTIC_STANDARDIZED_V1":
+        if manifest["adapter"] == "LOGISTIC_MULTICLASS_V2":
             raise PredictionFailure("INFERENCE_ERROR", "INFERENCE", "候选推理失败")
         return original(manifest, features)
 

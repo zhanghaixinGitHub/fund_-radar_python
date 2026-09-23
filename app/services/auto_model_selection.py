@@ -10,9 +10,11 @@ from app.db.session import get_engine
 from app.repositories.prediction_store import encode, one, rows
 from app.services.auto_model_contract import auto_policy, rolling_window, weekly_slot
 from app.services.auto_model_store import cycle_state, event, frozen_input, publish_bundle, transition
-from app.services.prediction_contract import PredictionFailure, fingerprint
+from app.services.prediction_contract import PredictionFailure, fingerprint, prediction_policy
+from app.services.prediction_direction import direction_fields, validate_identity
 from app.services.prediction_models import freeze_routes, load_model, route_key
 from app.services.prediction_research import _executor, create_research, research_status, run_research
+from app.services.prediction_selection import direction_not_worse
 
 logger = logging.getLogger(__name__)
 ACTIVE = ("QUEUED", "TRAINING", "EVALUATING", "REPLAYING", "DECIDING", "INTERRUPTED")
@@ -114,6 +116,8 @@ def check_auto(codes, source="MAINTENANCE", now=None):
         }
         if (
             trigger == "MATURED_OR_REVISED"
+            and same_protocol
+            and set(latest["spec"]["routes"]) == set(spec["routes"])
             and latest["checkpoint"].get("runId")
             and all(
                 (old["model_id"], old["revision"]) == (spec["routes"][key]["model_id"], spec["routes"][key]["revision"])
@@ -211,6 +215,10 @@ def run_auto(cycle_id):
                 return
             state = cycle_state(cycle_id)
             spec, point = state["spec"], state["checkpoint"]
+            if state["protocol_hash"] != fingerprint(auto_policy()):
+                raise PredictionFailure(
+                    "AUTO_IMPLEMENTATION_CHANGED", "RECOVERY", "实现或方向规则改变，原周期不可混版恢复", retryable=False
+                )
             if state["cancel_requested"]:
                 transition(cycle_id, owner, "CANCELLED")
                 return
@@ -267,18 +275,12 @@ def run_auto(cycle_id):
                 mature = live["comparisons"].get(evidence["modelId"])
                 metric, baseline = evidence["metrics"], bundle["currentPredictionMetrics"]
                 if mature and mature["comparable"]:
-                    bundle["predictionEligible"] = (
-                        mature["candidate"]["primaryScore"]
-                        >= mature["current"]["primaryScore"] - spec["policy"]["tolerance"]
+                    bundle["predictionEligible"] = direction_not_worse(
+                        mature["candidate"], mature["current"], spec["policy"]["tolerance"]
                     )
                     bundle["predictionEvidenceLevel"] = "LIVE_MATURED"
                 else:
-                    bundle["predictionEligible"] = (
-                        metric["primaryScore"] is not None
-                        and baseline["primaryScore"] is not None
-                        and metric["coverage"] >= baseline["coverage"]
-                        and metric["primaryScore"] >= baseline["primaryScore"] - spec["policy"]["tolerance"]
-                    )
+                    bundle["predictionEligible"] = direction_not_worse(metric, baseline, spec["policy"]["tolerance"])
                     bundle["predictionEvidenceLevel"] = "DEVELOPMENT_ONLY"
             point.update(
                 bundles=bundles,
@@ -353,6 +355,7 @@ def build_bundles(spec, result):
     for horizon in spec["horizonIds"]:
         route = spec["routes"][route_key(horizon)]
         model = load_model(route["model_id"])
+        validate_identity(model["manifest"], horizon)
         current.append(
             {
                 "modelId": model["modelId"],
@@ -371,6 +374,7 @@ def build_bundles(spec, result):
             if not entry.get("runnable") or not entry.get("timeValid"):
                 continue
             model = load_model(entry["modelId"])
+            validate_identity(model["manifest"], horizon)
             refs = [
                 ref | {"modelId": model["modelId"], "modelHash": model["modelHash"]}
                 if ref["horizonId"] == horizon
@@ -407,6 +411,11 @@ def mature_evaluation(codes, bundles):
     planned, answers = {}, {}
     for row in records:
         p, outcome = row["payload"], row["answer"]
+        # 必须在形成题池分母之前隔离；旧规则题目不能降低新三分类模型覆盖率。
+        if p.get("targetDefinitionId") != prediction_policy()["target_definition_id"] or p.get(
+            "directionPolicyHash", ""
+        ) != direction_fields(p["horizonId"]).get("directionPolicyHash", ""):
+            continue
         # 原始输入指纹不同的真实预测不混作同一道题；不给缺候选的题补造答案。
         key = f"{p['fundCode']}:{p['horizonId']}:{p['startDate']}:{p.get('featureHash')}:{p['targetDefinitionId']}"
         planned.setdefault(p["horizonId"], {})[key] = {
@@ -525,6 +534,10 @@ def check_replay_owner(cycle_id, owner):
         )
     if not value:
         raise PredictionFailure("AUTO_LEASE_LOST", "REPLAY", "回放租约不属于本任务或已取消", retryable=False)
+    if value["protocol_hash"] != fingerprint(auto_policy()):
+        raise PredictionFailure(
+            "AUTO_PROTOCOL_CHANGED", "REPLAY", "运行协议已改变，不能续用旧周期回放", retryable=False
+        )
     return value
 
 
@@ -560,7 +573,15 @@ def save_replay(cycle_id, owner, code, result):
 
         transition(cycle_id, owner, "DECIDING")
         result = decide_bundle(state, {r["input_key"][7:]: thaw_value(r["payload"]) for r in saved})
-        if result["decision"] == "ACTIVATE":
+        # 新目标首次建组需要发布完整基线以核验真实采用；这不是候选胜出，也不绕过后续选优门槛。
+        initial = (
+            len(state["spec"]["routes"]) == 3
+            and all(not route.get("release_id") for route in state["spec"]["routes"].values())
+            and result["metrics"][result["winner"]]["fundCount"] > 0
+        )
+        if result["decision"] == "ACTIVATE" or initial:
+            if initial and result["decision"] != "ACTIVATE":
+                result["releaseKind"] = "INITIALIZE_CURRENT_BASELINES"
             winner = next(b for b in state["checkpoint"]["bundles"] if b["id"] == result["winner"])
             try:
                 release = publish_bundle(
@@ -571,6 +592,7 @@ def save_replay(cycle_id, owner, code, result):
                     | {
                         "policyHash": state["protocol_hash"],
                         "executionPolicy": state["spec"]["policy"]["executionPolicy"],
+                        "predictionPolicy": state["spec"]["policy"]["predictionPolicy"],
                     },
                 )
                 result["releaseId"] = str(release["release_id"])

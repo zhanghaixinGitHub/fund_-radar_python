@@ -29,6 +29,18 @@ def package():
     }
 
 
+def three_package(horizon="T5_V1"):
+    """受控三态包；旧package保留用于二分类恢复回归，避免用改标签的旧包冒充新模型。"""
+    from app.services.prediction_direction import TARGET, direction_fields
+    p = package()
+    p.update(adapter="LOGISTIC_MULTICLASS_V2", recipeVersion="TOTAL_RETURN_LOGISTIC_THREE_STATE_V2",
+             horizonId=horizon, targetDefinitionId=TARGET, **direction_fields(horizon))
+    p["parameters"] = {"mean": [1.0] * 7, "scale": [2.0] * 7,
+                       "classes": ["DOWN", "FLAT", "UP"],
+                       "coefficients": [[-.2] * 7, [0.0] * 7, [.2] * 7], "intercepts": [0, -.2, 0]}
+    return p
+
+
 def test_linear_formula_and_exact_threshold():
     import math
 
@@ -61,7 +73,7 @@ def test_family_date_denominator_and_failed_coverage():
         for i in range(4)
     ]
     metrics = evaluate_answers(
-        planned, {"0": {"direction": "UP"}, "1": {"direction": "UP"}, "2": {"direction": "NON_UP"}}
+        planned, {"0": {"direction": "UP"}, "1": {"direction": "UP"}, "2": {"direction": "DOWN"}}
     )
     assert metrics["primaryScore"] == 0.5
     assert metrics["accuracy"] == pytest.approx(2 / 3)

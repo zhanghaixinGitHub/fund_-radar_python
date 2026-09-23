@@ -16,9 +16,19 @@ from app.repositories.prediction_store import encode, one
 from app.services.prediction_contract import (
     PredictionFailure,
     fingerprint,
+    legacy_policy,
+    policy_scope,
     prediction_policy,
     reinvested_series,
     target_dates,
+)
+from app.services.prediction_direction import (
+    BASELINE_ADAPTERS,
+    CLASSES,
+    classify,
+    direction_fields,
+    three_state,
+    validate_identity,
 )
 from app.services.prediction_features import build_features, cash_events, known_nav_version, read_fund_data
 from app.services.prediction_models import FEATURES, freeze_routes, infer_package, load_model, register_model, route_key
@@ -88,7 +98,7 @@ def mature_training_rows(samples, fit_as_of):
 
 def validate_historical_model(manifest, fit_as_of):
     """模型标签必须在模拟拟合时点已成熟；今天采用的包不能自动获得过去使用资格。"""
-    if manifest["adapter"] == "NAV_MOMENTUM_V1":
+    if manifest["adapter"] in BASELINE_ADAPTERS:
         return
     label_end = manifest.get("labelEndMax")
     if not label_end or datetime.fromisoformat(label_end) > fit_as_of:
@@ -104,9 +114,14 @@ def create_research(spec, *, submit=True):
     validate_spec(spec)
     run_id = uuid4()
     frozen = spec | {
-        "protocolVersion": "EXPERIMENT_SELECTION_V1",
+        "protocolVersion": prediction_policy()["selection"]["version"],
         "seed": 42,
-        "candidates": ["NAV_MOMENTUM_BASELINE_V1", "TOTAL_RETURN_LOGISTIC_V1"],
+        "candidates": (
+            ["NAV_MOMENTUM_THREE_STATE_V2", "TOTAL_RETURN_LOGISTIC_THREE_STATE_V2"]
+            if three_state()
+            else ["NAV_MOMENTUM_BASELINE_V1", "TOTAL_RETURN_LOGISTIC_V1"]
+        ),
+        "predictionPolicy": prediction_policy(),
         "scopeNote": "按当前关注集合回看历史，不代表全市场；历史版本存在可得性假设",
         "policyHash": fingerprint(prediction_policy()),
         "routes": spec.get("routes") or freeze_routes(),
@@ -181,17 +196,24 @@ def fit_package(samples, horizon, fit_as_of):
     from threadpoolctl import threadpool_limits
 
     mature_training_rows(samples, fit_as_of)
-    if len(samples) < 40 or len({s["actual"] for s in samples}) < 2:
+    tri = three_state()
+    counts = {label: sum(s["actual"] == label for s in samples) for label in CLASSES}
+    if (
+        len(samples) < 40
+        or len({s["actual"] for s in samples}) < 2
+        or (tri and min(counts.values()) < prediction_policy()["direction"]["minimumClassSamples"])
+    ):
         raise PredictionFailure("TRAINING_SAMPLE_INSUFFICIENT", "TRAIN", "成熟训练样本不足或只包含一个方向")
     x = np.array([[s["features"][k] for k in FEATURES] for s in samples])
-    y = np.array([int(s["actual"] == "UP") for s in samples])
+    y = np.array([s["actual"] if tri else int(s["actual"] == "UP") for s in samples])
     means, scales = x.mean(axis=0), x.std(axis=0)
     scales[scales == 0] = 1
     with threadpool_limits(limits=1):
         trained = LogisticRegression(C=1.0, random_state=42, max_iter=1000).fit((x - means) / scales, y)
     package = {
-        "adapter": "LOGISTIC_STANDARDIZED_V1",
-        "recipeVersion": "TOTAL_RETURN_LOGISTIC_V1",
+        "adapter": "LOGISTIC_MULTICLASS_V2" if tri else "LOGISTIC_STANDARDIZED_V1",
+        "recipeVersion": "TOTAL_RETURN_LOGISTIC_THREE_STATE_V2" if tri else "TOTAL_RETURN_LOGISTIC_V1",
+        **direction_fields(horizon),
         "horizonId": horizon,
         "targetDefinitionId": prediction_policy()["target_definition_id"],
         "assetGroup": "ALL",
@@ -203,19 +225,33 @@ def fit_package(samples, horizon, fit_as_of):
         "labelEndMax": max(s["labelAvailableAt"] for s in samples),
         "trainedAt": datetime.now(UTC).isoformat(),
         "simulatedFitKnowledgeCutoff": fit_as_of.isoformat(),
-        "codeVersion": "PREDICTION_POLICY_V1",
+        "codeVersion": prediction_policy()["version"],
         "dependencies": {name: importlib.metadata.version(name) for name in ("numpy", "scikit-learn")},
         "evidenceLevel": "DEVELOPMENT_ONLY",
         "trainingSampleHash": fingerprint(samples),
         "parameters": {
             "mean": means.tolist(),
             "scale": scales.tolist(),
-            "coefficients": trained.coef_[0].tolist(),
-            "intercept": float(trained.intercept_[0]),
+            **(
+                {
+                    "classes": trained.classes_.tolist(),
+                    "coefficients": trained.coef_.tolist(),
+                    "intercepts": trained.intercept_.tolist(),
+                    "classCounts": counts,
+                }
+                if tri
+                else {"coefficients": trained.coef_[0].tolist(), "intercept": float(trained.intercept_[0])}
+            ),
         },
     }
-    actual = trained.predict_proba((x[:10] - means) / scales)[:, 1]
-    restored = [infer_package(package, s["features"])["score"] for s in samples[:10]]
+    actual = trained.predict_proba((x[:10] - means) / scales)
+    restored = (
+        [[infer_package(package, s["features"])["classScores"][k] for k in trained.classes_] for s in samples[:10]]
+        if tri
+        else [infer_package(package, s["features"])["score"] for s in samples[:10]]
+    )
+    if not tri:
+        actual = actual[:, 1]
     if not np.allclose(actual, restored, atol=1e-12, rtol=0):
         raise PredictionFailure("MODEL_RESTORE_MISMATCH", "TRAIN", "训练与JSON适配器推理不一致")
     package["restoreMaxDiff"] = float(np.max(np.abs(actual - restored)))
@@ -239,6 +275,13 @@ def label_values(data, dates, boundary):
 
 
 def run_research(run_id, *, shared_lock=False):
+    spec = research_status(run_id)["spec"]
+    frozen = spec.get("predictionPolicy") or spec.get("policy", {}).get("predictionPolicy") or legacy_policy()
+    with policy_scope(frozen):
+        return _run_research_locked(run_id, shared_lock=shared_lock)
+
+
+def _run_research_locked(run_id, *, shared_lock=False):
     """手动和自动共用数据库会话锁；线程池以外的进程也不能并发占满训练资源。"""
     if shared_lock:
         return _run_research(run_id)
@@ -326,7 +369,9 @@ def _run_research(run_id):
 
                             data_cache[fund] = frozen_input(spec["autoCycleId"], "fund:" + fund, immutable_loader)
                         else:
-                            data_cache[fund] = loader()
+                            from app.services.prediction_task_inputs import task_input
+
+                            data_cache[fund] = task_input("RESEARCH", run_id, fund, loader)
                     data = data_cache[fund]
                     if "frozenFailure" in data:
                         failure = data["frozenFailure"]
@@ -380,7 +425,7 @@ def _run_research(run_id):
                             nav, published = label_values(data, set(dates), boundary)
                             available = max(available, published) if published else available
                             series = reinvested_series(dates, nav, cash_events(data, dates, boundary, replay=True))
-                            actual = "UP" if series[-1] > series[0] else "NON_UP"
+                            actual = classify(series[-1] / series[0] - 1, horizon_id)
                             planned["actual"] = actual
                             samples.append(
                                 planned
@@ -415,9 +460,17 @@ def _run_research(run_id):
                 if datetime.fromisoformat(s["labelAvailableAt"]) <= fit_asof
                 and datetime.fromisoformat(s["knowledgeCutoff"]) < fit_asof
             ]
-            candidate = register_model(fit_package(fit, horizon_id, fit_asof))
+            candidate = None
+            try:
+                candidate = register_model(fit_package(fit, horizon_id, fit_asof))
+            except PredictionFailure as error:
+                if error.payload["code"] != "TRAINING_SAMPLE_INSUFFICIENT":
+                    raise
+                # 某周期缺类不伪造训练包，不阻断其他周期；保留同规则当前模型及明确失败证据。
+                failures.append({"horizon": horizon_id, "error": error.payload})
             route = spec["routes"][route_key(horizon_id)]
             baseline = load_model(route["model_id"])
+            validate_identity(baseline["manifest"], horizon_id)
             exam = [s for s in samples if spec["validationEnd"] < s["date"] <= spec["selectionEnd"]]
             # 有数据的题之外，基金级失败按相同日期计划补回覆盖分母。
             dates = sorted({p["date"] for p in planned_selection})
@@ -435,15 +488,16 @@ def _run_research(run_id):
                     for d in dates
                 )
             protocol = {
-                "version": "EXPERIMENT_SELECTION_V1",
+                "version": prediction_policy()["selection"]["version"],
                 "specHash": state["spec_hash"],
                 "target": prediction_policy()["target_definition_id"],
                 "horizon": horizon_id,
+                **direction_fields(horizon_id),
             }
             sample_hash = fingerprint(planned_selection)
             evaluated = []
             answers_by_model = {}
-            for model, cost in ((baseline, 1.0), (candidate, 2.0)):
+            for model, cost in [(baseline, 1.0)] + ([(candidate, 2.0)] if candidate else []):
                 validate_historical_model(model["manifest"], fit_asof)
                 answers = {s["key"]: infer_package(model["manifest"], s["features"]) for s in exam}
                 answers_by_model[model["modelId"]] = answers

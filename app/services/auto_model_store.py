@@ -81,6 +81,8 @@ def frozen_input(cycle_id, key, loader):
 
 def publish_bundle(cycle_id, bundle, frozen_routes, reason):
     """全部路由同一事务CAS；包真实加载后仍核对登记hash，不按名称发布。"""
+    from app.services.prediction_contract import prediction_policy
+    from app.services.prediction_direction import direction_fields, validate_identity
     from app.services.prediction_models import load_model, route_key
 
     refs = bundle["modelRefs"]
@@ -88,6 +90,9 @@ def publish_bundle(cycle_id, bundle, frozen_routes, reason):
         raise PredictionFailure("RELEASE_INCOMPLETE", "ACTIVATE", "发布清单周期不完整", retryable=False)
     for ref in refs:
         model = load_model(ref["modelId"])
+        validate_identity(model["manifest"], ref["horizonId"])
+        if reason.get("predictionPolicy", prediction_policy()) != prediction_policy():
+            raise PredictionFailure("DIRECTION_POLICY_MISMATCH", "ACTIVATE", "发布规则与本次执行规则不一致")
         if model["modelHash"] != ref["modelHash"] or model["manifest"]["horizonId"] != ref["horizonId"]:
             raise PredictionFailure("RELEASE_MODEL_MISMATCH", "ACTIVATE", "发布模型指纹或周期不符", retryable=False)
     with get_engine().begin() as c:
@@ -114,6 +119,9 @@ def publish_bundle(cycle_id, bundle, frozen_routes, reason):
         old = one(c, "SELECT * FROM prediction_release_pointer WHERE scope='GLOBAL' FOR UPDATE")
         release_id = uuid4()
         manifest = {
+            "targetDefinitionId": prediction_policy()["target_definition_id"],
+            "predictionPolicySnapshot": prediction_policy(),
+            **direction_fields("T5_V1"),
             "modelRefs": [r | {"activationRevision": routes[route_key(r["horizonId"])]["revision"] + 1} for r in refs],
             "policyHash": reason["policyHash"],
             "executionPolicy": reason["executionPolicy"],
@@ -167,6 +175,8 @@ def publish_bundle(cycle_id, bundle, frozen_routes, reason):
 
 def actual_use_receipt(release_id, receipt):
     """Java只传公共预测引用/摘要，不传个人仓位；必须逐项核对Python不可变原文。"""
+    from app.services.prediction_direction import validate_identity
+
     with get_engine().begin() as c:
         release = one(c, "SELECT * FROM prediction_model_release WHERE release_id=:id", id=release_id)
         if not release:
@@ -180,6 +190,10 @@ def actual_use_receipt(release_id, receipt):
         valid = set()
         for row in found:
             p = row["payload"]
+            if p.get("role") != "PRIMARY":
+                continue
+            if release["manifest"].get("predictionPolicySnapshot"):
+                validate_identity(p, p["horizonId"], release["manifest"]["predictionPolicySnapshot"])
             ref = expected.get(p["horizonId"])
             if (
                 ref

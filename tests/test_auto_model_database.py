@@ -11,7 +11,7 @@ from app.services.auto_model_contract import auto_policy
 from app.services.prediction_contract import PredictionFailure, fingerprint
 from sqlalchemy import text
 from tests.test_prediction_database import database  # noqa: F401
-from tests.test_prediction_models import package
+from tests.test_prediction_models import three_package as package
 
 
 @pytest.fixture
@@ -415,7 +415,7 @@ def test_technical_fault_quarantine_never_claims_requested_release(auto_database
     original = models.infer_package
 
     def faulty(manifest, values):
-        if manifest["adapter"] != "NAV_MOMENTUM_V1":
+        if manifest["adapter"] not in models.BASELINE_ADAPTERS:
             raise PredictionFailure(failure_code, "INFERENCE", "受控包故障", retryable=False)
         return original(manifest, values)
 

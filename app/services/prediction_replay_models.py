@@ -8,6 +8,8 @@ from app.services.prediction_models import freeze_routes, load_model, route_key
 from app.services.prediction_research import validate_historical_model
 
 RECIPE_LABELS = {
+    "NAV_MOMENTUM_THREE_STATE_V2": "三分类走势基础模型",
+    "TOTAL_RETURN_LOGISTIC_THREE_STATE_V2": "三分类历史学习模型",
     "NAV_MOMENTUM_BASELINE_V1": "净值趋势基础模型",
     "TOTAL_RETURN_LOGISTIC_V1": "统计学习模型",
 }
@@ -33,6 +35,9 @@ def replay_model_bundles(start):
             try:
                 model = load_model(model_id)
                 package = model["manifest"]
+                from app.services.prediction_direction import validate_identity
+
+                validate_identity(package, horizon)
                 if (
                     package["horizonId"] != horizon
                     or package["assetGroup"] != "ALL"

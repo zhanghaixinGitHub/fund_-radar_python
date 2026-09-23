@@ -12,7 +12,8 @@ from app.services import prediction_models as models
 from app.services import prediction_selection as selection
 from app.services.prediction_contract import PredictionFailure, fingerprint
 from sqlalchemy import create_engine, text
-from tests.test_prediction_models import candidate, package
+from tests.test_prediction_models import candidate
+from tests.test_prediction_models import three_package as package
 
 
 @pytest.fixture
@@ -30,6 +31,7 @@ def database(monkeypatch, tmp_path):
             "20260922_25_prediction_recovery.py",
             "20260922_26_prediction_check_state.py",
             "20260923_27_auto_model_selection.py",
+            "20260923_28_prediction_task_input.py",
         ):
             path = Path(__file__).parents[1] / "alembic/versions" / filename
             spec = importlib.util.spec_from_file_location("prediction_migration", path)
@@ -40,6 +42,9 @@ def database(monkeypatch, tmp_path):
                 migration.upgrade()
         monkeypatch.setattr(models, "get_engine", lambda: engine)
         monkeypatch.setattr(selection, "get_engine", lambda: engine)
+        from app.services import prediction_task_inputs
+
+        monkeypatch.setattr(prediction_task_inputs, "get_engine", lambda: engine)
         monkeypatch.setattr(models, "model_directory", lambda: tmp_path)
         models.bootstrap_models()
         yield engine
@@ -110,9 +115,13 @@ def test_original_prediction_and_revised_outcomes(database, monkeypatch):
         "endDate": "2026-09-16",
         "direction": "UP",
         "role": "PRIMARY",
-        "targetDefinitionId": "FIXTURE_TOTAL_RETURN",
+        "targetDefinitionId": "NEXT_EXECUTABLE_CASH_REINVESTED_THREE_STATE_V2",
         "reason": "不可改写的人工隔离样例",
     }
+    from app.services.prediction_contract import prediction_policy
+    from app.services.prediction_direction import direction_fields
+
+    original.update(predictionPolicySnapshot=prediction_policy(), **direction_fields("T5_V1"))
     with database.begin() as c:
         first, created = store.save_prediction(c, original, "fixture-original")
         repeated, second_created = store.save_prediction(

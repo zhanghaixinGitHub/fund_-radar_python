@@ -13,6 +13,17 @@ from app.core.config import get_settings
 from app.db.session import get_engine
 from app.repositories.prediction_store import encode, one, rows
 from app.services.prediction_contract import PredictionFailure, fingerprint, prediction_policy
+from app.services.prediction_direction import (
+    BASELINE_ADAPTERS,
+    CLASSES,
+    TARGET,
+    TRI_ADAPTERS,
+    classify_return,
+    direction_fields,
+    three_state,
+    validate_identity,
+    validate_rule,
+)
 
 FEATURES = (
     "return_5d",
@@ -23,7 +34,7 @@ FEATURES = (
     "relative_position_60d",
     "consecutive_decline_days",
 )
-ADAPTERS = {"NAV_MOMENTUM_V1", "LOGISTIC_STANDARDIZED_V1", "DECISION_TREE_V1", "LEGACY_LINEAR_V1"}
+ADAPTERS = {"NAV_MOMENTUM_V1", "LOGISTIC_STANDARDIZED_V1", "DECISION_TREE_V1", "LEGACY_LINEAR_V1"} | TRI_ADAPTERS
 
 
 def model_directory() -> Path:
@@ -56,7 +67,13 @@ def validate_package(package: dict):
         )
     if package["featureSchemaVersion"] not in {"NAV_TOTAL_RETURN_V1", "LEGACY_NAV_7_V1"}:
         raise PredictionFailure("FEATURE_SCHEMA_MISMATCH", "MODEL_LOAD", "模型特征版本未接入", retryable=False)
-    if package["adapter"] in {"LOGISTIC_STANDARDIZED_V1", "DECISION_TREE_V1"}:
+    is_tri = package["targetDefinitionId"] == TARGET
+    if is_tri != (package["adapter"] in TRI_ADAPTERS):
+        raise PredictionFailure("MODEL_PACKAGE_INCOMPATIBLE", "MODEL_LOAD", "二分类适配器不能使用三分类目标")
+    if is_tri:
+        rule = validate_rule(package.get("directionPolicySnapshot", {}))
+        validate_identity(package, package["horizonId"], {"target_definition_id": TARGET, "direction": rule})
+    if package["adapter"] in {"LOGISTIC_STANDARDIZED_V1", "DECISION_TREE_V1", "LOGISTIC_MULTICLASS_V2"}:
         if tuple(package["features"]) != FEATURES or package["featureUnits"] != ["RATIO"] * 6 + ["SESSIONS"]:
             raise PredictionFailure(
                 "FEATURE_SCHEMA_MISMATCH", "MODEL_LOAD", "特征顺序或单位与训练公式不一致", retryable=False
@@ -76,6 +93,53 @@ def validate_package(package: dict):
 def infer_package(package, features):
     adapter, parameters = package["adapter"], package["parameters"]
     score = None
+    if adapter in TRI_ADAPTERS:
+        rule = validate_rule(package["directionPolicySnapshot"])
+        if adapter == "NAV_MOMENTUM_THREE_STATE_V2":
+            # 回看阈值描述历史窗口，与未来收益的持平带分别保存；它是基础假设而非收益预测值。
+            direction = classify_return(features["momentum"], parameters["momentumThreshold"])
+            if str(parameters["momentumThreshold"]) != rule["momentumThresholds"][package["horizonId"]]:
+                raise PredictionFailure("MODEL_PACKAGE_INCOMPATIBLE", "INFERENCE", "基础模型回看阈值不符")
+            return {
+                "direction": direction,
+                "score": None,
+                "classScores": None,
+                "scoreMeaning": "DETERMINISTIC_RULE_NO_PROBABILITY",
+            }
+        classes = parameters.get("classes", [])
+        x = [float(features[name]) for name in package["features"]]
+        means, scales, coefficients, intercepts = (
+            parameters[k] for k in ("mean", "scale", "coefficients", "intercepts")
+        )
+        if (
+            tuple(classes) != CLASSES
+            or len(coefficients) != 3
+            or len(intercepts) != 3
+            or not len(x) == len(means) == len(scales) == len(FEATURES)
+            or any(len(row) != len(x) for row in coefficients)
+            or any(
+                not math.isfinite(float(v))
+                for v in x + means + scales + intercepts + [v for row in coefficients for v in row]
+            )
+            or any(s <= 0 for s in scales)
+        ):
+            raise PredictionFailure("MODEL_PACKAGE_INCOMPATIBLE", "INFERENCE", "三分类参数、类序或标准差不合法")
+        logits = [
+            b + sum((v - m) / s * w for v, m, s, w in zip(x, means, scales, row, strict=True))
+            for b, row in zip(intercepts, coefficients, strict=True)
+        ]
+        if any(not math.isfinite(v) for v in logits):
+            raise PredictionFailure("INFERENCE_ERROR", "INFERENCE", "三分类模型返回非有限数值")
+        weights = [math.exp(v - max(logits)) for v in logits]
+        scores = dict(zip(classes, [v / sum(weights) for v in weights], strict=True))
+        # 只在并列最高的类别中按固定顺序决定，不以“低信心”补造持平。
+        direction = next(k for k in rule["tieBreakOrder"] if scores[k] == max(scores.values()))
+        return {
+            "direction": direction,
+            "score": scores["UP"],
+            "classScores": scores,
+            "scoreMeaning": "UNCALIBRATED_THREE_CLASS_SCORES",
+        }
     if adapter == "NAV_MOMENTUM_V1":
         up = float(features["momentum"]) > 0
     elif adapter == "LOGISTIC_STANDARDIZED_V1":
@@ -185,12 +249,15 @@ def load_model(model_id: str) -> dict:
 
 
 def route_key(horizon, group="ALL"):
-    return prediction_policy()["target_definition_id"] + ":" + horizon + ":" + group
+    policy = prediction_policy()
+    version = ":" + fingerprint(validate_rule(policy["direction"])) if three_state(policy) else ""
+    return policy["target_definition_id"] + version + ":" + horizon + ":" + group
 
 
 def activate(model_id, *, reason, expected_revision=None, shadow_ids=()):
     model = load_model(model_id)
     package = model["manifest"]
+    validate_identity(package, package["horizonId"])
     if package["targetDefinitionId"] != prediction_policy()["target_definition_id"]:
         raise PredictionFailure(
             "TARGET_DEFINITION_MISMATCH", "ACTIVATE", "旧目标模型不能冒充新目标模型", retryable=False
@@ -239,9 +306,11 @@ def baseline_package(horizon_id):
     """训练无关的固定基础配方，真实生成与历史回放引用同一份声明。"""
     policy = prediction_policy()
     horizon = next(h for h in policy["horizons"] if h["horizon_id"] == horizon_id)
+    tri = three_state(policy)
     return {
-        "adapter": "NAV_MOMENTUM_V1",
-        "recipeVersion": "NAV_MOMENTUM_BASELINE_V1",
+        "adapter": "NAV_MOMENTUM_THREE_STATE_V2" if tri else "NAV_MOMENTUM_V1",
+        "recipeVersion": "NAV_MOMENTUM_THREE_STATE_V2" if tri else "NAV_MOMENTUM_BASELINE_V1",
+        **direction_fields(horizon_id, policy),
         "horizonId": horizon["horizon_id"],
         "targetDefinitionId": policy["target_definition_id"],
         "assetGroup": "ALL",
@@ -252,43 +321,61 @@ def baseline_package(horizon_id):
         "threshold": 0,
         "labelEndMax": None,
         "trainedAt": None,
-        "codeVersion": "PREDICTION_POLICY_V1",
+        "codeVersion": policy["version"],
         "dependencies": {},
         "evidenceLevel": "DEVELOPMENT_ONLY",
-        "parameters": {"lookbackReturns": horizon["lookback_returns"], "minimumReturns": 20},
+        "parameters": {
+            "lookbackReturns": horizon["lookback_returns"],
+            "minimumReturns": 20,
+            **({"momentumThreshold": policy["direction"]["momentumThresholds"][horizon_id]} if tri else {}),
+        },
     }
 
 
 def bootstrap_models():
-    """登记三周期独立基线；已有路由不覆盖，旧研究目录可清理而不影响产物。"""
-    policy = prediction_policy()
-    for horizon in policy["horizons"]:
-        with get_engine().begin() as connection:
-            connection.execute(
+    """先登记完整包，再原子初始化三条新路由；重复启动不覆盖已采用的配置。"""
+    horizons = prediction_policy()["horizons"]
+    registered = [(h, register_model(baseline_package(h["horizon_id"]))) for h in horizons]
+    with get_engine().begin() as c:
+        c.execute(text("SELECT pg_advisory_xact_lock(721109,3)"))
+        for horizon, model in registered:
+            c.execute(
                 text("""INSERT INTO prediction_horizon(horizon_id,content_hash,payload)
               VALUES(:id,:hash,CAST(:payload AS jsonb)) ON CONFLICT DO NOTHING"""),
                 {"id": horizon["horizon_id"], "hash": fingerprint(horizon), "payload": encode(horizon)},
             )
-        package = baseline_package(horizon["horizon_id"])
-        model = register_model(package)
-        with get_engine().connect() as connection:
-            existing = one(
-                connection,
-                "SELECT model_id FROM model_route WHERE route_key=:key",
-                key=route_key(horizon["horizon_id"]),
-            )
-        if not existing:
-            activate(
-                model["modelId"],
-                expected_revision=0,
-                reason={"decision": "ACTIVATE", "reason": "首批登记的基础实验方法，尚未证明长期优势"},
-            )
+            key = route_key(horizon["horizon_id"])
+            created = c.execute(
+                text("""INSERT INTO model_route(route_key,model_id,revision,shadow_ids)
+              VALUES(:key,:model,1,'[]'::jsonb) ON CONFLICT DO NOTHING RETURNING route_key"""),
+                {"key": key, "model": model["modelId"]},
+            ).scalar()
+            if created:
+                c.execute(
+                    text("""INSERT INTO model_activation_event
+                  (event_id,route_key,revision,model_id,action,reason)
+                  VALUES(:id,:key,1,:model,'BOOTSTRAP',CAST(:reason AS jsonb))"""),
+                    {
+                        "id": uuid4(),
+                        "key": key,
+                        "model": model["modelId"],
+                        "reason": encode(
+                            {"decision": "INITIALIZE", "reason": "首批三周期完整基础方法，尚未证明长期优势"}
+                        ),
+                    },
+                )
 
 
 def freeze_routes():
     with get_engine().connect() as connection:
         # 一条语句的MVCC快照固定整个发布批次，不能逐周期读取混入不同发布。
-        return {r["route_key"]: r for r in rows(connection, "SELECT * FROM model_route ORDER BY route_key")}
+        keys = [route_key(h["horizon_id"]) for h in prediction_policy()["horizons"]]
+        return {
+            r["route_key"]: r
+            for r in rows(
+                connection, "SELECT * FROM model_route WHERE route_key=ANY(:keys) ORDER BY route_key", keys=keys
+            )
+        }
 
 
 def infer_route(route, features, horizon_id):
@@ -298,8 +385,12 @@ def infer_route(route, features, horizon_id):
         baseline = one(
             connection,
             """SELECT model_id FROM model_artifact
-            WHERE horizon_id=:h AND adapter='NAV_MOMENTUM_V1' ORDER BY created_at LIMIT 1""",
+            WHERE horizon_id=:h AND target_definition_id=:target AND adapter=:adapter
+            AND COALESCE(manifest->>'directionPolicyHash','')=:rule ORDER BY created_at LIMIT 1""",
             h=horizon_id,
+            target=prediction_policy()["target_definition_id"],
+            adapter="NAV_MOMENTUM_THREE_STATE_V2" if three_state() else "NAV_MOMENTUM_V1",
+            rule=direction_fields(horizon_id).get("directionPolicyHash", ""),
         )
     candidates = list(
         dict.fromkeys(
@@ -321,7 +412,9 @@ def infer_route(route, features, horizon_id):
             if quarantined:
                 raise PredictionFailure("MODEL_QUARANTINED", "INFERENCE", "问题包处于故障隔离期", retryable=False)
             model = load_model(candidate)
+            validate_identity(model["manifest"], horizon_id)
             result = infer_package(model["manifest"], features)
+            result.update(direction_fields(horizon_id))
             result.update(
                 modelId=candidate,
                 modelHash=model["modelHash"],
@@ -329,7 +422,7 @@ def infer_route(route, features, horizon_id):
                 activationRevision=route["revision"],
                 fallbackReason=failures or None,
                 modelManifest=model["manifest"],
-                baseline=model["manifest"]["adapter"] == "NAV_MOMENTUM_V1",
+                baseline=model["manifest"]["adapter"] in BASELINE_ADAPTERS,
                 releaseId=str(route["release_id"]) if route.get("release_id") and not failures else None,
                 requestedReleaseId=str(route["release_id"]) if route.get("release_id") else None,
             )
@@ -383,13 +476,20 @@ def infer_route(route, features, horizon_id):
 def model_status():
     with get_engine().connect() as connection:
         return {
+            "activeRouteKeys": [route_key(h["horizon_id"]) for h in prediction_policy()["horizons"]],
+            "activeTargetDefinitionId": prediction_policy()["target_definition_id"],
             "routes": rows(connection, "SELECT * FROM model_route ORDER BY route_key"),
             "models": rows(
                 connection,
                 """SELECT m.*, (SELECT count(*) FROM fund_prediction_record p
                    WHERE p.model_id=m.model_id AND mode='LIVE') live_calls,
                    (SELECT max(generated_at) FROM fund_prediction_record p WHERE p.model_id=m.model_id
-                   AND mode='LIVE') last_live_call FROM model_artifact m ORDER BY created_at DESC LIMIT 100""",
+                   AND mode='LIVE') last_live_call FROM model_artifact m
+                   WHERE m.model_id IN (SELECT model_id FROM model_artifact ORDER BY created_at DESC LIMIT 100)
+                   OR m.model_id IN (SELECT model_id FROM model_route)
+                   OR m.model_id IN (SELECT previous_model_id FROM model_route)
+                   OR m.model_id IN (SELECT jsonb_array_elements_text(shadow_ids) FROM model_route)
+                   ORDER BY created_at DESC""",
             ),
             "events": rows(connection, "SELECT * FROM model_activation_event ORDER BY created_at DESC LIMIT 100"),
             "evaluations": rows(connection, "SELECT * FROM model_evaluation ORDER BY created_at DESC LIMIT 30"),

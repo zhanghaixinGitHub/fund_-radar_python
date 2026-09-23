@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 
 from app.services.prediction_contract import PredictionFailure, fingerprint, prediction_policy
+from app.services.prediction_direction import direction_fields, validate_identity
 from app.services.prediction_features import ZONE, build_features, cash_events, read_fund_data
 from app.services.prediction_models import infer_package
 from app.services.prediction_replay_models import replay_model_bundles
@@ -46,6 +47,7 @@ def replay_inputs(code: str, start: date, end: date, *, frozen_bundles=None, aut
             models = {}
             for ref in bundle["modelRefs"]:
                 model = load_model(ref["modelId"])
+                validate_identity(model["manifest"], ref["horizonId"])
                 if model["modelHash"] != ref["modelHash"]:
                     raise PredictionFailure("REPLAY_MODEL_HASH_MISMATCH", "REPLAY", "冻结模型指纹变化", retryable=False)
                 validate_historical_model(model["manifest"], datetime.combine(start, time.min, ZONE))
@@ -112,6 +114,8 @@ def replay_inputs(code: str, start: date, end: date, *, frozen_bundles=None, aut
                         {
                             "predictionId": f"REPLAY:{bundle['id']}:{code}:{day}:{horizon_id}",
                             "horizonId": horizon_id,
+                            "targetDefinitionId": policy["target_definition_id"],
+                            **direction_fields(horizon_id),
                             "direction": answer["direction"],
                             "modelId": model["modelId"],
                             "modelHash": model["modelHash"],

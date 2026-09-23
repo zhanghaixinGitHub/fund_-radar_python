@@ -31,6 +31,8 @@ IMPLEMENTATION_HASH = fingerprint(
             "prediction_contract.py",
             "auto_model_contract.py",
             "prediction_generation.py",
+            "prediction_direction.py",
+            "prediction_task_inputs.py",
         )
     }
 )
@@ -50,7 +52,7 @@ def auto_policy():
         assert 0 < policy["maximumWorkerSeconds"] <= 7200
         assert 1 <= policy["maximumSamples"] <= 200000
         assert policy["retryMinutes"] == [1, 5, 30]
-        assert policy["candidateRecipes"] == ["TOTAL_RETURN_LOGISTIC_V1"]
+        assert policy["candidateRecipes"] == ["TOTAL_RETURN_LOGISTIC_THREE_STATE_V2"]
         assert 0 <= policy["tolerance"] <= 1e-6 and 0 <= policy["maxDrawdownDeterioration"] <= 0.02
         assert all(policy[k] > 0 for k in ("trainingMonths", "validationMonths", "selectionMonths"))
         fee = policy["executionPolicy"]

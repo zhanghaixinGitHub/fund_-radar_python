@@ -9,7 +9,16 @@ from sqlalchemy import text
 
 from app.db.session import get_engine
 from app.repositories.prediction_store import encode, one, rows, save_prediction
-from app.services.prediction_contract import PredictionFailure, fingerprint, prediction_policy, target_dates
+from app.services.prediction_contract import (
+    PredictionFailure,
+    fingerprint,
+    legacy_policy,
+    policy_for_record,
+    policy_scope,
+    prediction_policy,
+    target_dates,
+)
+from app.services.prediction_direction import LABELS, classify, direction_fields, validate_identity
 from app.services.prediction_features import build_features, cash_events, read_fund_data
 from app.services.prediction_models import freeze_routes, infer_route, route_key
 
@@ -26,7 +35,7 @@ def create_task(codes, *, request_key=None, horizons=None, retry_items=None):
         raise PredictionFailure(
             "BATCH_INPUT_INVALID", "VALIDATION", "批量最多500只基金且只能使用已开放周期", retryable=False
         )
-    request_key = request_key or str(uuid4())
+    request_key = fingerprint(prediction_policy()) + ":" + (request_key or str(uuid4()))
     routes = freeze_routes()
     with get_engine().begin() as c:
         c.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": request_key})
@@ -42,6 +51,7 @@ def create_task(codes, *, request_key=None, horizons=None, retry_items=None):
             "generatedAt": now.isoformat(),
             "policyVersion": prediction_policy()["version"],
             "policyHash": fingerprint(prediction_policy()),
+            "predictionPolicy": prediction_policy(),
         }
         c.execute(
             text("""INSERT INTO prediction_generation_task(task_id,request_key,mode,status,payload)
@@ -103,13 +113,14 @@ def task_status(task_id):
 def prediction_payload(data, features, horizon, now, route, *, mode="LIVE", task_id=None):
     dates = target_dates(data["calendar"], now, horizon["horizon_id"])
     inference = infer_route(route, features["features"], horizon["horizon_id"])
-    direction = "上涨" if inference["direction"] == "UP" else "下跌或持平"
+    direction = LABELS[inference["direction"]]
     lookback = features["features"]["actualLookbackReturns"]
     return {
         "predictionId": str(uuid4()),
         "fundCode": data["fund"]["fund_code"],
         **dates,
         **inference,
+        "predictionPolicySnapshot": prediction_policy(),
         "mode": mode,
         "generationStatus": "SUCCEEDED",
         "generatedAt": now.isoformat(),
@@ -126,6 +137,24 @@ def prediction_payload(data, features, horizon, now, route, *, mode="LIVE", task
 
 
 def run_task(task_id):
+    with get_engine().connect() as c:
+        task = one(c, "SELECT payload FROM prediction_generation_task WHERE task_id=:id", id=task_id)
+    if not task:
+        return
+    frozen = task["payload"].get("predictionPolicy") or legacy_policy()
+    with policy_scope(frozen):
+        return _run_task(task_id)
+
+
+def prediction_period_key(result):
+    """相同基金/观察起点/目标/规则只有首份主预测；采用新模型也不覆盖本期原文。"""
+    base = f"LIVE:{result['fundCode']}:{result['horizonId']}:{result['startDate']}"
+    if result.get("directionPolicyHash"):
+        return base + f":TARGET:{result['targetDefinitionId']}:RULE:{result['directionPolicyHash']}"
+    return base
+
+
+def _run_task(task_id):
     """持久检查点按项提交；进程中断后只恢复未提交项，租约避免多服务同时运行。"""
     with get_engine().begin() as c:
         task = one(c, "SELECT * FROM prediction_generation_task WHERE task_id=:id FOR UPDATE", id=task_id)
@@ -163,13 +192,19 @@ def run_task(task_id):
             )
         try:
             if code not in cache:
-                try:
-                    cache[code] = read_fund_data(code, now)
-                except PredictionFailure as error:
-                    cache[code] = error
+                from app.services.prediction_task_inputs import task_input
+
+                cache[code] = task_input("LIVE", task_id, code, lambda code=code: read_fund_data(code, now))
             data = cache[code]
-            if isinstance(data, PredictionFailure):
-                raise data
+            if "frozenFailure" in data:
+                failure = data["frozenFailure"]
+                raise PredictionFailure(
+                    failure["code"],
+                    failure["stage"],
+                    failure["summary"],
+                    details=failure.get("details"),
+                    retryable=failure.get("retryable", True),
+                )
             horizon = policy[horizon_id]
             features = build_features(data, now, horizon["lookback_returns"])
             route = payload["routes"].get(route_key(horizon_id, data["fund"]["fund_type"])) or payload["routes"].get(
@@ -178,7 +213,7 @@ def run_task(task_id):
             if not route:
                 raise PredictionFailure("MODEL_PACKAGE_MISSING", "ROUTING", "本周期尚未登记可运行模型")
             result = prediction_payload(data, features, horizon, now, route, task_id=task_id)
-            period_key = f"LIVE:{code}:{horizon_id}:{result['startDate']}"
+            period_key = prediction_period_key(result)
             with get_engine().begin() as c:
                 result, created = save_prediction(c, result, period_key)
             status = "CREATED" if created else "REUSED"
@@ -228,6 +263,7 @@ def run_task(task_id):
                 },
             }
             status = "FAILED"
+        result.update(targetDefinitionId=prediction_policy()["target_definition_id"], **direction_fields(horizon_id))
         with get_engine().begin() as c:
             c.execute(
                 text("""INSERT INTO prediction_attempt(attempt_id,task_id,fund_code,horizon_id,payload)
@@ -283,23 +319,36 @@ def recover_tasks():
 def retry_failed(task_id):
     previous = task_status(task_id)
     failed = {(i["fundCode"], i["horizonId"]) for i in previous["items"] if i["status"] == "FAILED"}
-    return create_task([c for c, _ in failed], retry_items=failed)
+    with get_engine().connect() as c:
+        original = one(c, "SELECT payload FROM prediction_generation_task WHERE task_id=:id", id=task_id)
+    # 重试沿用原任务口径；新版本规则由正常的新建生成任务使用。
+    with policy_scope(original["payload"].get("predictionPolicy") or legacy_policy()):
+        return create_task([c for c, _ in failed], retry_items=failed)
 
 
 def current_predictions(fund_code):
+    target = prediction_policy()["target_definition_id"]
+    rule = direction_fields("T5_V1").get("directionPolicyHash", "")
     with get_engine().connect() as c:
         latest = rows(
             c,
             """SELECT DISTINCT ON(horizon_id) payload FROM fund_prediction_record
           WHERE fund_code=:code AND mode='LIVE' AND payload->>'role'='PRIMARY'
+          AND payload->>'targetDefinitionId'=:target AND COALESCE(payload->>'directionPolicyHash','')=:rule
           ORDER BY horizon_id,generated_at DESC""",
             code=fund_code,
+            target=target,
+            rule=rule,
         )
         attempts = rows(
             c,
             """SELECT DISTINCT ON(horizon_id) horizon_id,payload,created_at
-          FROM prediction_attempt WHERE fund_code=:code ORDER BY horizon_id,created_at DESC""",
+          FROM prediction_attempt WHERE fund_code=:code
+          AND payload->>'targetDefinitionId'=:target AND COALESCE(payload->>'directionPolicyHash','')=:rule
+          ORDER BY horizon_id,created_at DESC""",
             code=fund_code,
+            target=target,
+            rule=rule,
         )
         resolutions = rows(
             c,
@@ -311,6 +360,8 @@ def current_predictions(fund_code):
     return {
         "fundCode": fund_code,
         "horizons": prediction_policy()["horizons"],
+        "targetDefinitionId": target,
+        "directionPolicyHash": rule,
         "predictions": [r["payload"] for r in latest],
         "latestAttempts": attempts,
         "targetResolutions": {str(r["prediction_id"]): r["payload"] for r in resolutions},
@@ -348,7 +399,10 @@ def resolve_pending_targets(limit=100):
         try:
             prediction = item["payload"]
             resolved = target_dates(
-                public_calendar(item), datetime.fromisoformat(prediction["generatedAt"]), prediction["horizonId"]
+                public_calendar(item),
+                datetime.fromisoformat(prediction["generatedAt"]),
+                prediction["horizonId"],
+                policy=policy_for_record(prediction),
             )
             if resolved["startDate"] != prediction["startDate"]:
                 raise PredictionFailure("CALENDAR_START_REVISED", "CALENDAR", "新日历改变原起点，保留原目标等待核验")
@@ -392,7 +446,10 @@ def verify_outcomes(limit=100):
             end = prediction["endDate"]
             if not end:
                 resolved = target_dates(
-                    data["calendar"], datetime.fromisoformat(prediction["generatedAt"]), prediction["horizonId"]
+                    data["calendar"],
+                    datetime.fromisoformat(prediction["generatedAt"]),
+                    prediction["horizonId"],
+                    policy=policy_for_record(prediction),
                 )
                 if not resolved["endDate"]:
                     continue
@@ -417,11 +474,16 @@ def verify_outcomes(limit=100):
             events = cash_events(data, dates, now)
             series = reinvested_series(dates, nav, events)
             value = series[-1] / series[0] - 1
+            saved_policy = policy_for_record(prediction)
+            validate_identity(prediction, prediction["horizonId"], saved_policy)
+            actual = classify(value, prediction["horizonId"], saved_policy)
             outcome = {
                 "endDate": end,
                 "totalReturn": str(value),
-                "actualDirection": "UP" if value > 0 else "NON_UP",
-                "correct": (value > 0) == (prediction["direction"] == "UP"),
+                "actualDirection": actual,
+                "correct": actual == prediction["direction"],
+                **direction_fields(prediction["horizonId"], saved_policy),
+                "exactZero": value == 0,
                 "checkedAt": now.isoformat(),
                 "flat": value == 0,
                 "targetDefinitionId": prediction["targetDefinitionId"],

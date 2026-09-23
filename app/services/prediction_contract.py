@@ -4,6 +4,8 @@ import calendar as month_calendar
 import hashlib
 import json
 from bisect import bisect_left, bisect_right
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -11,7 +13,8 @@ from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-POLICY_FILE = Path(__file__).resolve().parents[1] / "data/prediction_policy_v1.json"
+POLICY_FILE = Path(__file__).resolve().parents[1] / "data/prediction_policy_v2.json"
+_frozen_policy = ContextVar("prediction_frozen_policy", default=None)
 
 
 def fingerprint(value) -> str:
@@ -23,9 +26,39 @@ def fingerprint(value) -> str:
     ).hexdigest()
 
 
-@lru_cache(maxsize=1)
 def prediction_policy() -> dict:
+    """工作线程使用任务冻结规则；没有任务上下文时读取本进程启动规则。"""
+    return _frozen_policy.get() or _configured_policy()
+
+
+@lru_cache(maxsize=1)
+def _configured_policy():
     return json.loads(POLICY_FILE.read_text(encoding="utf-8"))
+
+
+@lru_cache(maxsize=1)
+def legacy_policy():
+    return json.loads(POLICY_FILE.with_name("prediction_policy_v1.json").read_text(encoding="utf-8"))
+
+
+@contextmanager
+def policy_scope(policy):
+    """ContextVar隔离并发线程，异常也复原；禁止修改共享全局配置恢复旧任务。"""
+    token = _frozen_policy.set(policy)
+    try:
+        yield
+    finally:
+        _frozen_policy.reset(token)
+
+
+def policy_for_record(record):
+    """旧原文只认已知旧目标；新原文必须含完整规则，不用当前阈值补填历史。"""
+    if record.get("targetDefinitionId") == legacy_policy()["target_definition_id"]:
+        return legacy_policy()
+    frozen = record.get("predictionPolicySnapshot")
+    if not frozen or frozen.get("target_definition_id") != record.get("targetDefinitionId"):
+        raise PredictionFailure("DIRECTION_POLICY_MISSING", "READ", "预测缺少原始方向规则", retryable=False)
+    return frozen
 
 
 class PredictionFailure(ValueError):
@@ -97,8 +130,9 @@ def add_months(day: date, months: int) -> date:
     return date(year, month, min(day.day, month_calendar.monthrange(year, month)[1]))
 
 
-def target_dates(calendar: ValuationCalendar, generated_at: datetime, horizon_id: str) -> dict:
-    horizon = next((h for h in prediction_policy()["horizons"] if h["horizon_id"] == horizon_id), None)
+def target_dates(calendar: ValuationCalendar, generated_at: datetime, horizon_id: str, *, policy=None) -> dict:
+    policy = policy or prediction_policy()
+    horizon = next((h for h in policy["horizons"] if h["horizon_id"] == horizon_id), None)
     if horizon is None:
         raise PredictionFailure("HORIZON_NOT_CONFIGURED", "VALIDATION", "预测周期未开放", retryable=False)
     start = calendar.start(generated_at)
@@ -119,7 +153,7 @@ def target_dates(calendar: ValuationCalendar, generated_at: datetime, horizon_id
         "endDateStatus": "RESOLVED" if end else "PENDING_OFFICIAL_CALENDAR",
         "calendarId": calendar.calendar_id,
         "calendarHash": calendar.source_hash,
-        "targetDefinitionId": prediction_policy()["target_definition_id"],
+        "targetDefinitionId": policy["target_definition_id"],
         "horizonId": horizon_id,
     }
 

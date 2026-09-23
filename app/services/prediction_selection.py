@@ -9,6 +9,7 @@ from sqlalchemy import text
 from app.db.session import get_engine
 from app.repositories.prediction_store import encode
 from app.services.prediction_contract import PredictionFailure, fingerprint, prediction_policy
+from app.services.prediction_direction import CLASSES, three_state
 from app.services.prediction_models import activate, load_model
 
 
@@ -17,7 +18,12 @@ def evaluate_answers(planned: list[dict], answers: dict[str, dict]) -> dict:
     if len({p["key"] for p in planned}) != len(planned):
         raise ValueError("DUPLICATE_EVALUATION_QUESTION")
     families = defaultdict(list)
-    recalls = {"UP": [], "NON_UP": []}
+    labels = {p.get("actual") for p in planned} | {a.get("direction") for a in answers.values()}
+    tri = three_state()
+    if tri and "NON_UP" in labels:
+        raise PredictionFailure("DIRECTION_POLICY_MISMATCH", "EVALUATE", "三分类题集不能混入旧二分类答案")
+    recalls = {label: [] for label in (CLASSES if tri else ("UP", "NON_UP"))}
+    confusion = {actual: dict.fromkeys(recalls, 0) for actual in recalls}
     correct, counts, breakdown = 0, 0, defaultdict(lambda: [0, 0])
     for item in planned:
         answer = answers.get(item["key"])
@@ -26,6 +32,7 @@ def evaluate_answers(planned: list[dict], answers: dict[str, dict]) -> dict:
         success = int(answer["direction"] == item["actual"])
         families[(item["date"], item["family"])].append(success)
         recalls[item["actual"]].append(success)
+        confusion[item["actual"]][answer["direction"]] += 1
         correct += success
         counts += 1
         for group in ("type:" + item.get("fundType", "UNKNOWN"), "period:" + item["date"][:7], "fund:" + item["fund"]):
@@ -48,8 +55,32 @@ def evaluate_answers(planned: list[dict], answers: dict[str, dict]) -> dict:
         "accuracy": correct / counts if counts else None,
         "classRecall": recall_values,
         "balancedAccuracy": sum(available) / len(available) if available else None,
+        "classCounts": {k: len(v) for k, v in recalls.items()},
+        "confusionMatrix": confusion,
+        "alwaysFlatAccuracy": len(recalls.get("FLAT", [])) / counts if tri and counts else None,
+        "alwaysFlatBalancedAccuracy": (1 / len(available) if recalls.get("FLAT") else 0) if tri and available else None,
         "breakdown": {k: {"correct": v[0], "count": v[1]} for k, v in breakdown.items()},
     }
+
+
+def direction_not_worse(candidate, current, tolerance):
+    """自动采用还看三类均衡识别，防止只猜多数类持平取得虚高总正确率。"""
+    if (
+        candidate.get("primaryScore") is None
+        or current.get("primaryScore") is None
+        or candidate["coverage"] < current["coverage"]
+        or candidate["primaryScore"] < current["primaryScore"] - tolerance
+    ):
+        return False
+    if "FLAT" in candidate.get("classRecall", {}):
+        balanced = candidate.get("balancedAccuracy")
+        return (
+            balanced is not None
+            and current.get("balancedAccuracy") is not None
+            and balanced >= current["balancedAccuracy"] - tolerance
+            and balanced > (candidate.get("alwaysFlatBalancedAccuracy") or 0) + tolerance
+        )
+    return True
 
 
 def choose_candidate(current: dict, candidates: list[dict], *, protocol_hash: str) -> dict:
@@ -67,6 +98,15 @@ def choose_candidate(current: dict, candidates: list[dict], *, protocol_hash: st
             )
             continue
         metrics, best = candidate["metrics"], winner["metrics"]
+        if "FLAT" in metrics.get("classRecall", {}) and not direction_not_worse(metrics, current["metrics"], tolerance):
+            decisions.append(
+                {
+                    "modelId": candidate["modelId"],
+                    "decision": "RUN_AS_SHADOW",
+                    "reason": "三类均衡识别或持平对照不满足条件",
+                }
+            )
+            continue
         if metrics["primaryScore"] is None or metrics["coverage"] < current["metrics"]["coverage"]:
             decisions.append(
                 {"modelId": candidate["modelId"], "decision": "RUN_AS_SHADOW", "reason": "覆盖下降或无成熟评分"}

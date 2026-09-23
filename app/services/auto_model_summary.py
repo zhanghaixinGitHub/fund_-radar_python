@@ -3,6 +3,8 @@
 from app.db.session import get_engine
 from app.repositories.prediction_store import one, rows
 from app.services.auto_model_selection import summary
+from app.services.prediction_contract import prediction_policy
+from app.services.prediction_direction import direction_fields
 
 
 def operating_summary(codes):
@@ -11,14 +13,21 @@ def operating_summary(codes):
         attempts = rows(
             c,
             """SELECT DISTINCT ON(fund_code,horizon_id) fund_code,horizon_id,payload,created_at
-          FROM prediction_attempt WHERE fund_code=ANY(:codes) ORDER BY fund_code,horizon_id,created_at DESC""",
+          FROM prediction_attempt WHERE fund_code=ANY(:codes)
+          AND payload->>'targetDefinitionId'=:target AND COALESCE(payload->>'directionPolicyHash','')=:rule
+          ORDER BY fund_code,horizon_id,created_at DESC""",
             codes=codes,
+            target=prediction_policy()["target_definition_id"],
+            rule=direction_fields("T5_V1").get("directionPolicyHash", ""),
         )
         latest = one(
             c,
             """SELECT max(generated_at) generated FROM fund_prediction_record
-          WHERE mode='LIVE' AND payload->>'role'='PRIMARY' AND fund_code=ANY(:codes)""",
+          WHERE mode='LIVE' AND payload->>'role'='PRIMARY' AND fund_code=ANY(:codes)
+          AND payload->>'targetDefinitionId'=:target AND COALESCE(payload->>'directionPolicyHash','')=:rule""",
             codes=codes,
+            target=prediction_policy()["target_definition_id"],
+            rule=direction_fields("T5_V1").get("directionPolicyHash", ""),
         )
     statuses = {}
     for item in attempts:
@@ -47,7 +56,15 @@ def effect_summary(codes):
     with get_engine().connect() as c:
         counts = rows(
             c,
-            """SELECT p.horizon_id,count(*) records,count(DISTINCT p.fund_code) funds,
+            """SELECT p.horizon_id,p.payload->>'targetDefinitionId' target_definition_id,
+          COALESCE(p.payload->>'directionPolicyHash','') direction_policy_hash,
+          count(*) records,count(DISTINCT p.fund_code) funds,
+          count(*) FILTER(WHERE o.payload->>'actualDirection'='UP') up_actual,
+          count(*) FILTER(WHERE o.payload->>'actualDirection'='FLAT') flat_actual,
+          count(*) FILTER(WHERE o.payload->>'actualDirection'='DOWN') down_actual,
+          count(*) FILTER(WHERE o.payload->>'actualDirection'='UP' AND (o.payload->>'correct')::boolean) up_correct,
+          count(*) FILTER(WHERE o.payload->>'actualDirection'='FLAT' AND (o.payload->>'correct')::boolean) flat_correct,
+          count(*) FILTER(WHERE o.payload->>'actualDirection'='DOWN' AND (o.payload->>'correct')::boolean) down_correct,
           count(o.payload) matured,
           count(*) FILTER(WHERE o.payload IS NULL AND COALESCE(s.status,'')<>'FAILED' AND
             COALESCE(t.payload->>'endDate',p.payload->>'endDate',p.payload->>'nominalEndDate')>=
@@ -67,7 +84,8 @@ def effect_summary(codes):
           LEFT JOIN LATERAL (SELECT payload FROM prediction_target_resolution WHERE prediction_id=p.prediction_id
             ORDER BY created_at DESC,resolution_hash DESC LIMIT 1) t ON true
           WHERE p.mode='LIVE' AND p.payload->>'role'='PRIMARY' AND p.fund_code=ANY(:codes)
-          GROUP BY p.horizon_id ORDER BY p.horizon_id""",
+          GROUP BY p.horizon_id,p.payload->>'targetDefinitionId',COALESCE(p.payload->>'directionPolicyHash','')
+          ORDER BY p.horizon_id,target_definition_id,direction_policy_hash""",
             codes=codes,
         )
         distinct = one(
