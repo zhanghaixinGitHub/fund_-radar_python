@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     app_environment: str = "local"
     app_host: str = "127.0.0.1"
     app_port: int = 8000
+    # 模型正式实验产物独立于研究临时目录；备份需同时包含此目录和模型登记表。
+    prediction_model_directory: str = "data/prediction-models"
     ai_service_token: SecretStr = SecretStr("")
     # 费率后台任务回写 Java 的地址；令牌复用 AI_SERVICE_TOKEN，禁止从浏览器传入回调地址。
     core_service_base_url: str = "http://127.0.0.1:8080"

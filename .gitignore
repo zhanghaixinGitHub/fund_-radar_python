@@ -8,3 +8,5 @@ fund_ai.db
 .env
 .env.deepseek
 /.local-runs/
+.local-runs/
+data/prediction-models/

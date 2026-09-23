@@ -22,6 +22,7 @@ from app.repositories.fund_sync import get_latest_successful_sync_time
 from app.repositories.market_reference_sync import SourceCapabilityError
 from app.services.direction_1d_spx_manual import synchronize as synchronize_spx
 from app.services.direction_1d_sync import Direction1dSyncService
+from app.services.multi_prediction_sync import MultiPredictionSyncService
 from app.services.simulation_fee_sync import SimulationFeeSyncService
 from app.services.stock_feature_snapshot import (
     FeatureSnapshotBuildInProgressError,
@@ -50,6 +51,7 @@ STOCK_FEATURE_SNAPSHOT_JOB_TYPE = "STOCK_FEATURE_SNAPSHOT"
 MARKET_FREE_DATA_COMPLETION_JOB_TYPE = "MARKET_FREE_DATA_COMPLETION"
 SPX_MANUAL_JOB_TYPE = "SPX_MANUAL"
 SIMULATION_FEE_JOB_TYPE = "SIMULATION_FEES"
+MULTI_PREDICTION_JOB_TYPE = "MULTI_PREDICTIONS"
 DIRECTION_1D_JOB_TYPE = "DIRECTION_1D_PREDICTIONS"
 _ALL_JOB_STAGES = (
     # SPX有早上08:00的观测边界，先取这一小份数据，避免被较长的全市场同步拖到截止后。
@@ -59,8 +61,8 @@ _ALL_JOB_STAGES = (
     (MARKET_NAV_INCREMENTAL_JOB_TYPE, "净值增量"),
     (STOCK_FEATURE_SNAPSHOT_JOB_TYPE, "历史指标计算"),
     # 预测使用前面已同步净值；独立校验输入完整性，来源失败时不能默认算作预测成功。
-    (DIRECTION_1D_JOB_TYPE, "全部关注基金预测"),
     (SIMULATION_FEE_JOB_TYPE, "模拟费率"),
+    (MULTI_PREDICTION_JOB_TYPE, "全部关注多周期预测、综合建议与到期核验"),
 )
 _ACTIVE_STATUSES = frozenset({"QUEUED", "RUNNING"})
 _SYNC_TYPES_BY_JOB_TYPE = {
@@ -123,6 +125,7 @@ class LocalSyncJobManager:
         spx_synchronizer: Callable[[], dict] = synchronize_spx,
         fee_service_factory: Callable[[], SimulationFeeSyncService] = SimulationFeeSyncService,
         prediction_service_factory: Callable[[], Direction1dSyncService] = Direction1dSyncService,
+        multi_prediction_service_factory=MultiPredictionSyncService,
     ) -> None:
         self._service_factory = service_factory
         self._feature_service_factory = feature_service_factory
@@ -130,6 +133,7 @@ class LocalSyncJobManager:
         self._spx_synchronizer = spx_synchronizer
         self._fee_service_factory = fee_service_factory
         self._prediction_service_factory = prediction_service_factory
+        self._multi_prediction_service_factory = multi_prediction_service_factory
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fund-sync-job")
         self._jobs: dict[UUID, SyncJobSnapshot] = {}
         self._latest_job_ids: dict[str, UUID] = {}
@@ -161,6 +165,10 @@ class LocalSyncJobManager:
     def start_direction_1d_predictions(self) -> SyncJobSnapshot:
         """与一键同步共用后台队列，独立手动执行不要求任何个人实验开关。"""
         return self._start_job(DIRECTION_1D_JOB_TYPE, self._run_direction_1d_predictions)
+
+    def start_multi_predictions(self) -> SyncJobSnapshot:
+        """持久公共预测批次与个人综合建议按依赖顺序执行。"""
+        return self._start_job(MULTI_PREDICTION_JOB_TYPE, self._run_multi_predictions)
 
     def start_all(self) -> SyncJobSnapshot:
         """原子登记六个子任务；完整资料由资料更新覆盖，批次不依赖浏览器存活。"""
@@ -228,8 +236,8 @@ class LocalSyncJobManager:
             self._run_market_free_data_completion,
             lambda child_id: self._run_market_nav_incremental(child_id, build_features=False),
             self._run_stock_feature_snapshots,
-            self._run_direction_1d_predictions,
             self._run_simulation_fees,
+            self._run_multi_predictions,
         )
         try:
             child_ids = self._batch_child_ids[job_id]
@@ -568,6 +576,50 @@ class LocalSyncJobManager:
             )
         except Exception:
             logger.exception("sync_jobs._run_direction_1d_predictions >>> task failed, job_id=%s", job_id)
+            self._fail_job(job_id, "PREDICTION_SYNC_FAILED", "预测任务未完成，请检查核心服务连接或稍后重试。")
+        finally:
+            try:
+                if service is not None:
+                    service.close()
+            finally:
+                with self._lock:
+                    if self._active_job_id == job_id:
+                        self._active_job_id = None
+
+    def _run_multi_predictions(self, job_id: UUID) -> None:
+        """单位为基金周期项；失败未被丢弃，公共结果、Java个人留档和到期核验顺序执行。"""
+        service = None
+        self._replace_job(
+            job_id, status="RUNNING", started_at=datetime.now(UTC), progress_message="正在读取全部关注基金与已开放周期",
+        )
+        try:
+            service = self._multi_prediction_service_factory()
+            result = service.sync(progress_reporter=lambda current, total, code, message: self._update_progress(
+                job_id, current, total, code, message,
+            ))
+            status = (
+                "SUCCEEDED" if not result.issues
+                else "PARTIAL_SUCCESS" if result.created + result.existing else "FAILED"
+            )
+            self._replace_job(
+                job_id, status=status, requested_nav_date=result.target_date,
+                progress_current=result.total, progress_total=result.total, current_fund_code=None,
+                fetched_count=result.total, created_count=result.created, updated_count=result.existing,
+                skipped_count=len(result.issues),
+                progress_message=(
+                    f"多周期共处理 {result.total} 个基金周期项，新生成 {result.created}，"
+                    f"已有 {result.existing}，未生成 {len(result.issues)}"
+                ),
+                error_code="PREDICTION_INCOMPLETE" if result.issues else None,
+                error_message="；".join(result.issues[:100]) if result.issues else None,
+                finished_at=datetime.now(UTC),
+            )
+            logger.info(
+                "sync_jobs._run_multi_predictions >>> job_id=%s, status=%s, total=%s, created=%s, existing=%s",
+                job_id, status, result.total, result.created, result.existing,
+            )
+        except Exception:
+            logger.exception("sync_jobs._run_multi_predictions >>> task failed, job_id=%s", job_id)
             self._fail_job(job_id, "PREDICTION_SYNC_FAILED", "预测任务未完成，请检查核心服务连接或稍后重试。")
         finally:
             try:

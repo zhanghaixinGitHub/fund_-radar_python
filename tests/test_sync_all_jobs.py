@@ -20,8 +20,8 @@ STAGES = (
     "MARKET_FREE_DATA_COMPLETION",
     "MARKET_NAV_INCREMENTAL",
     "STOCK_FEATURE_SNAPSHOT",
-    "DIRECTION_1D_PREDICTIONS",
     "SIMULATION_FEES",
+    "MULTI_PREDICTIONS",
 )
 
 
@@ -91,13 +91,20 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
 
     class PredictionService:
         def sync(self, *, progress_reporter):
-            run("DIRECTION_1D_PREDICTIONS", progress_reporter)
+            run("MULTI_PREDICTIONS", progress_reporter)
             return Direction1dSyncResult(date(2026, 9, 23), 2, 1, 1, ())
 
         def close(self):
-            close_hook("DIRECTION_1D_PREDICTIONS")
+            close_hook("MULTI_PREDICTIONS")
 
-    return LocalSyncJobManager(FundService, FeatureService, FreeService, spx_sync, FeeService, PredictionService)
+    return LocalSyncJobManager(
+        FundService,
+        FeatureService,
+        FreeService,
+        spx_sync,
+        FeeService,
+        multi_prediction_service_factory=PredictionService,
+    )
 
 
 def wait_finished(manager, job_id):
@@ -131,7 +138,7 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
             child = manager.get_latest_job(stage)
             assert child.status == ("FAILED" if stage in failures else "SUCCEEDED")
             assert child.started_at and child.finished_at
-            if stage not in failures and stage not in {"SPX_MANUAL", "SIMULATION_FEES", "DIRECTION_1D_PREDICTIONS"}:
+            if stage not in failures and stage not in {"SPX_MANUAL", "SIMULATION_FEES", "MULTI_PREDICTIONS"}:
                 assert child.sync_run_id is not None
         next_batch = manager.start_all()
         assert next_batch.job_id != started.job_id
@@ -305,6 +312,7 @@ def test_internal_single_fee_api_returns_job_and_latest_without_expanding_scope(
             response = client.post(path, params={"fundCode": "008888"}, headers=headers)
             assert response.status_code == 202
             from uuid import UUID
+
             result = wait_finished(manager, UUID(response.json()["job_id"]))
             latest = client.get(path + "/latest", headers=headers).json()
             assert latest["job_id"] == str(result.job_id)

@@ -170,6 +170,9 @@ def test_scale_valid_when_change_below_thresholds():
     item = items_by_key(facts(make_inputs()))["SCALE"]
     assert item.verdict == "VALID"
     assert item.facts["latest_share"] == Decimal("110")
+    assert item.facts["source_unit"] == "TEN_THOUSAND_SHARES"
+    assert item.facts["latest_shares_normalized"] == Decimal("1100000")
+    assert "110 万份" in item.evidence
     assert item.facts["previous_share"] == Decimal("100")
     assert item.facts["change_ratio"] == Decimal("0.100000")
     assert item.data_as_of_date == date(2026, 9, 16)

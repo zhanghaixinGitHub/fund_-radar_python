@@ -431,16 +431,19 @@ def _scale_item(inputs: DiagnosisInputs, as_of: date) -> DiagnosisFactItem:
     else:
         note = "未达到文档参考阈值（+100% / −50%）。"
     change_text = (
-        f"相对上一可得时点 {previous.trade_date} 的 {previous.fund_share} 份变化 {change_ratio:+.2%}；"
+        f"相对上一可得时点 {previous.trade_date} 的 {previous.fund_share} 万份变化 {change_ratio:+.2%}；"
         if previous is not None and change_ratio is not None
         else ""
     )
     evidence = (
-        f"最新规模 {latest.fund_share} 份（{latest.trade_date}）；{change_text}{note}"
-        f"近一年最高 {high.fund_share} 份（{high.trade_date}）、最低 {low.fund_share} 份（{low.trade_date}）。"
+        f"最新基金份额 {latest.fund_share} 万份（{latest.trade_date}）；{change_text}{note}"
+        f"近一年最高 {high.fund_share} 万份（{high.trade_date}）、最低 {low.fund_share} 万份（{low.trade_date}）。"
         "与报告基线的最终对比由 Java 侧以事实字段为准判定。"
     )
+    # Tushare fund_share.fd_share原始单位为万份，不是资金规模；保留原值并给出标准份数。
     facts = {
+        "source_unit": "TEN_THOUSAND_SHARES",
+        "latest_shares_normalized": latest.fund_share * Decimal(10000),
         "latest_share": latest.fund_share,
         "latest_trade_date": latest.trade_date,
         "previous_share": previous.fund_share if previous is not None else None,
