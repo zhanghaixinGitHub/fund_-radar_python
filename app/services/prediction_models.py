@@ -287,6 +287,7 @@ def bootstrap_models():
 
 def freeze_routes():
     with get_engine().connect() as connection:
+        # 一条语句的MVCC快照固定整个发布批次，不能逐周期读取混入不同发布。
         return {r["route_key"]: r for r in rows(connection, "SELECT * FROM model_route ORDER BY route_key")}
 
 
@@ -305,9 +306,20 @@ def infer_route(route, features, horizon_id):
             filter(None, [requested, route.get("previous_model_id"), baseline["model_id"] if baseline else None])
         )
     )
+    if route.get("strictModel"):
+        candidates = [requested]
     failures = []
     for candidate in candidates:
         try:
+            with get_engine().connect() as connection:
+                quarantined = one(
+                    connection,
+                    """SELECT reason FROM prediction_model_quarantine
+                  WHERE model_id=:id AND retry_after>clock_timestamp()""",
+                    id=candidate,
+                )
+            if quarantined:
+                raise PredictionFailure("MODEL_QUARANTINED", "INFERENCE", "问题包处于故障隔离期", retryable=False)
             model = load_model(candidate)
             result = infer_package(model["manifest"], features)
             result.update(
@@ -318,6 +330,8 @@ def infer_route(route, features, horizon_id):
                 fallbackReason=failures or None,
                 modelManifest=model["manifest"],
                 baseline=model["manifest"]["adapter"] == "NAV_MOMENTUM_V1",
+                releaseId=str(route["release_id"]) if route.get("release_id") and not failures else None,
+                requestedReleaseId=str(route["release_id"]) if route.get("release_id") else None,
             )
             if failures:
                 with get_engine().begin() as connection:
@@ -346,6 +360,21 @@ def infer_route(route, features, horizon_id):
             )
         except PredictionFailure as error:
             failures.append(error.payload | {"modelId": candidate})
+            if error.payload["code"] in {
+                "MODEL_HASH_MISMATCH",
+                "MODEL_PACKAGE_MISSING",
+                "MODEL_ADAPTER_UNSUPPORTED",
+                "MODEL_PACKAGE_INCOMPATIBLE",
+                "INFERENCE_ERROR",
+            }:
+                with get_engine().begin() as connection:
+                    connection.execute(
+                        text("""INSERT INTO prediction_model_quarantine(model_id,reason,retry_after)
+                      VALUES(:id,CAST(:reason AS jsonb),clock_timestamp()+interval '30 minutes')
+                      ON CONFLICT(model_id) DO UPDATE SET reason=excluded.reason,retry_after=excluded.retry_after,
+                      failure_count=prediction_model_quarantine.failure_count+1"""),
+                        {"id": candidate, "reason": encode(error.payload)},
+                    )
     raise PredictionFailure(
         "INFERENCE_ERROR", "INFERENCE", "当前模型、旧模型和基线均无法运行", details={"attempts": failures}
     )

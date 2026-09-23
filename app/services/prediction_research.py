@@ -2,8 +2,10 @@
 
 import importlib.metadata
 import logging
+import time as monotonic_time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, time
+from threading import BoundedSemaphore
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -18,12 +20,33 @@ from app.services.prediction_contract import (
     reinvested_series,
     target_dates,
 )
-from app.services.prediction_features import build_features, cash_events, read_fund_data
+from app.services.prediction_features import build_features, cash_events, known_nav_version, read_fund_data
 from app.services.prediction_models import FEATURES, freeze_routes, infer_package, load_model, register_model, route_key
 from app.services.prediction_selection import compare_and_activate, evaluate_answers
 
 logger = logging.getLogger(__name__)
-_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="historical-research")
+
+
+class ResearchExecutor(ThreadPoolExecutor):
+    """进程内只接纳一件工作；其余任务留数据库排队，由既有维护恢复，避免内存队列堆积。"""
+
+    def __init__(self):
+        super().__init__(max_workers=1, thread_name_prefix="historical-research")
+        self._admission = BoundedSemaphore(1)
+
+    def submit(self, fn, /, *args, **kwargs):
+        if not self._admission.acquire(blocking=False):
+            return None
+        try:
+            future = super().submit(fn, *args, **kwargs)
+            future.add_done_callback(lambda _: self._admission.release())
+            return future
+        except Exception:
+            self._admission.release()
+            raise
+
+
+_executor = ResearchExecutor()
 ZONE = ZoneInfo("Asia/Shanghai")
 
 
@@ -31,8 +54,14 @@ def validate_spec(spec):
     dates = [date.fromisoformat(spec[k]) for k in ("trainStart", "trainEnd", "validationEnd", "selectionEnd")]
     if not dates[0] < dates[1] < dates[2] < dates[3] < date.today():
         raise PredictionFailure("RESEARCH_SPLIT_INVALID", "RESEARCH", "训练、验证、选优时间必须严格先后且已经结束")
-    if len(spec["fundCodes"]) > 50 or len(set(spec["fundCodes"])) != len(spec["fundCodes"]):
+    if (len(spec["fundCodes"]) > 50 and not spec.get("autoCycleId")) or len(set(spec["fundCodes"])) != len(
+        spec["fundCodes"]
+    ):
         raise ValueError("RESEARCH_FUND_BUDGET")
+    if spec.get("autoCycleId"):
+        shards = spec["shards"]
+        if any(len(s) > 50 for s in shards) or [code for shard in shards for code in shard] != spec["fundCodes"]:
+            raise ValueError("RESEARCH_SHARDS_INVALID")
     if (dates[3] - dates[0]).days > 1461 or spec.get("stride", 5) < 5:
         raise ValueError("RESEARCH_RESOURCE_BUDGET")
     if spec.get("evidenceLevel") != "DEVELOPMENT_ONLY":
@@ -71,7 +100,7 @@ def validate_historical_model(manifest, fit_as_of):
         )
 
 
-def create_research(spec):
+def create_research(spec, *, submit=True):
     validate_spec(spec)
     run_id = uuid4()
     frozen = spec | {
@@ -80,10 +109,19 @@ def create_research(spec):
         "candidates": ["NAV_MOMENTUM_BASELINE_V1", "TOTAL_RETURN_LOGISTIC_V1"],
         "scopeNote": "按当前关注集合回看历史，不代表全市场；历史版本存在可得性假设",
         "policyHash": fingerprint(prediction_policy()),
-        "routes": freeze_routes(),
+        "routes": spec.get("routes") or freeze_routes(),
     }
     with get_engine().begin() as c:
         c.execute(text("SELECT pg_advisory_xact_lock(721109,2)"))
+        if spec.get("autoCycleId"):
+            existing = one(
+                c,
+                "SELECT run_id FROM prediction_research_run WHERE auto_cycle_id=:cycle AND spec_hash=:hash",
+                cycle=spec["autoCycleId"],
+                hash=fingerprint(frozen),
+            )
+            if existing:
+                return research_status(existing["run_id"])
         if (
             c.execute(
                 text("SELECT count(*) FROM prediction_research_run WHERE status IN ('QUEUED','RUNNING')")
@@ -96,6 +134,11 @@ def create_research(spec):
           VALUES(:id,:hash,CAST(:spec AS jsonb),'QUEUED')"""),
             {"id": run_id, "hash": fingerprint(frozen), "spec": encode(frozen)},
         )
+        if spec.get("autoCycleId"):
+            c.execute(
+                text("UPDATE prediction_research_run SET auto_cycle_id=:cycle WHERE run_id=:id"),
+                {"cycle": spec["autoCycleId"], "id": run_id},
+            )
         c.execute(
             text("""INSERT INTO prediction_evaluation_usage(usage_id,sample_hash,purpose,run_id,start_date,end_date)
           VALUES(:id,:hash,'DEVELOPMENT_ONLY',:run,:start,:end)"""),
@@ -107,7 +150,8 @@ def create_research(spec):
                 "end": spec["selectionEnd"],
             },
         )
-    _executor.submit(run_research, run_id)
+    if submit:
+        _executor.submit(run_research, run_id)
     return research_status(run_id)
 
 
@@ -178,7 +222,36 @@ def fit_package(samples, horizon, fit_as_of):
     return package
 
 
-def run_research(run_id):
+def label_values(data, dates, boundary):
+    """训练和评价答案也受修订/公开时间约束，不能只保护特征却让晚修订答案进入拟合。"""
+    selected = {}
+    published = []
+    for raw in data["navs"]:
+        if raw["nav_date"] not in dates:
+            continue
+        row = known_nav_version(raw, data.get("navVersions", {}).get(str(raw["nav_date"]), []), boundary, True)
+        if row.get("source_published_at") and row["source_published_at"] > boundary:
+            raise PredictionFailure("TRAINING_LABEL_NOT_MATURE", "LABEL", "答案净值在切分截止后才公开", retryable=False)
+        selected[row["nav_date"]] = row["unit_nav"]
+        if row.get("source_published_at"):
+            published.append(row["source_published_at"])
+    return selected, max(published, default=None)
+
+
+def run_research(run_id, *, shared_lock=False):
+    """手动和自动共用数据库会话锁；线程池以外的进程也不能并发占满训练资源。"""
+    if shared_lock:
+        return _run_research(run_id)
+    with get_engine().connect() as lock:
+        if not lock.execute(text("SELECT pg_try_advisory_lock(721109,4)")).scalar():
+            return
+        try:
+            return _run_research(run_id)
+        finally:
+            lock.execute(text("SELECT pg_advisory_unlock(721109,4)"))
+
+
+def _run_research(run_id):
     with get_engine().begin() as c:
         claimed = c.execute(
             text("""UPDATE prediction_research_run SET status='RUNNING',
@@ -197,6 +270,9 @@ def run_research(run_id):
     config = {h["horizon_id"]: h for h in prediction_policy()["horizons"]}
     cutoff = datetime.combine(date.fromisoformat(spec["selectionEnd"]), time(23, 59), ZONE)
     data_cache = {}
+    # 总预算平均分给固定周期，避免每个周期各吃一份“本轮”预算；失败计划题同样受限。
+    sample_budget = spec.get("policy", {}).get("maximumSamples", 200000) // len(spec["horizonIds"])
+    started = monotonic_time.monotonic()
     try:
         for horizon_id in spec["horizonIds"]:
             if horizon_id in results:
@@ -208,6 +284,16 @@ def run_research(run_id):
             samples, failures = [], []
             planned_selection = []
             for fund in spec["fundCodes"]:
+                if spec.get("autoCycleId"):
+                    from app.services.auto_model_store import cycle_state
+
+                    if cycle_state(spec["autoCycleId"])["cancel_requested"]:
+                        checkpoint(run_id, saved, result={"horizons": results}, status="CANCELLED")
+                        return
+                if monotonic_time.monotonic() - started > spec.get("maximumWorkerSeconds", 3600):
+                    raise PredictionFailure(
+                        "RESEARCH_TIME_BUDGET", "TRAIN", "本轮研究达到时间预算，保留检查点", retryable=False
+                    )
                 with get_engine().begin() as c:
                     cancelled = c.execute(
                         text("""UPDATE prediction_research_run
@@ -220,14 +306,34 @@ def run_research(run_id):
                     return
                 try:
                     if fund not in data_cache:
-                        data_cache[fund] = read_fund_data(
-                            fund, cutoff, replay=True, start=date.fromisoformat(spec["trainStart"])
-                        )
+                        if len(data_cache) >= spec.get("policy", {}).get("shardSize", 50):
+                            data_cache.pop(next(iter(data_cache)))
+
+                        def loader(fund=fund):
+                            return read_fund_data(
+                                fund, cutoff, replay=True, start=date.fromisoformat(spec["trainStart"])
+                            )
+
+                        if spec.get("autoCycleId"):
+                            from app.services.auto_model_store import frozen_input
+
+                            def immutable_loader(loader=loader):
+                                try:
+                                    return loader()
+                                except PredictionFailure as error:
+                                    # 数据缺口也属于本轮输入，恢复时不能悄悄用修订后的来源补齐。
+                                    return {"frozenFailure": error.payload}
+
+                            data_cache[fund] = frozen_input(spec["autoCycleId"], "fund:" + fund, immutable_loader)
+                        else:
+                            data_cache[fund] = loader()
                     data = data_cache[fund]
+                    if "frozenFailure" in data:
+                        failure = data["frozenFailure"]
+                        raise PredictionFailure(failure["code"], "FROZEN_INPUT", failure["summary"], retryable=False)
                     sessions = [
                         d for d in data["calendar"].sessions if spec["trainStart"] <= str(d) <= spec["selectionEnd"]
                     ][:: spec.get("stride", 5)]
-                    nav = {r["nav_date"]: r["unit_nav"] for r in data["navs"]}
                     for day in sessions:
                         asof = datetime.combine(day, time(10), ZONE)
                         key = f"{fund}:{day}:{horizon_id}"
@@ -241,6 +347,10 @@ def run_research(run_id):
                         }
                         if spec["validationEnd"] < str(day) <= spec["selectionEnd"]:
                             planned_selection.append(planned)
+                            if len(planned_selection) > sample_budget:
+                                raise PredictionFailure(
+                                    "RESEARCH_SAMPLE_BUDGET", "TRAIN", "固定计划题集超过本轮资源预算", retryable=False
+                                )
                         try:
                             target = target_dates(data["calendar"], asof, horizon_id)
                             if not target["endDate"] or target["endDate"] >= spec["selectionEnd"]:
@@ -257,7 +367,19 @@ def run_research(run_id):
                             if not set(FEATURES) <= features["features"].keys():
                                 continue
                             dates = [d for d in future if day <= d <= end]
-                            series = reinvested_series(dates, nav, cash_events(data, dates, cutoff, replay=True))
+                            boundary_day = (
+                                spec["trainEnd"]
+                                if str(day) <= spec["trainEnd"]
+                                else spec["validationEnd"]
+                                if str(day) <= spec["validationEnd"]
+                                else spec["selectionEnd"]
+                            )
+                            boundary = datetime.combine(date.fromisoformat(boundary_day), time(23, 59), ZONE)
+                            if available > boundary:
+                                continue
+                            nav, published = label_values(data, set(dates), boundary)
+                            available = max(available, published) if published else available
+                            series = reinvested_series(dates, nav, cash_events(data, dates, boundary, replay=True))
                             actual = "UP" if series[-1] > series[0] else "NON_UP"
                             planned["actual"] = actual
                             samples.append(
@@ -274,9 +396,17 @@ def run_research(run_id):
                                     "dataQuality": "ASSUMED_AVAILABILITY",
                                 }
                             )
+                            if len(samples) > sample_budget:
+                                raise PredictionFailure(
+                                    "RESEARCH_SAMPLE_BUDGET", "TRAIN", "成熟样本超过本轮分配的资源预算", retryable=False
+                                )
                         except PredictionFailure as error:
+                            if error.payload["code"] == "RESEARCH_SAMPLE_BUDGET":
+                                raise
                             failures.append({"key": key, "error": error.payload})
                 except PredictionFailure as error:
+                    if error.payload["code"] == "RESEARCH_SAMPLE_BUDGET":
+                        raise
                     failures.append({"fund": fund, "horizon": horizon_id, "error": error.payload})
             fit_asof = datetime.combine(date.fromisoformat(spec["trainEnd"]), time(23, 59), ZONE)
             fit = [
@@ -331,7 +461,20 @@ def run_research(run_id):
                         "activationRevision": route["revision"],
                     }
                 )
-            selection = compare_and_activate(str(run_id), evaluated[0], evaluated[1:], protocol)
+            # 方向评价只是提名；人工研究也不得绕过完整组合的扣费比较提前发布。
+            selection = compare_and_activate(str(run_id), evaluated[0], evaluated[1:], protocol, publish=False)
+            # 并行真实输出只用于后续同题到期验证；不改变主模型/修订号，不覆盖其他窗口路由。
+            with get_engine().begin() as c:
+                c.execute(
+                    text("""UPDATE model_route SET shadow_ids=CAST(:ids AS jsonb)
+                  WHERE route_key=:key AND model_id=:model AND revision=:revision"""),
+                    {
+                        "ids": encode([m["modelId"] for m in evaluated[1:]][:3]),
+                        "key": route_key(horizon_id),
+                        "model": route["model_id"],
+                        "revision": route["revision"],
+                    },
+                )
             results[horizon_id] = {
                 "selection": selection,
                 "models": evaluated,
@@ -364,8 +507,10 @@ def recover_research():
         ids = (
             c.execute(
                 text("""UPDATE prediction_research_run SET status='INTERRUPTED',lease_until=NULL
-                           WHERE status IN ('RUNNING','QUEUED','INTERRUPTED')
-                           AND (lease_until IS NULL OR lease_until<clock_timestamp()) RETURNING run_id""")
+                           WHERE run_id=(SELECT run_id FROM prediction_research_run
+                           WHERE status IN ('RUNNING','QUEUED','INTERRUPTED') AND auto_cycle_id IS NULL
+                           AND (lease_until IS NULL OR lease_until<clock_timestamp())
+                           ORDER BY created_at LIMIT 1) RETURNING run_id""")
             )
             .scalars()
             .all()

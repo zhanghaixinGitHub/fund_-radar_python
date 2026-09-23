@@ -94,8 +94,8 @@ def test_newer_but_worse_kept_as_shadow_and_tie_breaks():
     result = choose_candidate(old, [candidate("new", 0.50, label="2025-01-01")], protocol_hash="p")
     assert result["decision"] == "KEEP_CURRENT"
     assert result["shadows"] == ["new"]
-    assert choose_candidate(old, [candidate("cheap", cost=0.5)], protocol_hash="p")["winner"] == "cheap"
-    assert choose_candidate(old, [candidate("recent", label="2025-01-01")], protocol_hash="p")["winner"] == "recent"
+    assert choose_candidate(old, [candidate("cheap", cost=0.5)], protocol_hash="p")["winner"] == "old"
+    assert choose_candidate(old, [candidate("recent", label="2025-01-01")], protocol_hash="p")["winner"] == "old"
     bad = deepcopy(old)
     bad.update(modelId="incomparable", sampleHash="other")
     with pytest.raises(PredictionFailure):

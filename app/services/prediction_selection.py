@@ -53,7 +53,7 @@ def evaluate_answers(planned: list[dict], answers: dict[str, dict]) -> dict:
 
 
 def choose_candidate(current: dict, candidates: list[dict], *, protocol_hash: str) -> dict:
-    """统计容差内才按成本/同配方新标签/模型标识定序；较新但较差不替代。"""
+    """同题主指标严格改善才提名，平分保留当前，训练更新日期不是优势。"""
     tolerance = prediction_policy()["selection"]["tolerance"]
     winner, decisions = current, []
     for candidate in sorted(candidates, key=lambda c: c["modelId"]):
@@ -73,15 +73,7 @@ def choose_candidate(current: dict, candidates: list[dict], *, protocol_hash: st
             )
             continue
         difference = metrics["primaryScore"] - (best["primaryScore"] if best["primaryScore"] is not None else -1)
-        tie_better = False
-        if abs(difference) <= tolerance:
-            tie_better = candidate["cost"] < winner["cost"]
-            if candidate["cost"] == winner["cost"]:
-                if candidate["recipe"] == winner["recipe"]:
-                    tie_better = (candidate.get("labelEndMax") or "") > (winner.get("labelEndMax") or "")
-                if candidate.get("labelEndMax") == winner.get("labelEndMax"):
-                    tie_better = candidate["modelId"] < winner["modelId"]
-        if difference > tolerance or tie_better:
+        if difference > tolerance:
             winner = candidate
         decisions.append(
             {
@@ -93,7 +85,7 @@ def choose_candidate(current: dict, candidates: list[dict], *, protocol_hash: st
     changed = winner["modelId"] != current["modelId"]
     for item in decisions:
         if changed and item["modelId"] == winner["modelId"]:
-            item.update(decision="ACTIVATE", reason="同题主指标严格改善，或容差内按预先固定的成本与版本次序胜出")
+            item.update(decision="ACTIVATE", reason="同题主指标严格改善；自动采用仍须完整组合扣费比较")
     return {
         "decision": "ACTIVATE" if changed else "KEEP_CURRENT",
         "winner": winner["modelId"],
@@ -104,7 +96,7 @@ def choose_candidate(current: dict, candidates: list[dict], *, protocol_hash: st
     }
 
 
-def compare_and_activate(experiment_id, current, candidates, protocol):
+def compare_and_activate(experiment_id, current, candidates, protocol, *, publish=True):
     """研究完成调用此入口；先保存比较证据，再CAS切换，回执可独立重读。"""
     protocol_hash = fingerprint(protocol)
     result = choose_candidate(current, candidates, protocol_hash=protocol_hash)
@@ -115,6 +107,8 @@ def compare_and_activate(experiment_id, current, candidates, protocol):
           VALUES(:id,:experiment,:hash,CAST(:payload AS jsonb)) ON CONFLICT(content_hash) DO NOTHING"""),
             {"id": uuid4(), "experiment": experiment_id, "hash": fingerprint(proof), "payload": encode(proof)},
         )
+    if not publish:
+        return result | {"publication": "CANDIDATE_ONLY"}
     if result["decision"] == "ACTIVATE":
         package = load_model(result["winner"])["manifest"]
         if package["trainedAt"] and datetime.fromisoformat(package["trainedAt"]) > datetime.now().astimezone():

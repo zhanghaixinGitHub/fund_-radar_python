@@ -185,7 +185,12 @@ def run_task(task_id):
             # 候选以自身模型身份独立落档，不混入主预测统计与用户当前卡。
             for shadow in route.get("shadow_ids", [])[:3]:
                 try:
-                    shadow_route = route | {"model_id": shadow, "previous_model_id": None}
+                    shadow_route = route | {
+                        "model_id": shadow,
+                        "previous_model_id": None,
+                        "strictModel": True,
+                        "release_id": None,
+                    }
                     shadow_result = prediction_payload(data, features, horizon, now, shadow_route, task_id=task_id)
                     shadow_result["role"] = "SHADOW"
                     with get_engine().begin() as c:

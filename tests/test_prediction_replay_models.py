@@ -68,6 +68,7 @@ def test_failed_package_does_not_prevent_other_complete_bundle(registry, monkeyp
 def replay_fixture(monkeypatch):
     days = [date(2026, 1, 5), date(2026, 1, 6)]
     data = {
+        "fund": {"fund_master_id": "fixture-family"},
         "calendar": SimpleNamespace(sessions=days, source_hash="calendar"),
         "navs": [{"nav_date": d, "unit_nav": Decimal(1)} for d in days],
         "dividends": [],

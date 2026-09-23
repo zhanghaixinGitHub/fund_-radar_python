@@ -5,6 +5,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.dependencies import require_service_token
@@ -22,7 +23,25 @@ from app.services.prediction_generation import (
 from app.services.prediction_models import model_status
 from app.services.prediction_research import create_research, recover_research, research_status
 
-router = APIRouter(dependencies=[Depends(require_service_token)])
+
+class PredictionRoute(APIRoute):
+    """领域错误保留原因码与重试边界，不能变成无上下文500。"""
+
+    def get_route_handler(self):
+        original = super().get_route_handler()
+
+        async def checked(request):
+            try:
+                return await original(request)
+            except PredictionFailure as error:
+                code = error.payload["code"]
+                status = 404 if code.endswith("NOT_FOUND") else 409 if "LEASE" in code or "CONFLICT" in code else 422
+                raise HTTPException(status, error.payload) from error
+
+        return checked
+
+
+router = APIRouter(dependencies=[Depends(require_service_token)], route_class=PredictionRoute)
 FundCode = Annotated[str, Path(pattern=r"^[0-9]{6}$")]
 
 
@@ -108,9 +127,26 @@ def models():
     return model_status()
 
 
+@router.get("/funds/{fund_code}/ledger-inputs")
+def ledger_input(fund_code: FundCode, start: date, end: date):
+    from app.services.prediction_replay_inputs import replay_inputs
+
+    return replay_inputs(fund_code, start, end, frozen_bundles=[])
+
+
+@router.get("/auto/policy")
+def automatic_policy():
+    from app.services.auto_model_contract import auto_policy
+
+    return auto_policy()
+
+
 @router.post("/maintenance")
 def maintenance():
+    from app.services.auto_model_selection import recover_auto
+
     return {
+        "recoveredAuto": recover_auto(),
         "recoveredTasks": recover_tasks(),
         "recoveredResearch": recover_research(),
         "resolvedTargets": resolve_pending_targets(),
@@ -141,6 +177,146 @@ def start_research(request: ResearchRequest):
 @router.get("/research/{run_id}")
 def read_research(run_id: UUID):
     return research_status(run_id)
+
+
+class AutoCheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    fundCodes: list[Annotated[str, Field(pattern=r"^[0-9]{6}$")]] = Field(max_length=10000)
+    source: str = Field(default="MAINTENANCE", pattern="^(MAINTENANCE|SYNC_COMPLETED)$")
+
+
+@router.post("/auto/check", status_code=202)
+def auto_check(request: AutoCheckRequest):
+    from app.services.auto_model_selection import check_auto
+
+    return check_auto(request.fundCodes, request.source)
+
+
+@router.post("/auto/summary")
+def auto_summary(request: AutoCheckRequest):
+    from app.services.auto_model_summary import operating_summary
+
+    return operating_summary(request.fundCodes)
+
+
+@router.post("/auto/effects")
+def auto_effects(request: AutoCheckRequest):
+    from app.services.auto_model_summary import effect_summary
+
+    return effect_summary(request.fundCodes)
+
+
+@router.get("/auto/cycles")
+def auto_cycles(
+    limit: Annotated[int, Query(ge=1, le=50)] = 20, before: datetime | None = None, beforeId: UUID | None = None
+):
+    from app.services.auto_model_summary import technical_cycles
+
+    return technical_cycles(limit, before, beforeId)
+
+
+@router.get("/auto/cycles/{cycle_id}")
+def auto_detail(cycle_id: UUID):
+    from app.services.auto_model_store import cycle_state
+
+    value = cycle_state(cycle_id)
+    # 技术详情也不整批返回每日frames，按单基金回放接口读取。
+    return {key: value[key] for key in ("cycle_id", "status", "spec", "checkpoint", "result", "error", "updated_at")}
+
+
+@router.post("/auto/replay/claim")
+def auto_claim():
+    from app.services.auto_model_selection import claim_replay
+
+    return claim_replay()
+
+
+@router.post("/auto/cycles/{cycle_id}/cancel")
+def auto_cancel(cycle_id: UUID):
+    from sqlalchemy import text
+
+    from app.db.session import get_engine
+    from app.services.auto_model_store import cycle_state, event
+
+    with get_engine().begin() as c:
+        changed = c.execute(
+            text("""UPDATE prediction_auto_cycle SET cancel_requested=true,status='CANCELLED',
+          updated_at=clock_timestamp(),finished_at=clock_timestamp() WHERE cycle_id=:id
+          AND status NOT IN ('COMPLETED','VERIFYING_ADOPTION') RETURNING cycle_id"""),
+            {"id": cycle_id},
+        ).scalar()
+        if changed:
+            event(c, cycle_id, "CANCELLED", {"source": "ADMIN"})
+    return cycle_state(cycle_id)
+
+
+@router.post("/auto/cycles/{cycle_id}/resume")
+def auto_resume(cycle_id: UUID):
+    from sqlalchemy import text
+
+    from app.db.session import get_engine
+    from app.services.auto_model_selection import recover_auto
+    from app.services.auto_model_store import cycle_state
+
+    with get_engine().begin() as c:
+        c.execute(
+            text("""UPDATE prediction_auto_cycle SET cancel_requested=false,
+          status=CASE WHEN checkpoint?'bundles' THEN 'REPLAYING' ELSE 'INTERRUPTED' END,
+          lease_until=NULL,lease_owner=NULL,next_attempt_at=NULL,updated_at=clock_timestamp()
+          WHERE cycle_id=:id AND status IN ('CANCELLED','FAILED','INTERRUPTED')"""),
+            {"id": cycle_id},
+        )
+    recover_auto()
+    return cycle_state(cycle_id)
+
+
+@router.get("/auto/cycles/{cycle_id}/replay/{fund_code}")
+def auto_replay_input(cycle_id: UUID, fund_code: FundCode, owner: UUID):
+    from app.services.auto_model_selection import replay_input
+
+    return replay_input(cycle_id, owner, fund_code)
+
+
+class ReplayResultRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    leaseOwner: UUID
+    result: dict
+
+
+@router.post("/auto/cycles/{cycle_id}/replay/{fund_code}")
+def auto_replay_result(cycle_id: UUID, fund_code: FundCode, request: ReplayResultRequest):
+    from app.services.auto_model_selection import save_replay
+
+    return save_replay(cycle_id, request.leaseOwner, fund_code, request.result)
+
+
+class AdoptionReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    predictionIds: list[UUID] = Field(min_length=3, max_length=100)
+    apiReadback: bool
+    adviceReferenced: bool
+    referenceHash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+@router.post("/auto/releases/{release_id}/receipt")
+def auto_receipt(release_id: UUID, receipt: AdoptionReceipt):
+    from app.services.auto_model_store import actual_use_receipt
+
+    return actual_use_receipt(release_id, receipt.model_dump())
+
+
+@router.get("/auto/releases/pending")
+def pending_adoption():
+    from app.db.session import get_engine
+    from app.repositories.prediction_store import rows
+
+    with get_engine().connect() as c:
+        return rows(
+            c,
+            """SELECT r.release_id FROM prediction_model_release r
+          JOIN prediction_auto_cycle a ON a.cycle_id=r.cycle_id WHERE a.status='VERIFYING_ADOPTION'
+          ORDER BY r.created_at LIMIT 100""",
+        )
 
 
 @router.post("/research/{run_id}/cancel")

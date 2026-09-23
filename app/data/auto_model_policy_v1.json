@@ -1,0 +1,33 @@
+{
+  "version": "AUTO_MODEL_SELECTION_V1",
+  "timezone": "Asia/Shanghai",
+  "weeklyDay": 6,
+  "weeklyHour": 2,
+  "trainingMonths": 24,
+  "validationMonths": 6,
+  "selectionMonths": 6,
+  "maximumHistoryDays": 1461,
+  "maximumReplayDays": 732,
+  "stride": 5,
+  "shardSize": 50,
+  "maximumBundles": 4,
+  "maximumCandidatesPerHorizon": 3,
+  "maximumWorkerSeconds": 3600,
+  "maximumSamples": 200000,
+  "leaseSeconds": 300,
+  "retryMinutes": [1, 5, 30],
+  "candidateRecipes": ["TOTAL_RETURN_LOGISTIC_V1"],
+  "tolerance": 1e-8,
+  "maxDrawdownDeterioration": 0.02,
+  "executionPolicy": {
+    "initialCash": "10000", "buyFee": "0.001",
+    "redemptionFees": [
+      {"minDays": 0, "maxDays": 6, "rate": "0.015"},
+      {"minDays": 7, "maxDays": 29, "rate": "0.005"},
+      {"minDays": 30, "maxDays": null, "rate": "0.001"}
+    ],
+    "confirmationSessions": 1, "cashArrivalSessions": 2,
+    "assumption": "统一实验费用：申购0.1%；不足7日赎回1.5%，7至29日0.5%，30日起0.1%；T+1可卖/T+2到账；历史实际渠道费率和开放状态未恢复",
+    "version": "POSITION_POLICY_V1_FEE_ASSUMPTION_V1"
+  }
+}

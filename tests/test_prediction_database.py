@@ -29,6 +29,7 @@ def database(monkeypatch, tmp_path):
             "20260922_24_prediction_platform.py",
             "20260922_25_prediction_recovery.py",
             "20260922_26_prediction_check_state.py",
+            "20260923_27_auto_model_selection.py",
         ):
             path = Path(__file__).parents[1] / "alembic/versions" / filename
             spec = importlib.util.spec_from_file_location("prediction_migration", path)

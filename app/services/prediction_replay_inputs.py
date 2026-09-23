@@ -9,11 +9,24 @@ from app.services.prediction_models import infer_package
 from app.services.prediction_replay_models import replay_model_bundles
 
 
-def replay_inputs(code: str, start: date, end: date):
+def replay_inputs(code: str, start: date, end: date, *, frozen_bundles=None, auto_cycle_id=None):
     if not start < end < datetime.now(ZONE).date() or (end - start).days > 732:
         raise PredictionFailure("REPLAY_RANGE_INVALID", "REPLAY", "回放最多两年，结束日必须在今天之前")
     cutoff = datetime.combine(end + timedelta(days=1), time(23, 59), ZONE)
-    data = read_fund_data(code, cutoff, replay=True, start=start - timedelta(days=160))
+    if auto_cycle_id:
+        from app.services.auto_model_store import frozen_input
+
+        # 训练和回放读取同一份冻结行情；恢复时绝不换成后来修订的数据。
+        data = frozen_input(
+            auto_cycle_id,
+            "fund:" + code,
+            lambda: read_fund_data(code, cutoff, replay=True, start=start - timedelta(days=160)),
+        )
+    else:
+        data = read_fund_data(code, cutoff, replay=True, start=start - timedelta(days=160))
+    if "frozenFailure" in data:
+        failure = data["frozenFailure"]
+        raise PredictionFailure(failure["code"], "FROZEN_INPUT", failure["summary"], retryable=False)
     sessions = [day for day in data["calendar"].sessions if start <= day <= end]
     nav = {row["nav_date"]: row["unit_nav"] for row in data["navs"]}
     missing = [str(day) for day in sessions if day not in nav]
@@ -22,7 +35,22 @@ def replay_inputs(code: str, start: date, end: date):
             "REPLAY_NAV_GAP", "REPLAY", "成交净值缺失，不能压缩日期跳过该日", details={"dates": missing[:20]}
         )
     dividends = cash_events(data, sessions, cutoff, replay=True)
-    bundles, excluded = replay_model_bundles(start)
+    if frozen_bundles is None:
+        bundles, excluded = replay_model_bundles(start)
+    else:
+        from app.services.prediction_models import load_model
+        from app.services.prediction_research import validate_historical_model
+
+        bundles, excluded = [], []
+        for bundle in frozen_bundles:
+            models = {}
+            for ref in bundle["modelRefs"]:
+                model = load_model(ref["modelId"])
+                if model["modelHash"] != ref["modelHash"]:
+                    raise PredictionFailure("REPLAY_MODEL_HASH_MISMATCH", "REPLAY", "冻结模型指纹变化", retryable=False)
+                validate_historical_model(model["manifest"], datetime.combine(start, time.min, ZONE))
+                models[ref["horizonId"]] = model | {"activationRevision": ref["activationRevision"]}
+            bundles.append(bundle | {"models": models})
     frames, failures = [], []
     bundle_frames = {bundle["id"]: [] for bundle in bundles}
     failed_bundles = set()
@@ -99,6 +127,7 @@ def replay_inputs(code: str, start: date, end: date):
             bundle_frames[bundle["id"]].append(frames[-1] | {"input": frames[-1]["input"] | {"predictions": signals}})
     result = {
         "fundCode": code,
+        "family": str(data["fund"]["fund_master_id"]),
         "startDate": str(start),
         "endDate": str(end),
         "frames": frames,

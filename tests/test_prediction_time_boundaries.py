@@ -11,7 +11,12 @@ from app.services.prediction_features import (
     known_nav_version,
     select_fact_version,
 )
-from app.services.prediction_research import mature_training_rows, validate_historical_model, validate_spec
+from app.services.prediction_research import (
+    label_values,
+    mature_training_rows,
+    validate_historical_model,
+    validate_spec,
+)
 from tests.test_prediction_contract import calendar
 
 
@@ -21,6 +26,27 @@ def test_current_model_does_not_gain_earlier_historical_training_eligibility():
             {"adapter": "LOGISTIC_STANDARDIZED_V1", "labelEndMax": "2025-01-01T00:00:00+08:00"},
             datetime.fromisoformat("2023-12-31T23:59:00+08:00"),
         )
+
+
+def test_label_itself_rejects_late_publication_and_revision():
+    cutoff = datetime.fromisoformat("2025-01-01T23:59:00+08:00")
+    day = date(2024, 12, 31)
+    row = {
+        "nav_date": day,
+        "unit_nav": Decimal("1.1"),
+        "updated_at": cutoff,
+        "source_published_at": datetime.fromisoformat("2025-01-02T10:00:00+08:00"),
+    }
+    with pytest.raises(PredictionFailure, match="截止后才公开"):
+        label_values({"navs": [row]}, {day}, cutoff)
+    future = datetime.fromisoformat("2025-01-03T10:00:00+08:00")
+    row["source_published_at"] = None
+    versions = [
+        {"payload": row, "first_observed_at": future, "published_at": None},
+        {"payload": row | {"unit_nav": Decimal("9")}, "first_observed_at": future, "published_at": None},
+    ]
+    with pytest.raises(PredictionFailure, match="晚修订"):
+        label_values({"navs": [row], "navVersions": {str(day): versions}}, {day}, cutoff)
 
 
 def test_dividend_amount_revision_uses_known_version_and_rejects_late_only_history():
