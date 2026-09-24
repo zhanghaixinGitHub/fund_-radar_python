@@ -12,6 +12,7 @@ from app.db.session import get_engine
 from app.repositories import direction_1d as repo
 from app.services.direction_1d_data import inventory
 from app.services.direction_1d_protocol import PROTOCOL, canonical, window
+from app.services.direction_1d_three_state import PROTOCOL as ACTIVE_PROTOCOL
 
 logger = logging.getLogger(__name__)
 executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="direction-1d")
@@ -74,8 +75,10 @@ def submit_forecast(code):
     w = window(repo.clock())
     if w["status"] != "OPEN":
         raise ValueError("MISSED_DEADLINE")
-    key = f"{PROTOCOL}:{code}:{w['target_nav_date']}"
-    return submit(key, "FORECAST", {"fund_code": code, "target_nav_date": w["target_nav_date"]})
+    key = f"{ACTIVE_PROTOCOL}:{code}:{w['target_nav_date']}"
+    return submit(
+        key, "FORECAST", {"fund_code": code, "target_nav_date": w["target_nav_date"], "protocol": ACTIVE_PROTOCOL}
+    )
 
 
 def submit(key, kind, payload):
@@ -151,7 +154,7 @@ def _execute_locked(job_id, kind, payload):
         if kind == "FORECAST":
             sync_missing([payload["fund_code"]])
             target = payload.get("target_nav_date") or repo.get_job(job_id)["task_key"].rsplit(":", 1)[-1]
-            result = infer(payload["fund_code"], expected_target=target)
+            result = infer(payload["fund_code"], expected_target=target, protocol=payload.get("protocol", PROTOCOL))
         elif kind == "LABEL_SYNC":
             result = sync_answer(payload)
         else:
@@ -185,6 +188,13 @@ def _execute_locked(job_id, kind, payload):
 
 
 def weekly_train():
+    """运行期每周训练使用三分类，原二分类研究入口保留便于历史复现。"""
+    from app.services.direction_1d_three_state_training import train_registered
+
+    return train_registered()
+
+
+def legacy_weekly_train():
     """固定初始名单，只吸收Java已完成核对的公共原始样本；无新增时零拟合。"""
     from app.services import direction_1d_training as t
 

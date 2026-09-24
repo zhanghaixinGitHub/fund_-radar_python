@@ -8,6 +8,7 @@ from sqlalchemy import text
 
 from app.db.session import get_engine
 from app.repositories import direction_1d as repo
+from app.services import direction_1d_three_state as three
 from app.services.direction_1d_data import classify
 from app.services.direction_1d_protocol import (
     FEATURE_VERSION,
@@ -49,7 +50,12 @@ def load_model(row):
     return model
 
 
-def infer(code: str, expected_target: str | None = None) -> dict:
+def infer(code: str, expected_target: str | None = None, *, protocol: str = PROTOCOL) -> dict:
+    """旧调用保留 V1；生产作业显式传入 V2，禁止从旧分数猜测持平类别。"""
+    if protocol not in (PROTOCOL, three.PROTOCOL):
+        raise ValueError("PROTOCOL_MISMATCH")
+    ternary = protocol == three.PROTOCOL
+    target_definition = three.TARGET if ternary else TARGET
     now = repo.clock()
     if abs((datetime.now(ZONE) - now).total_seconds()) > 5:
         raise ValueError("CLOCK_SKEW")
@@ -76,7 +82,8 @@ def infer(code: str, expected_target: str | None = None) -> dict:
             )
         if any(d not in by_date for d in wanted):
             raise ValueError("NAV_GAP")
-        all_models = [m for m in repo.models(c) if m["group_id"] == mapping["group_id"]]
+        all_models = [m for m in repo.models(c) if m["group_id"] == mapping["group_id"]
+                      and m["metadata"].get("protocol") == protocol]
         if not all_models:
             raise ValueError("MODEL_PENDING")
         # 初始cohort稳定；新增组/名单需要受控新cohort，不能按最新文件修改时间猜测。
@@ -132,12 +139,12 @@ def infer(code: str, expected_target: str | None = None) -> dict:
                     {"code": code, "source": source["source_id"], "target": w["target_nav_date"]},
                 ).mappings()
             ]
-            key = f"{PROTOCOL}:{cohort}:{code}:{w['target_nav_date']}"
+            key = f"{protocol}:{cohort}:{code}:{w['target_nav_date']}"
             snapshot = {
                 "fund_code": code,
                 # 保存当时准入依据；旧预测原文保持不变，不用后来规则重解释旧记录。
                 "group_evidence": mapping["group_evidence"],
-                "target_definition": TARGET,
+                "target_definition": target_definition,
                 "feature_version": FEATURE_VERSION,
                 "base_nav_date": w["base_nav_date"],
                 "target_nav_date": w["target_nav_date"],
@@ -177,16 +184,19 @@ def infer(code: str, expected_target: str | None = None) -> dict:
             if not row["model_id"] or row["expires_at"] <= now:
                 raise ValueError("MODEL_UNAVAILABLE")
             model = load_model(row)
-            s = score(model, x)
+            classification = three.predict(model, x) if ternary else None
+            s = classification["score"] if classification else score(model, x)
             b.update(
                 score=s,
-                predicted_direction="UP" if s > 0.5 else "NON_UP",
+                predicted_direction=classification["direction"] if classification else "UP" if s > 0.5 else "NON_UP",
                 status="AVAILABLE",
                 train_as_of=model["train_as_of"],
                 trained_at=row["trained_at"].isoformat(),
                 registered_at=row["registered_at"].isoformat(),
                 model_selected_at=row["locked_at"].isoformat(),
             )
+            if classification:
+                b["class_scores"] = classification["class_scores"]
             if row["branch_id"] == "FIXED":
                 majority = model["majority"]
         except (ValueError, OSError, KeyError) as error:
@@ -198,8 +208,8 @@ def infer(code: str, expected_target: str | None = None) -> dict:
     if generated >= datetime.fromisoformat(w["deadline_at"]):
         raise ValueError("MISSED_DEADLINE")
     body = {
-        "schema_version": "DIRECTION_1D_EXPERIMENT_V1",
-        "protocol": PROTOCOL,
+        "schema_version": three.SCHEMA if ternary else "DIRECTION_1D_EXPERIMENT_V1",
+        "protocol": protocol,
         "activation_policy": ACTIVATION_POLICY,
         "task_key": key,
         "cohort_id": cohort,
@@ -210,7 +220,7 @@ def infer(code: str, expected_target: str | None = None) -> dict:
         "status": "PREDICTED",
         "experiment_status": "EXPERIMENTAL",
         "horizon_trading_days": 1,
-        "target_definition": TARGET,
+        "target_definition": target_definition,
         "model_released": False,
         "up_probability": None,
         **{k: v for k, v in w.items() if k != "status"},
@@ -234,6 +244,16 @@ def infer(code: str, expected_target: str | None = None) -> dict:
         "kind": "FORWARD_ORIGINAL",
         "limitations": ["模型分数尚未校准，效果未验证。", "单位净值涨跌不等于分红后投资回报。"],
     }
+    if ternary:
+        body["direction_policy"] = three.POLICY
+        previous_direction = label(observed[-2]["unit_nav"], observed[-1]["unit_nav"])["actual_direction"]
+        body["baselines"] = [
+            {"branch_id": key, "predicted_direction": value}
+            for key, value in (("ALWAYS_UP", "UP"), ("ALWAYS_FLAT", "FLAT"), ("ALWAYS_DOWN", "DOWN"),
+                               ("INITIAL_MAJORITY", majority),
+                               ("MOMENTUM", previous_direction)
+                               )
+        ]
     payload = canonical(body)
     return {"payload_json": payload, "content_hash": hashlib.sha256(payload.encode("utf-8")).hexdigest()}
 
@@ -311,7 +331,7 @@ def labels(job_id: UUID):
             "training_eligible": not base_revised,
             "status": "AVAILABLE",
             "kind": "FORWARD_ORIGINAL",
-            "target_definition": TARGET,
+            "target_definition": body["target_definition"],
         }
         # 同来源版本重复读取返回原答案快照；新版本才追加，日期/首次结果不漂移。
         key_hash = digest({"base": base["content_hash"], "target": observed["content_hash"], "events": events})

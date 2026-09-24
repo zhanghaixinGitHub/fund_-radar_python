@@ -11,9 +11,11 @@ from app.db.session import get_engine
 from app.repositories import direction_1d as repo
 from app.schemas.direction_1d import AssessmentAck, ForecastRequest, Scope, TrainingRequest
 from app.services.direction_1d_data import inventory
+from app.services.direction_1d_explanation import read_explanation
 from app.services.direction_1d_inference import labels
 from app.services.direction_1d_jobs import submit, submit_forecast
 from app.services.direction_1d_protocol import ZONE, calendar, window
+from app.services.direction_1d_three_state import PROTOCOL
 
 router = APIRouter(dependencies=[Depends(require_service_token)])
 
@@ -29,6 +31,7 @@ def status():
             .all()
         )
     return {
+        "prediction_protocol": PROTOCOL,
         "server_time": datetime.now(ZONE).isoformat(),
         "database_time": now.isoformat(),
         "window": window(now),
@@ -69,6 +72,15 @@ def read_label(job_id: UUID):
     return labels(job_id)
 
 
+@router.get("/forecast-jobs/{job_id}/evidence")
+def prediction_evidence(job_id: UUID):
+    """读取指定原预测依据；无训练/写入副作用，Java负责当前用户对原预测的授权。"""
+    try:
+        return read_explanation(job_id)
+    except (ValueError, KeyError, TypeError, OSError) as error:
+        raise HTTPException(409, "PREDICTION_EVIDENCE_UNAVAILABLE") from error
+
+
 @router.post("/labels/{job_id}/assessed")
 def assessed(job_id: UUID, request: AssessmentAck):
     """仅在Java提交核对之后调用；以后训练的成熟时间取本次接纳时刻，不能由客户端倒填。"""
@@ -105,4 +117,4 @@ def training(_: TrainingRequest):
     next_day = next((d for d in days if d > sunday), None)
     if not next_day or not opened <= now < datetime.combine(next_day, time(12), ZONE):
         return {"state": "NOT_DUE", "reason": "WEEKLY_WINDOW_CLOSED"}
-    return submit("WEEKLY:" + str(sunday), "TRAINING", {})
+    return submit("WEEKLY:" + PROTOCOL + ":" + str(sunday), "TRAINING", {})

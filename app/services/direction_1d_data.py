@@ -173,18 +173,21 @@ def inventory(codes: list[str], now: datetime | None = None) -> dict:
                     features([points[d]["unit_nav"] for d in wanted])
                 except ValueError as error:
                     reasons.append(str(error))
-            eligible = [m for m in registry if m["group_id"] == mapping["group_id"] and m["expires_at"] > now]
+            from app.services.direction_1d_three_state import PROTOCOL as active_protocol
+            from app.services.direction_1d_three_state import predict
+
+            eligible = [m for m in registry if m["group_id"] == mapping["group_id"] and m["expires_at"] > now
+                        and m["metadata"].get("protocol") == active_protocol]
             active = [m for m in eligible if available_at_prediction(m, now)]
             if mapping["group_id"] and not eligible:
                 reasons.append("MODEL_PENDING")
             elif eligible:
                 from app.services.direction_1d_inference import load_model
-                from app.services.direction_1d_protocol import score
 
                 valid_ids = set()
                 for model_row in eligible:
                     try:
-                        score(load_model(model_row), [0.0] * 7)
+                        predict(load_model(model_row), [0.0] * 7)
                         valid_ids.add(model_row["model_id"])
                     except (ValueError, OSError, KeyError):
                         continue
