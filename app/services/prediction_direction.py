@@ -4,7 +4,8 @@ from decimal import Decimal, InvalidOperation
 
 from app.services.prediction_contract import PredictionFailure, fingerprint, prediction_policy
 
-TARGET = "NEXT_EXECUTABLE_CASH_REINVESTED_THREE_STATE_V2"
+TARGET = "NAV_ANCHORED_CASH_REINVESTED_THREE_STATE_V3"
+TRI_TARGETS = {TARGET, "NEXT_EXECUTABLE_CASH_REINVESTED_THREE_STATE_V2"}
 CLASSES = ("DOWN", "FLAT", "UP")
 TRI_ADAPTERS = {"NAV_MOMENTUM_THREE_STATE_V2", "LOGISTIC_MULTICLASS_V2"}
 BASELINE_ADAPTERS = {"NAV_MOMENTUM_V1", "NAV_MOMENTUM_THREE_STATE_V2"}
@@ -12,7 +13,7 @@ LABELS = {"UP": "上涨", "FLAT": "持平", "DOWN": "下跌", "NON_UP": "下跌�
 
 
 def three_state(policy=None):
-    return (policy or prediction_policy())["target_definition_id"] == TARGET
+    return (policy or prediction_policy())["target_definition_id"] in TRI_TARGETS
 
 
 def validate_rule(rule):

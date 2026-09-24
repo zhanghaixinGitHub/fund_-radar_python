@@ -7,7 +7,7 @@ from sqlalchemy import text
 
 from app.db.session import get_engine
 from app.repositories import direction_1d as repo
-from app.services.direction_1d_protocol import calendar, digest, features, input_days, window
+from app.services.direction_1d_protocol import ZONE, calendar, digest, features, input_days, window
 from app.services.direction_1d_selection import available_at_prediction
 
 
@@ -119,6 +119,16 @@ def inventory(codes: list[str], now: datetime | None = None) -> dict:
             }
         registry = repo.models(c)
         ps = {p["fund_code"]: p for p in repo.profiles(c, codes)}
+        sync_states = {
+            r["fund_code"]: dict(r)
+            for r in c.execute(
+                text("""
+            SELECT fund_code,status,reason,next_retry_at FROM nav_sync_state
+            WHERE source_id=:source AND fund_code=ANY(:codes)
+        """),
+                {"source": source["source_id"], "codes": codes},
+            ).mappings()
+        }
         result = []
         for code in sorted(set(codes)):
             p = ps.get(code)
@@ -134,7 +144,7 @@ def inventory(codes: list[str], now: datetime | None = None) -> dict:
                 continue
             mapping = classify(p, prediction=True)
             rows = repo.navs(c, code, source["source_id"], wanted[0], wanted[-1])
-            points = {r["nav_date"]: r for r in rows}
+            points = {r["nav_date"]: r for r in rows if r["updated_at"] <= now}
             missing = [str(d) for d in wanted if d not in points]
             counts = (
                 c.execute(
@@ -150,10 +160,14 @@ def inventory(codes: list[str], now: datetime | None = None) -> dict:
                 if mapping["classification_reason"]
                 else []
             )
-            if counts["count"] < 61:
+            if wanted[-1] not in points:
+                reasons.append(
+                    "NAV_CURRENT_NOT_READY" if wanted[-1] == now.astimezone(ZONE).date() else "NAV_LATEST_NOT_READY"
+                )
+            elif counts["count"] < 61:
                 reasons.append("HISTORY_TOO_SHORT")
             elif missing:
-                reasons.append("DATA_PENDING")
+                reasons.append("NAV_GAP")
             elif not reasons:
                 try:
                     features([points[d]["unit_nav"] for d in wanted])
@@ -193,6 +207,9 @@ def inventory(codes: list[str], now: datetime | None = None) -> dict:
                     "missing_dates": missing,
                     "missing_count": len(missing),
                     "latest_nav_date": str(counts["last"]) if counts["last"] else None,
+                    "required_nav_date": w["base_nav_date"],
+                    "nav_sync_state": sync_states.get(code),
+                    "target_nav_date": w["target_nav_date"],
                     "observed_at": now.isoformat(),
                     "source_code": source["source_code"],
                     "calendar_version": w["calendar_version"],

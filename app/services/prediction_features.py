@@ -11,19 +11,29 @@ from sqlalchemy import text
 from app.db.session import get_engine
 from app.repositories.prediction_store import encode, one, rows, snapshot
 from app.services.historical_nav_samples import _build_metrics
-from app.services.prediction_contract import PredictionFailure, ValuationCalendar, fingerprint, reinvested_series
+from app.services.prediction_contract import (
+    PredictionFailure,
+    ValuationCalendar,
+    fingerprint,
+    nav_anchored,
+    reinvested_series,
+)
 from app.services.trading_calendar import load_calendar, load_current_calendar
 
 ZONE = ZoneInfo("Asia/Shanghai")
 
 
-def public_calendar(fund):
+def public_calendar(fund, *, legacy=False):
     """当前国内开放式估值按沪深日历作明确实验假设，跨境产品缺少自身政策时单项失败。"""
-    if "QDII" in (fund["fund_name"] + str(fund.get("fund_type", ""))).upper():
+    from app.services.nav_repair import domestic_calendar_supported
+
+    if (not legacy and nav_anchored() and not domestic_calendar_supported(fund)) or "QDII" in (
+        fund["fund_name"] + str(fund.get("fund_type", ""))
+    ).upper():
         raise PredictionFailure(
             "CALENDAR_POLICY_MISSING",
             "CALENDAR",
-            "该跨境基金的估值及交易截止日历尚未核验",
+            "该基金不在本次境内股票、混合和债券基金的已支持范围",
             details={"fundCode": fund["fund_code"], "fundName": fund["fund_name"]},
             next_action="补充该基金公布的估值及开放日政策后重试；不使用境内日历猜测",
         )
@@ -153,7 +163,7 @@ def feature_values(series, lookback):
     return result
 
 
-def read_fund_data(fund_code, cutoff, *, replay=False, start=None):
+def read_fund_data(fund_code, cutoff, *, replay=False, start=None, legacy_calendar=False):
     """一次事务批量读取净值、分红和公共资料；不读取账号、仓位或金额。"""
     with get_engine().connect().execution_options(isolation_level="REPEATABLE READ") as c, c.begin():
         fund = one(
@@ -165,7 +175,14 @@ def read_fund_data(fund_code, cutoff, *, replay=False, start=None):
         )
         if not fund or not fund["enabled"]:
             raise PredictionFailure("FUND_SOURCE_UNAVAILABLE", "SOURCE", "基金不存在或登记来源未启用")
-        calendar = public_calendar(fund)
+        profile = one(
+            c,
+            "SELECT * FROM fund_profile WHERE fund_code=:code AND source_id=:source",
+            code=fund_code,
+            source=fund["source_id"],
+        )
+        fund.update({k: v for k, v in (profile or {}).items() if k in {"benchmark", "invest_type", "source_fund_type"}})
+        calendar = public_calendar(fund, legacy=legacy_calendar)
         navs = rows(
             c,
             """SELECT * FROM nav_daily WHERE fund_code=:code AND source_id=:source
@@ -307,6 +324,14 @@ def read_fund_data(fund_code, cutoff, *, replay=False, start=None):
             target.setdefault(version["source_key"], []).append(version)
         return {
             "fund": fund,
+            "navSyncState": one(
+                c,
+                """SELECT status,reason,checked_at,next_retry_at FROM nav_sync_state
+                WHERE fund_code=:code AND source_id=:source AND checked_at<=:cutoff""",
+                code=fund_code,
+                source=fund["source_id"],
+                cutoff=cutoff,
+            ),
             "calendar": calendar,
             "navs": navs,
             "dividends": dividends,
@@ -360,9 +385,12 @@ def cash_events(data, dates, cutoff, *, replay=False):
 
 def build_features(data, cutoff, lookback, *, replay=False, persist=True):
     calendar = data["calendar"]
+    required = calendar.required_base(cutoff) if nav_anchored() else None
     known = []
     for nav in data["navs"]:
-        if nav["nav_date"] >= cutoff.astimezone(ZONE).date():
+        if (required is not None and nav["nav_date"] > required) or (
+            required is None and nav["nav_date"] >= cutoff.astimezone(ZONE).date()
+        ):
             continue
         nav = known_nav_version(nav, data.get("navVersions", {}).get(str(nav["nav_date"]), []), cutoff, replay)
         # LIVE只用真实接收版本；历史研究单列“下一估值日可用且采用现有历史版本”的假设。
@@ -375,8 +403,27 @@ def build_features(data, cutoff, lookback, *, replay=False, persist=True):
                 available = max(available, nav["source_published_at"])
         else:
             available = max(nav["updated_at"], nav["source_published_at"] or nav["updated_at"])
-        if available <= cutoff and nav["nav_date"] < cutoff.astimezone(ZONE).date():
+        if available <= cutoff:
             known.append(nav)
+    if required is not None and not any(r["nav_date"] == required for r in known):
+        current = required == cutoff.astimezone(ZONE).date()
+        sync_state = data.get("navSyncState") or {}
+        blocked = sync_state.get("status") == "SYNC_FAILED" and sync_state.get("next_retry_at") is None
+        raise PredictionFailure(
+            "NAV_CURRENT_NOT_READY" if current else "NAV_LATEST_NOT_READY",
+            "FEATURE_BUILD",
+            "当天净值尚未取得，等待净值后预测下一估值日" if current else "上一估值日净值尚未取得，补齐后再预测",
+            details={
+                "requiredNavDate": str(required),
+                "targetStartDate": str(calendar.start(cutoff)),
+                "syncState": data.get("navSyncState"),
+            },
+            next_action=(
+                sync_state["reason"]
+                if blocked
+                else "等待净值同步或缺口补拉完成，后台会继续检查；未取得不等于来源尚未公布"
+            ),
+        )
     if len(known) < 21:
         raise PredictionFailure(
             "NAV_HISTORY_INSUFFICIENT",

@@ -49,20 +49,22 @@ def window(now: datetime) -> dict:
     if not date(2021, 1, 1) <= now.date() <= date(2026, 12, 31):
         raise ValueError("CALENDAR_UNAVAILABLE")
     i = bisect_right(days, now.date()) - 1
-    if days[i] == now.date() and now.time() < time(18):
+    if days[i] == now.date() and now.time() < time(15):
         i -= 1
     if i < 60 or i + 1 >= len(days):
         raise ValueError("CALENDAR_UNAVAILABLE")
     base, target = days[i : i + 2]
-    opened, deadline = datetime.combine(base, time(18), ZONE), datetime.combine(target, time(8, 30), ZONE)
+    # 时间仅决定所需净值和目标日；能否预测还要检查完整净值，不再限制18:00—08:30。
+    opened, deadline = datetime.combine(base, time(15), ZONE), datetime.combine(target, time(15), ZONE)
     return {
+        "generation_policy": "CN_NAV_READY_CLOSE_V1",
         "base_nav_date": str(base),
         "target_nav_date": str(target),
         "window_open_at": opened.isoformat(),
         "deadline_at": deadline.isoformat(),
         "calendar_version": version,
         "status": "OPEN" if opened <= now < deadline else "MISSED_DEADLINE",
-        "next_window_open_at": datetime.combine(target, time(18), ZONE).isoformat(),
+        "next_window_open_at": deadline.isoformat(),
     }
 
 

@@ -75,7 +75,7 @@ def submit_forecast(code):
     if w["status"] != "OPEN":
         raise ValueError("MISSED_DEADLINE")
     key = f"{PROTOCOL}:{code}:{w['target_nav_date']}"
-    return submit(key, "FORECAST", {"fund_code": code})
+    return submit(key, "FORECAST", {"fund_code": code, "target_nav_date": w["target_nav_date"]})
 
 
 def submit(key, kind, payload):
@@ -150,7 +150,8 @@ def _execute_locked(job_id, kind, payload):
             c.execute(text("UPDATE direction_1d_job SET state='RUNNING' WHERE job_id=:id"), {"id": job_id})
         if kind == "FORECAST":
             sync_missing([payload["fund_code"]])
-            result = infer(payload["fund_code"])
+            target = payload.get("target_nav_date") or repo.get_job(job_id)["task_key"].rsplit(":", 1)[-1]
+            result = infer(payload["fund_code"], expected_target=target)
         elif kind == "LABEL_SYNC":
             result = sync_answer(payload)
         else:

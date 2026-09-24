@@ -118,10 +118,13 @@ def test_original_prediction_and_revised_outcomes(database, monkeypatch):
         "targetDefinitionId": "NEXT_EXECUTABLE_CASH_REINVESTED_THREE_STATE_V2",
         "reason": "不可改写的人工隔离样例",
     }
-    from app.services.prediction_contract import prediction_policy
+    import json
+
+    from app.services.prediction_contract import POLICY_FILE
     from app.services.prediction_direction import direction_fields
 
-    original.update(predictionPolicySnapshot=prediction_policy(), **direction_fields("T5_V1"))
+    old_policy = json.loads(POLICY_FILE.with_name("prediction_policy_v2.json").read_text(encoding="utf-8"))
+    original.update(predictionPolicySnapshot=old_policy, **direction_fields("T5_V1", old_policy))
     with database.begin() as c:
         first, created = store.save_prediction(c, original, "fixture-original")
         repeated, second_created = store.save_prediction(
@@ -164,6 +167,35 @@ def test_original_prediction_and_revised_outcomes(database, monkeypatch):
     assert first_page["predictionId"] != second_page["predictionId"]
     with database.begin() as c, pytest.raises(Exception, match="append only"):
         c.execute(text("UPDATE fund_prediction_record SET payload='{}'"))
+
+
+def test_nav_ready_live_batch_reuses_first_prediction_after_model_change(database, monkeypatch):
+    """真实隔离库跑任务与留档；更换模型后本期只复用原文，不重复推理。"""
+    from datetime import date
+    from types import SimpleNamespace
+
+    from app.services import prediction_features as features
+    from app.services import prediction_generation as generation
+    from tests.test_nav_ready_prediction import data_at
+    from tests.test_prediction_contract import calendar
+
+    monkeypatch.setattr(generation, "get_engine", lambda: database)
+    monkeypatch.setattr(features, "get_engine", lambda: database)
+    monkeypatch.setattr(generation, "_executor", SimpleNamespace(submit=lambda fn, *args: fn(*args)))
+    monkeypatch.setattr(
+        generation, "read_fund_data", lambda code, now: data_at(now.astimezone(features.ZONE), include_current=True)
+    )
+    first = generation.create_task(["000001"], horizons=["T5_V1"])
+    assert first["createdItems"] == 1, first
+    original = first["items"][0]["result"]
+    route = models.register_model(package())
+    models.activate(route["modelId"], reason={"test": "new model"})
+    monkeypatch.setattr(generation, "infer_route", lambda *a, **kw: pytest.fail("已有本期原文不得再推理"))
+    repeated = generation.create_task(["000001"], horizons=["T5_V1"])
+    assert repeated["reusedItems"] == 1 and repeated["items"][0]["result"] == original
+    base = date.fromisoformat(original["baseNavDate"])
+    end = date.fromisoformat(original["endDate"])
+    assert calendar().sessions.index(end) - calendar().sessions.index(base) == 5
 
 
 def test_committed_checkpoint_recovers_after_worker_is_killed(database, monkeypatch, tmp_path):

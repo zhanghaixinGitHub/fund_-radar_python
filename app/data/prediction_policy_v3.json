@@ -1,0 +1,119 @@
+{
+  "version": "PREDICTION_POLICY_V3",
+  "enabled_from": "2026-09-24T00:00:00+08:00",
+  "target_definition_id": "NAV_ANCHORED_CASH_REINVESTED_THREE_STATE_V3",
+  "feature_schema_version": "NAV_TOTAL_RETURN_V1",
+  "direction": {
+    "version": "RETURN_BAND_V1",
+    "unit": "RATIO",
+    "boundary": "CLOSED_FLAT",
+    "classes": [
+      "DOWN",
+      "FLAT",
+      "UP"
+    ],
+    "tieBreakOrder": [
+      "FLAT",
+      "UP",
+      "DOWN"
+    ],
+    "thresholds": {
+      "T5_V1": "0.003",
+      "T20_V1": "0.01",
+      "M6_V1": "0.03"
+    },
+    "momentumThresholds": {
+      "T5_V1": "0.01",
+      "T20_V1": "0.01",
+      "M6_V1": "0.02"
+    },
+    "minimumClassSamples": 5
+  },
+  "dividend_policy": "CASH_REINVEST_AT_EX_DATE_NAV",
+  "split_policy": "REQUIRE_VERIFIED_SHARE_ADJUSTMENT",
+  "gap_policy": "REQUIRE_COMPLETE_NO_FILL",
+  "baseline": {
+    "recipe": "NAV_MOMENTUM_THREE_STATE_V2",
+    "minimum_returns": 20,
+    "maximum_returns": 60
+  },
+  "horizons": [
+    {
+      "horizon_id": "T5_V1",
+      "label": "五个交易日",
+      "unit": "TRADING_SESSION",
+      "length": 5,
+      "lookback_returns": 20
+    },
+    {
+      "horizon_id": "T20_V1",
+      "label": "二十个交易日",
+      "unit": "TRADING_SESSION",
+      "length": 20,
+      "lookback_returns": 20
+    },
+    {
+      "horizon_id": "M6_V1",
+      "label": "六个自然月",
+      "unit": "CALENDAR_MONTH",
+      "length": 6,
+      "lookback_returns": 60
+    }
+  ],
+  "calendar_policy": {
+    "version": "FUND_VALUATION_CALENDAR_V2",
+    "timezone": "Asia/Shanghai",
+    "cutoff_local": "15:00:00",
+    "at_cutoff": "NEXT_SESSION",
+    "start": "FIRST_UNCLOSED_SESSION_REQUIRE_PREVIOUS_NAV",
+    "month_end": "BASE_PLUS_MONTHS_CLAMP_THEN_ROLL_FORWARD",
+    "unpublished_month_end": "PENDING_OFFICIAL_CALENDAR",
+    "missing_current_calendar": "FAIL_WITH_CALENDAR_RANGE_MISSING",
+    "return_base": "REQUIRED_PREVIOUS_VALUATION_NAV",
+    "trading_end": "BASE_PLUS_HORIZON_SESSIONS"
+  },
+  "selection": {
+    "version": "EXPERIMENT_SELECTION_V2",
+    "tolerance": 1e-08,
+    "maximum_shadows": 3
+  },
+  "strategy": {
+    "version": "HOLDING_ADVICE_V3_THREE_STATE",
+    "weights": {
+      "model": 0.6,
+      "trend_risk": 0.2,
+      "facts_events": 0.2
+    },
+    "preferences": {
+      "BALANCED": {
+        "T5_V1": 0.2,
+        "T20_V1": 0.5,
+        "M6_V1": 0.3
+      },
+      "SHORT": {
+        "T5_V1": 0.6,
+        "T20_V1": 0.3,
+        "M6_V1": 0.1
+      },
+      "LONG": {
+        "T5_V1": 0.1,
+        "T20_V1": 0.3,
+        "M6_V1": 0.6
+      }
+    },
+    "add_above": 0.7,
+    "hold_above": 0,
+    "sell_at_or_below": -0.7,
+    "position_policy": {
+      "version": "POSITION_POLICY_V1",
+      "buy_cash_ratio": 0.5,
+      "add_cash_ratio": 0.25,
+      "reduce_share_ratio": 0.5
+    },
+    "selection": {
+      "version": "STRATEGY_SELECTION_V1",
+      "max_drawdown_deterioration": 0.02
+    }
+  },
+  "generation_policy": "CN_NAV_READY_CLOSE_V1"
+}

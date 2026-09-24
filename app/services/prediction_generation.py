@@ -2,8 +2,9 @@
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
@@ -13,6 +14,7 @@ from app.services.prediction_contract import (
     PredictionFailure,
     fingerprint,
     legacy_policy,
+    nav_anchored,
     policy_for_record,
     policy_scope,
     prediction_policy,
@@ -37,6 +39,12 @@ def create_task(codes, *, request_key=None, horizons=None, retry_items=None):
         )
     request_key = fingerprint(prediction_policy()) + ":" + (request_key or str(uuid4()))
     routes = freeze_routes()
+    if not routes:
+        # 新收益口径没有兼容路由时登记其基础方法；旧模型和旧路由保留，不冒充新标签模型。
+        from app.services.prediction_models import bootstrap_models
+
+        bootstrap_models()
+        routes = freeze_routes()
     with get_engine().begin() as c:
         c.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": request_key})
         existing = one(c, "SELECT task_id FROM prediction_generation_task WHERE request_key=:key", key=request_key)
@@ -112,6 +120,8 @@ def task_status(task_id):
 
 def prediction_payload(data, features, horizon, now, route, *, mode="LIVE", task_id=None):
     dates = target_dates(data["calendar"], now, horizon["horizon_id"])
+    if nav_anchored() and dates["baseNavDate"] != features["dataAsOf"]:
+        raise PredictionFailure("BASE_NAV_MISMATCH", "GENERATE", "预测日期与实际净值基准不一致，停止生成")
     inference = infer_route(route, features["features"], horizon["horizon_id"])
     direction = LABELS[inference["direction"]]
     lookback = features["features"]["actualLookbackReturns"]
@@ -206,37 +216,58 @@ def _run_task(task_id):
                     retryable=failure.get("retryable", True),
                 )
             horizon = policy[horizon_id]
-            features = build_features(data, now, horizon["lookback_returns"])
-            route = payload["routes"].get(route_key(horizon_id, data["fund"]["fund_type"])) or payload["routes"].get(
-                route_key(horizon_id)
-            )
-            if not route:
-                raise PredictionFailure("MODEL_PACKAGE_MISSING", "ROUTING", "本周期尚未登记可运行模型")
-            result = prediction_payload(data, features, horizon, now, route, task_id=task_id)
-            period_key = prediction_period_key(result)
-            with get_engine().begin() as c:
-                result, created = save_prediction(c, result, period_key)
-            status = "CREATED" if created else "REUSED"
-            # 候选以自身模型身份独立落档，不混入主预测统计与用户当前卡。
-            for shadow in route.get("shadow_ids", [])[:3]:
-                try:
-                    shadow_route = route | {
-                        "model_id": shadow,
-                        "previous_model_id": None,
-                        "strictModel": True,
-                        "release_id": None,
-                    }
-                    shadow_result = prediction_payload(data, features, horizon, now, shadow_route, task_id=task_id)
-                    shadow_result["role"] = "SHADOW"
-                    with get_engine().begin() as c:
-                        save_prediction(c, shadow_result, period_key + ":SHADOW:" + shadow)
-                except Exception:
-                    logger.exception(
-                        "prediction_generation.run_task >>> shadow failed taskId=%s fund=%s horizon=%s",
-                        task_id,
-                        code,
-                        horizon_id,
-                    )
+            identity = {
+                "fundCode": code,
+                **target_dates(data["calendar"], now, horizon_id),
+                **direction_fields(horizon_id),
+            }
+            period_key = prediction_period_key(identity)
+            with get_engine().connect() as c:
+                existing = one(c, "SELECT payload FROM fund_prediction_record WHERE period_key=:key", key=period_key)
+            if existing:
+                result, status = existing["payload"], "REUSED"
+            else:
+                features = build_features(data, now, horizon["lookback_returns"])
+                route = payload["routes"].get(route_key(horizon_id, data["fund"]["fund_type"])) or payload[
+                    "routes"
+                ].get(route_key(horizon_id))
+                if not route:
+                    raise PredictionFailure("MODEL_PACKAGE_MISSING", "ROUTING", "本周期尚未登记可运行模型")
+                result = prediction_payload(data, features, horizon, now, route, task_id=task_id)
+                period_key = prediction_period_key(result)
+                with get_engine().begin() as c:
+                    if nav_anchored():
+                        completed = c.execute(text("SELECT clock_timestamp()")).scalar_one()
+                        deadline = datetime.combine(
+                            date.fromisoformat(result["startDate"]), time(15), ZoneInfo("Asia/Shanghai")
+                        )
+                        if completed >= deadline:
+                            raise PredictionFailure(
+                                "WINDOW_CHANGED", "GENERATE", "目标估值日已收盘，请重新检查最新净值后生成"
+                            )
+                        result["completedAt"] = completed.isoformat()
+                    result, created = save_prediction(c, result, period_key)
+                status = "CREATED" if created else "REUSED"
+                # 候选以自身模型身份独立落档，不混入主预测统计与用户当前卡。
+                for shadow in route.get("shadow_ids", [])[:3]:
+                    try:
+                        shadow_route = route | {
+                            "model_id": shadow,
+                            "previous_model_id": None,
+                            "strictModel": True,
+                            "release_id": None,
+                        }
+                        shadow_result = prediction_payload(data, features, horizon, now, shadow_route, task_id=task_id)
+                        shadow_result["role"] = "SHADOW"
+                        with get_engine().begin() as c:
+                            save_prediction(c, shadow_result, period_key + ":SHADOW:" + shadow)
+                    except Exception:
+                        logger.exception(
+                            "prediction_generation.run_task >>> shadow failed taskId=%s fund=%s horizon=%s",
+                            task_id,
+                            code,
+                            horizon_id,
+                        )
         except PredictionFailure as error:
             result = {
                 "generationStatus": "FAILED",
@@ -399,7 +430,7 @@ def resolve_pending_targets(limit=100):
         try:
             prediction = item["payload"]
             resolved = target_dates(
-                public_calendar(item),
+                public_calendar(item, legacy=not nav_anchored(policy_for_record(prediction))),
                 datetime.fromisoformat(prediction["generatedAt"]),
                 prediction["horizonId"],
                 policy=policy_for_record(prediction),
@@ -439,10 +470,14 @@ def verify_outcomes(limit=100):
         prediction = record["payload"]
         check_status, check_payload = "PENDING_DATA", {"summary": "到期净值或分红核验水位尚未齐备"}
         try:
-            from datetime import date
-
-            start_day = date.fromisoformat(prediction["startDate"])
-            data = read_fund_data(prediction["fundCode"], now, start=start_day)
+            # 新收益从已取得的基准净值计算；旧预测仍使用原startDate，禁止重写旧成绩。
+            start_day = date.fromisoformat(prediction.get("baseNavDate", prediction["startDate"]))
+            data = read_fund_data(
+                prediction["fundCode"],
+                now,
+                start=start_day,
+                legacy_calendar=not nav_anchored(policy_for_record(prediction)),
+            )
             end = prediction["endDate"]
             if not end:
                 resolved = target_dates(

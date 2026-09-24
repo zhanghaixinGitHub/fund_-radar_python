@@ -7,9 +7,10 @@ import json
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Protocol
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
@@ -107,8 +108,11 @@ class SyncOutcome:
     created_count: int
     updated_count: int
     skipped_count: int
+    # 聚合状态只在全部基金所需净值齐全时成功；issues保存脱敏的逐基金未完成原因。
+    status: str = "SUCCEEDED"
+    issues: tuple[str, ...] = ()
 
-    def to_payload(self) -> dict[str, str | int | None]:
+    def to_payload(self) -> dict[str, object]:
         """转换为 JSON 可序列化的任务结果，不携带外部原始数据。"""
         return {
             "sync_run_id": str(self.sync_run_id),
@@ -118,6 +122,8 @@ class SyncOutcome:
             "created_count": self.created_count,
             "updated_count": self.updated_count,
             "skipped_count": self.skipped_count,
+            "status": self.status,
+            "issues": list(self.issues),
         }
 
 
@@ -414,9 +420,7 @@ class TushareFundSyncService:
         if history_start_date > target_end_date:
             raise ValueError("history_start_date must not be after history_end_date.")
         with _market_nav_incremental_lock(self._engine):
-            source_id, parent_run_id = self._start_run(
-                sync_type="MARKET_DETAIL", requested_nav_date=target_end_date
-            )
+            source_id, parent_run_id = self._start_run(sync_type="MARKET_DETAIL", requested_nav_date=target_end_date)
             try:
                 _report_market_nav_progress(progress_reporter, 0, 0, None, "正在读取基金市场同步范围")
                 with Session(self._engine) as session:
@@ -595,9 +599,7 @@ class TushareFundSyncService:
         try:
             shares: list[TushareFundShare] = []
             for completed_count, ts_code in enumerate(ts_codes, start=1):
-                shares.extend(
-                    self._provider.list_fund_share_history(ts_code, start_date=start_date, end_date=end_date)
-                )
+                shares.extend(self._provider.list_fund_share_history(ts_code, start_date=start_date, end_date=end_date))
                 _report_market_detail_fund_progress(progress_reporter, completed_count, ts_code)
             records, invalid_count = _normalize_market_share_records(
                 shares,
@@ -693,111 +695,174 @@ class TushareFundSyncService:
         *,
         as_of_date: date | None = None,
         progress_reporter: MarketNavProgressReporter | None = None,
+        automatic: bool = False,
     ) -> SyncOutcome:
         """补齐基金市场中所有启用份额的缺失净值日期。
 
         同步范围只由数据库中的基金市场决定，与任何用户的关注列表无关。每只
         基金都必须具有可校验的精确 Tushare 代码和同源历史基线，避免猜测交易所后缀。
         """
-        target_date = as_of_date or date.today()
+        target_date = as_of_date or datetime.now(ZoneInfo("Asia/Shanghai")).date()
         with _market_nav_incremental_lock(self._engine):
-            return self._run_market_nav_incremental(target_date=target_date, progress_reporter=progress_reporter)
+            return self._run_market_nav_incremental(
+                target_date=target_date, progress_reporter=progress_reporter, automatic=automatic
+            )
 
     def _run_market_nav_incremental(
         self,
         *,
         target_date: date,
         progress_reporter: MarketNavProgressReporter | None,
+        automatic: bool = False,
     ) -> SyncOutcome:
-        """在已取得跨进程互斥锁后执行基金市场的实际增量同步。"""
-        source_id, sync_run_id = self._start_run(
-            sync_type="MARKET_NAV_INCREMENTAL", requested_nav_date=target_date
-        )
+        """按基金独立取数、校验和提交；持久缺口驱动后续补拉，单只错误不影响其余基金。"""
+        from app.repositories.nav_repair import read_inputs, save_state
+        from app.services.direction_1d_protocol import calendar
+        from app.services.nav_repair import contiguous_ranges, domestic_calendar_supported, expected_dates
+
+        source_id, sync_run_id = self._start_run(sync_type="MARKET_NAV_INCREMENTAL", requested_nav_date=target_date)
         try:
-            _report_market_nav_progress(progress_reporter, 0, 0, None, "正在读取基金市场同步范围")
             with Session(self._engine) as session:
                 targets = list_active_market_sync_targets(session)
-            ts_codes = self._resolve_market_source_fund_codes(source_id, targets)
-            market_fund_codes = tuple(_require_normalized_fund_code(ts_code) for ts_code in ts_codes)
-            total_steps = len(market_fund_codes) + 1
-            _report_market_nav_progress(progress_reporter, 0, total_steps, None, "正在读取本地同步水位")
-            with Session(self._engine) as session:
-                latest_nav_dates = get_latest_nav_dates(
-                    session, source_id=source_id, fund_codes=market_fund_codes
-                )
-            windows = _build_market_nav_incremental_windows(
-                ts_codes=ts_codes,
-                latest_nav_dates=latest_nav_dates,
-                as_of_date=target_date,
-            )
-            windows_by_ts_code = {window.ts_code: window for window in windows}
-            navs: list[TushareFundNav] = []
-            for completed_count, ts_code in enumerate(ts_codes, start=1):
-                window = windows_by_ts_code.get(ts_code)
-                if window is None:
-                    _report_market_nav_progress(
-                        progress_reporter,
-                        completed_count,
-                        total_steps,
-                        ts_code,
-                        f"{ts_code} 已是最新，无需请求外部数据",
-                    )
-                    continue
-                navs.extend(
-                    self._provider.list_nav_history(
-                        window.ts_code, start_date=window.start_date, end_date=window.end_date
-                    )
-                )
-                _report_market_nav_progress(
-                    progress_reporter,
-                    completed_count,
-                    total_steps,
-                    ts_code,
-                    f"已读取 {ts_code} 的待补齐净值",
-                )
-            _report_market_nav_progress(
-                progress_reporter, len(market_fund_codes), total_steps, None, "正在校验并写入净值数据"
-            )
-            records, invalid_count = _normalize_market_nav_incremental_records(tuple(navs), windows=windows)
-            if invalid_count:
-                raise TushareIntegrationError("fund_nav", "market incremental NAV contains invalid records")
-            write_stats = WriteStats()
-            for batch in _chunked(records, self._batch_size):
-                with Session(self._engine) as session, session.begin():
-                    write_stats = write_stats.combine(
-                        upsert_nav_daily_batch(session, source_id=source_id, records=batch)
-                    )
+            if not targets:
+                raise MarketNavIncrementalPreconditionError("fund market has no active Tushare fund shares")
+            sessions, _ = calendar()
+            total, done, fetched, complete = len(targets), 0, 0, 0
+            write_stats, issues = WriteStats(), []
+            for group in _chunked(targets, 200):
+                codes = tuple(t.fund_code for t in group)
+                with Session(self._engine) as session:
+                    metadata, dates = read_inputs(session, source_id, codes, sessions[0], target_date)
+                    latest = get_latest_nav_dates(session, source_id=source_id, fund_codes=codes)
+                for target in group:
+                    code, missing = target.fund_code, ()
+                    try:
+                        meta = metadata[code]
+                        if (
+                            automatic
+                            and meta.get("repair_status")
+                            and (meta["next_retry_at"] is None or meta["next_retry_at"] > datetime.now(UTC))
+                        ):
+                            if meta["repair_status"] != "SUCCEEDED":
+                                issues.append(f"{code}：{meta['repair_status']}，等待重试或修正配置")
+                            else:
+                                complete += 1
+                            continue
+                        # 只有缺映射的单只基金需要反查，错误不能使其他已知映射停止。
+                        ts_code = (
+                            target.source_fund_code or self._resolve_market_source_fund_codes(source_id, (target,))[0]
+                        )
+                        domestic = domestic_calendar_supported(meta)
+                        if domestic:
+                            expected = expected_dates(
+                                sessions, dates[code], target_date, found_date=meta.get("found_date")
+                            )
+                            missing = tuple(d for d in expected if d not in dates[code])
+                            ranges = contiguous_ranges(missing, sessions)
+                        else:
+                            # 本轮不为境外/特殊基金猜测日历，维持原按最新日期增量的范围。
+                            if code not in latest:
+                                raise ValueError("HISTORICAL_BASELINE_REQUIRED")
+                            ranges = (
+                                ((latest[code] + timedelta(days=1), target_date),) if latest[code] < target_date else ()
+                            )
+                        obtained = set(dates[code])
+                        for first, last in ranges:
+                            navs = self._provider.list_nav_history(ts_code, start_date=first, end_date=last)
+                            fetched += len(navs)
+                            window = MarketNavIncrementalWindow(
+                                ts_code=ts_code, fund_code=code, start_date=first, end_date=last
+                            )
+                            records, invalid = _normalize_market_nav_incremental_records(navs, windows=(window,))
+                            if invalid:
+                                raise ValueError("INVALID_NAV_RESPONSE")
+                            for batch in _chunked(records, self._batch_size):
+                                with Session(self._engine) as session, session.begin():
+                                    stats = upsert_nav_daily_batch(session, source_id=source_id, records=batch)
+                                write_stats = write_stats.combine(stats)
+                                obtained.update(r.nav_date for r in batch)
+                        missing = tuple(d for d in missing if d not in obtained)
+                        state = "STATUS_UNKNOWN" if missing else "SUCCEEDED"
+                        reason = (
+                            f"未取得{len(missing)}个估值日净值（最早{missing[0]}）；接口未证明来源尚未公布，将继续补拉"
+                            if missing
+                            else "本次应有净值已齐全"
+                        )
+                        with Session(self._engine) as session, session.begin():
+                            save_state(
+                                session,
+                                source_id=source_id,
+                                code=code,
+                                run_id=sync_run_id,
+                                status=state,
+                                missing=missing,
+                                reason=reason,
+                            )
+                        if missing:
+                            issues.append(f"{code}：{reason}")
+                        else:
+                            complete += 1
+                    except Exception as error:
+                        retryable = getattr(error, "retryable", not isinstance(error, ValueError))
+                        reason = f"同步失败（{type(error).__name__}）；" + (
+                            "稍后自动重试" if retryable else "请修正来源授权、配置或历史基线后手动重试"
+                        )
+                        # 只保存脱敏原因；此前成功提交的其他基金和当前基金已完成批次都保留。
+                        with Session(self._engine) as session, session.begin():
+                            save_state(
+                                session,
+                                source_id=source_id,
+                                code=code,
+                                run_id=sync_run_id,
+                                status="SYNC_FAILED",
+                                missing=missing,
+                                reason=reason,
+                                retryable=retryable,
+                            )
+                        issues.append(f"{code}：{reason}")
+                        logger.exception(
+                            "tushare_fund_sync._run_market_nav_incremental >>> run_id=%s fund_code=%s failed",
+                            sync_run_id,
+                            code,
+                        )
+                    finally:
+                        done += 1
+                        _report_market_nav_progress(
+                            progress_reporter,
+                            done,
+                            total,
+                            code,
+                            f"已检查{done}/{total}只，净值齐全{complete}只，待处理{len(issues)}只",
+                        )
             outcome = SyncOutcome(
-                sync_run_id=sync_run_id,
-                sync_type="MARKET_NAV_INCREMENTAL",
-                requested_nav_date=target_date,
-                fetched_count=len(navs),
-                created_count=write_stats.created_count,
-                updated_count=write_stats.updated_count,
-                skipped_count=write_stats.skipped_count,
+                sync_run_id,
+                "MARKET_NAV_INCREMENTAL",
+                target_date,
+                fetched,
+                write_stats.created_count,
+                write_stats.updated_count,
+                write_stats.skipped_count,
+                "SUCCEEDED"
+                if not issues
+                else "PARTIAL_SUCCESS"
+                if complete or write_stats.created_count or write_stats.updated_count
+                else "FAILED",
+                tuple(issues),
             )
             self._complete_run(source_id, outcome, write_stats)
-            _report_market_nav_progress(progress_reporter, total_steps, total_steps, None, "同步完成")
             logger.info(
-                "tushare_fund_sync.sync_market_nav_incremental >>> completed run_id=%s target_date=%s "
-                "fund_count=%s windows=%s fetched=%s created=%s updated=%s skipped=%s",
+                "tushare_fund_sync._run_market_nav_incremental >>> run_id=%s status=%s "
+                "funds=%s pending=%s created=%s updated=%s",
                 sync_run_id,
-                target_date,
-                len(market_fund_codes),
-                len(windows),
-                outcome.fetched_count,
+                outcome.status,
+                total,
+                len(issues),
                 outcome.created_count,
                 outcome.updated_count,
-                outcome.skipped_count,
             )
             return outcome
         except Exception as error:
             self._record_failure(source_id, sync_run_id, error)
-            logger.exception(
-                "tushare_fund_sync.sync_market_nav_incremental >>> failed run_id=%s target_date=%s",
-                sync_run_id,
-                target_date,
-            )
             raise
 
     def _resolve_market_source_fund_codes(
@@ -810,18 +875,12 @@ class TushareFundSyncService:
         if len(target_by_fund_code) != len(targets):
             raise MarketNavIncrementalPreconditionError("fund market contains duplicate active fund codes")
         source_code_by_fund_code = {
-            target.fund_code: target.source_fund_code
-            for target in targets
-            if target.source_fund_code is not None
+            target.fund_code: target.source_fund_code for target in targets if target.source_fund_code is not None
         }
-        missing_fund_codes = tuple(
-            target.fund_code for target in targets if target.source_fund_code is None
-        )
+        missing_fund_codes = tuple(target.fund_code for target in targets if target.source_fund_code is None)
         if missing_fund_codes:
             with Session(self._engine) as session:
-                latest_nav_dates = get_latest_nav_dates(
-                    session, source_id=source_id, fund_codes=missing_fund_codes
-                )
+                latest_nav_dates = get_latest_nav_dates(session, source_id=source_id, fund_codes=missing_fund_codes)
             no_baseline = sorted(set(missing_fund_codes) - set(latest_nav_dates))
             if no_baseline:
                 raise MarketNavIncrementalPreconditionError(
@@ -834,9 +893,7 @@ class TushareFundSyncService:
                         continue
                     existing = source_code_by_fund_code.get(fund_code)
                     if existing is not None and existing != nav.ts_code:
-                        raise TushareIntegrationError(
-                            "fund_nav", f"conflicting source code for fund_code={fund_code}"
-                        )
+                        raise TushareIntegrationError("fund_nav", f"conflicting source code for fund_code={fund_code}")
                     source_code_by_fund_code[fund_code] = nav.ts_code
             unresolved = sorted(set(missing_fund_codes) - set(source_code_by_fund_code))
             if unresolved:
@@ -887,6 +944,8 @@ class TushareFundSyncService:
                 sync_run_id=outcome.sync_run_id,
                 fetched_count=outcome.fetched_count,
                 write_stats=write_stats,
+                status=outcome.status,
+                error_summary="；".join(outcome.issues)[:512] or None,
             )
 
     def _record_failure(self, source_id: UUID, sync_run_id: UUID, error: Exception) -> None:
@@ -1249,9 +1308,7 @@ def _normalize_market_dividend_records(
     return tuple(by_key[key] for key in sorted(by_key)), invalid_count
 
 
-def _merge_market_dividend_records(
-    existing: FundDividendUpsert, incoming: FundDividendUpsert
-) -> FundDividendUpsert:
+def _merge_market_dividend_records(existing: FundDividendUpsert, incoming: FundDividendUpsert) -> FundDividendUpsert:
     """合并同一来源事件的空字段补全，拒绝任一非空字段的不同取值。"""
     merged_fields: dict[str, object] = {}
     for field_name in (
@@ -1362,9 +1419,7 @@ def _normalize_market_nav_incremental_records(
     return tuple(by_key[key] for key in sorted(by_key)), invalid_count
 
 
-def _ensure_market_catalog_complete(
-    requested_ts_codes: tuple[str, ...], basics: tuple[TushareFundBasic, ...]
-) -> None:
+def _ensure_market_catalog_complete(requested_ts_codes: tuple[str, ...], basics: tuple[TushareFundBasic, ...]) -> None:
     """确保每个请求的完整 Tushare 代码都恰好对应一条目录记录。"""
     requested = set(requested_ts_codes)
     returned = {basic.ts_code for basic in basics}

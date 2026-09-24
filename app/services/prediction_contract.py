@@ -13,7 +13,7 @@ from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-POLICY_FILE = Path(__file__).resolve().parents[1] / "data/prediction_policy_v2.json"
+POLICY_FILE = Path(__file__).resolve().parents[1] / "data/prediction_policy_v3.json"
 _frozen_policy = ContextVar("prediction_frozen_policy", default=None)
 
 
@@ -122,6 +122,19 @@ class ValuationCalendar:
             self.missing(day)
         return self.sessions[index]
 
+    def required_base(self, generated_at: datetime) -> date:
+        """首个待预测估值日的前一估值日；收盘后必须取得刚结束当日的净值。"""
+        start = self.start(generated_at)
+        index = bisect_left(self.sessions, start)
+        if index == 0:
+            self.missing(start)
+        return self.sessions[index - 1]
+
+
+def nav_anchored(policy=None):
+    """仅新规则改用已取得净值作为收益基准，旧档按冻结的原规则核验。"""
+    return (policy or prediction_policy()).get("generation_policy") == "CN_NAV_READY_CLOSE_V1"
+
 
 def add_months(day: date, months: int) -> date:
     """月末先夹到目标月最后一天，再由估值日历顺延；不换算为固定交易日数。"""
@@ -136,17 +149,19 @@ def target_dates(calendar: ValuationCalendar, generated_at: datetime, horizon_id
     if horizon is None:
         raise PredictionFailure("HORIZON_NOT_CONFIGURED", "VALIDATION", "预测周期未开放", retryable=False)
     start = calendar.start(generated_at)
+    base = calendar.required_base(generated_at) if nav_anchored(policy) else start
     nominal = None
     if horizon["unit"] == "TRADING_SESSION":
-        index = bisect_left(calendar.sessions, start) + horizon["length"]
+        index = bisect_left(calendar.sessions, base) + horizon["length"]
         if index >= len(calendar.sessions):
             calendar.missing(start)
         end = calendar.sessions[index]
     else:
-        nominal = add_months(start, horizon["length"])
+        nominal = add_months(base, horizon["length"])
         index = bisect_left(calendar.sessions, nominal)
         end = calendar.sessions[index] if index < len(calendar.sessions) else None
     return {
+        **({"baseNavDate": str(base), "generationPolicy": policy["generation_policy"]} if nav_anchored(policy) else {}),
         "startDate": str(start),
         "endDate": str(end) if end else None,
         "nominalEndDate": str(nominal) if nominal else None,

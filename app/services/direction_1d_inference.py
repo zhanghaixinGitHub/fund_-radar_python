@@ -49,11 +49,13 @@ def load_model(row):
     return model
 
 
-def infer(code: str) -> dict:
+def infer(code: str, expected_target: str | None = None) -> dict:
     now = repo.clock()
     if abs((datetime.now(ZONE) - now).total_seconds()) > 5:
         raise ValueError("CLOCK_SKEW")
     w = window(now)
+    if expected_target and expected_target != w["target_nav_date"]:
+        raise ValueError("WINDOW_CHANGED")
     if w["status"] != "OPEN":
         raise ValueError("MISSED_DEADLINE")
     wanted = input_days(date.fromisoformat(w["base_nav_date"]))
@@ -65,6 +67,15 @@ def infer(code: str) -> dict:
         mapping = classify(ps[0], prediction=True)
         if not mapping["group_id"]:
             raise ValueError(mapping["classification_reason"])
+        # 缺净值时先等待，不能提前锁住模型；补齐后才选取当时已投入使用的模型。
+        rows = repo.navs(c, code, source["source_id"], wanted[0], wanted[-1])
+        by_date = {r["nav_date"]: r for r in rows if r["updated_at"] <= now}
+        if wanted[-1] not in by_date:
+            raise ValueError(
+                "NAV_CURRENT_NOT_READY" if wanted[-1] == now.astimezone(ZONE).date() else "NAV_LATEST_NOT_READY"
+            )
+        if any(d not in by_date for d in wanted):
+            raise ValueError("NAV_GAP")
         all_models = [m for m in repo.models(c) if m["group_id"] == mapping["group_id"]]
         if not all_models:
             raise ValueError("MODEL_PENDING")
@@ -111,10 +122,6 @@ def infer(code: str) -> dict:
             unavailable = True
         else:
             unavailable = False
-            rows = repo.navs(c, code, source["source_id"], wanted[0], wanted[-1])
-            by_date = {r["nav_date"]: r for r in rows}
-            if any(d not in by_date for d in wanted):
-                raise ValueError("DATA_PENDING")
             x = features([by_date[d]["unit_nav"] for d in wanted])
             observed = repo.observe(c, code, source, [by_date[d] for d in wanted], now)
             events = [

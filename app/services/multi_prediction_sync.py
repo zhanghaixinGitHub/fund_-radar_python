@@ -1,34 +1,43 @@
-"""全部关注公共预测流水线；费用阶段先于此阶段，Java接回个人建议，最后核验到期。"""
+"""全部关注四周期预测；一日沿用独立窗口和留档，多周期接回个人建议后核验到期。"""
 
-import re
+import logging
 import time
 from datetime import date
 
 from app.services.direction_1d_sync import Direction1dSyncResult, Direction1dSyncService
+from app.services.prediction_contract import prediction_policy
 from app.services.prediction_generation import create_task, task_status, verify_outcomes
+
+logger = logging.getLogger(__name__)
 
 
 class MultiPredictionSyncService(Direction1dSyncService):
     def sync(self, *, progress_reporter):
-        after, codes = "", []
-        while True:
-            response = self._client.get("/internal/v1/direction-1d/sync/fund-codes", params={"after": after})
-            response.raise_for_status()
-            page = response.json()
-            if (
-                not isinstance(page, list)
-                or len(page) > 100
-                or page != sorted(set(page))
-                or any(
-                    not isinstance(code, str) or not re.fullmatch(r"[0-9]{6}", code) or code <= after for code in page
-                )
-            ):
-                raise ValueError("MULTI_SCOPE_INVALID")
-            if not page:
-                break
-            codes.extend(page)
-            after = page[-1]
+        """优先尝试有截止时间的一日预测；窗口外或该阶段异常不阻断其他周期。"""
+        codes = self.read_fund_codes()
+        planned = len(codes) * (1 + len(prediction_policy()["horizons"]))
         total, created, reused, issues = 0, 0, 0, []
+        progress_reporter(0, planned, None, f"{len(codes)}只基金，正在检查一日、五日、二十日和半年预测")
+        if codes:
+            try:
+                daily = self.sync_codes(
+                    codes,
+                    target=self.read_target_date(),
+                    progress_reporter=lambda current, _total, code, message: progress_reporter(
+                        current,
+                        planned,
+                        code,
+                        f"一日预测：{message}",
+                    ),
+                )
+                created, reused = daily.created, daily.existing
+                issues.extend(f"一日预测/{issue}" for issue in daily.issues)
+            except Exception:
+                # 例如一日窗口服务不可用；不能把未确认结果记为成功，也不能阻塞其他周期。
+                logger.exception("multi_prediction_sync.sync >>> 一日预测阶段未完成，fund_count=%s", len(codes))
+                issues.extend(f"一日预测/{code}：一日预测检查未完成，请稍后重试" for code in codes)
+            total = len(codes)
+            progress_reporter(total, planned, None, "一日预测检查结束，继续检查五日、二十日和半年预测")
         # 公共批次最多500只，基金范围分页，跨用户关注去重；统计单位明确为基金周期项。
         for start in range(0, len(codes), 100):
             task = create_task(codes[start : start + 100])
@@ -36,7 +45,7 @@ class MultiPredictionSyncService(Direction1dSyncService):
             while task["status"] in {"QUEUED", "RUNNING", "INTERRUPTED"}:
                 progress_reporter(
                     total + task["plannedItems"] - task["pendingItems"],
-                    len(codes) * 3,
+                    planned,
                     None,
                     f"{len(codes)}只基金；当前持久预测任务 {task['taskId']}，待处理{task['pendingItems']}项",
                 )
@@ -59,5 +68,6 @@ class MultiPredictionSyncService(Direction1dSyncService):
             response.raise_for_status()
             if response.json().get("failed", 0):
                 raise RuntimeError("DECISION_ARCHIVE_INCOMPLETE: " + task["taskId"])
+            progress_reporter(total, planned, None, f"已检查 {total}/{planned} 个基金周期项")
         verify_outcomes()
         return Direction1dSyncResult(date.today(), total, created, reused, tuple(issues))

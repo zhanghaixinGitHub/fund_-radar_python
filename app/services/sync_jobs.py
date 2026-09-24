@@ -335,6 +335,10 @@ class LocalSyncJobManager:
                     job_id, current, total, fund_code, message
                 ),
             )
+            if outcome.status != "SUCCEEDED":
+                # 来源部分完成不能被后面的指标异常盖掉；预测会独立检查每只基金的完整净值。
+                self._complete_job(job_id, outcome)
+                return
             if not build_features:
                 self._complete_job(job_id, outcome, completion_message="净值增量同步完成，历史指标将在后续步骤计算")
                 return
@@ -546,21 +550,39 @@ class LocalSyncJobManager:
         """只有 Java 确认留档才计为生成；部分不适用、缺数据、过期均作为未完成展示。"""
         service = None
         self._replace_job(
-            job_id, status="RUNNING", started_at=datetime.now(UTC), progress_message="正在读取全部关注基金",
+            job_id,
+            status="RUNNING",
+            started_at=datetime.now(UTC),
+            progress_message="正在读取全部关注基金",
         )
         try:
             service = self._prediction_service_factory()
-            result = service.sync(progress_reporter=lambda current, total, code, message: self._update_progress(
-                job_id, current, total, code, message,
-            ))
+            result = service.sync(
+                progress_reporter=lambda current, total, code, message: self._update_progress(
+                    job_id,
+                    current,
+                    total,
+                    code,
+                    message,
+                )
+            )
             status = (
-                "SUCCEEDED" if not result.issues
-                else "PARTIAL_SUCCESS" if result.created + result.existing else "FAILED"
+                "SUCCEEDED"
+                if not result.issues
+                else "PARTIAL_SUCCESS"
+                if result.created + result.existing
+                else "FAILED"
             )
             self._replace_job(
-                job_id, status=status, requested_nav_date=result.target_date,
-                progress_current=result.total, progress_total=result.total, current_fund_code=None,
-                fetched_count=result.total, created_count=result.created, updated_count=result.existing,
+                job_id,
+                status=status,
+                requested_nav_date=result.target_date,
+                progress_current=result.total,
+                progress_total=result.total,
+                current_fund_code=None,
+                fetched_count=result.total,
+                created_count=result.created,
+                updated_count=result.existing,
                 skipped_count=len(result.issues),
                 progress_message=(
                     f"目标日 {result.target_date}：共检查 {result.total} 只，新生成 {result.created}，"
@@ -572,7 +594,11 @@ class LocalSyncJobManager:
             )
             logger.info(
                 "sync_jobs._run_direction_1d_predictions >>> job_id=%s, status=%s, total=%s, created=%s, existing=%s",
-                job_id, status, result.total, result.created, result.existing,
+                job_id,
+                status,
+                result.total,
+                result.created,
+                result.existing,
             )
         except Exception:
             logger.exception("sync_jobs._run_direction_1d_predictions >>> task failed, job_id=%s", job_id)
@@ -587,27 +613,45 @@ class LocalSyncJobManager:
                         self._active_job_id = None
 
     def _run_multi_predictions(self, job_id: UUID) -> None:
-        """单位为基金周期项；失败未被丢弃，公共结果、Java个人留档和到期核验顺序执行。"""
+        """合并一日及其他周期的真实回执，单位为基金周期项；窗口外也保留未生成原因。"""
         service = None
         self._replace_job(
-            job_id, status="RUNNING", started_at=datetime.now(UTC), progress_message="正在读取全部关注基金与已开放周期",
+            job_id,
+            status="RUNNING",
+            started_at=datetime.now(UTC),
+            progress_message="正在读取全部关注基金与已开放周期",
         )
         try:
             service = self._multi_prediction_service_factory()
-            result = service.sync(progress_reporter=lambda current, total, code, message: self._update_progress(
-                job_id, current, total, code, message,
-            ))
+            result = service.sync(
+                progress_reporter=lambda current, total, code, message: self._update_progress(
+                    job_id,
+                    current,
+                    total,
+                    code,
+                    message,
+                )
+            )
             status = (
-                "SUCCEEDED" if not result.issues
-                else "PARTIAL_SUCCESS" if result.created + result.existing else "FAILED"
+                "SUCCEEDED"
+                if not result.issues
+                else "PARTIAL_SUCCESS"
+                if result.created + result.existing
+                else "FAILED"
             )
             self._replace_job(
-                job_id, status=status, requested_nav_date=result.target_date,
-                progress_current=result.total, progress_total=result.total, current_fund_code=None,
-                fetched_count=result.total, created_count=result.created, updated_count=result.existing,
+                job_id,
+                status=status,
+                requested_nav_date=result.target_date,
+                progress_current=result.total,
+                progress_total=result.total,
+                current_fund_code=None,
+                fetched_count=result.total,
+                created_count=result.created,
+                updated_count=result.existing,
                 skipped_count=len(result.issues),
                 progress_message=(
-                    f"多周期共处理 {result.total} 个基金周期项，新生成 {result.created}，"
+                    f"一日、五日、二十日和半年共处理 {result.total} 个基金周期项，新生成 {result.created}，"
                     f"已有 {result.existing}，未生成 {len(result.issues)}"
                 ),
                 error_code="PREDICTION_INCOMPLETE" if result.issues else None,
@@ -616,7 +660,11 @@ class LocalSyncJobManager:
             )
             logger.info(
                 "sync_jobs._run_multi_predictions >>> job_id=%s, status=%s, total=%s, created=%s, existing=%s",
-                job_id, status, result.total, result.created, result.existing,
+                job_id,
+                status,
+                result.total,
+                result.created,
+                result.existing,
             )
         except Exception:
             logger.exception("sync_jobs._run_multi_predictions >>> task failed, job_id=%s", job_id)
@@ -634,8 +682,11 @@ class LocalSyncJobManager:
         """按实际保存回执累计进度；部分失败保留成功计数，整批仍继续汇总。"""
         service = None
         self._replace_job(
-            job_id, status="RUNNING", started_at=datetime.now(UTC),
-            fund_codes=(fund_code,) if fund_code else (), progress_message="正在读取费率同步范围",
+            job_id,
+            status="RUNNING",
+            started_at=datetime.now(UTC),
+            fund_codes=(fund_code,) if fund_code else (),
+            progress_message="正在读取费率同步范围",
         )
         try:
             service = self._fee_service_factory()
@@ -647,8 +698,13 @@ class LocalSyncJobManager:
             )
             status = "SUCCEEDED" if not result.failures else "PARTIAL_SUCCESS" if result.updated else "FAILED"
             self._replace_job(
-                job_id, status=status, progress_current=result.total, progress_total=result.total,
-                current_fund_code=None, fetched_count=result.total, updated_count=result.updated,
+                job_id,
+                status=status,
+                progress_current=result.total,
+                progress_total=result.total,
+                current_fund_code=None,
+                fetched_count=result.total,
+                updated_count=result.updated,
                 progress_message=(
                     f"费率同步结束：共 {result.total} 只，成功 {result.updated} 只，失败 {len(result.failures)} 只"
                 ),
@@ -658,7 +714,11 @@ class LocalSyncJobManager:
             )
             logger.info(
                 "sync_jobs._run_simulation_fees >>> completed, job_id=%s, status=%s, total=%s, saved=%s, failed=%s",
-                job_id, status, result.total, result.updated, len(result.failures),
+                job_id,
+                status,
+                result.total,
+                result.updated,
+                len(result.failures),
             )
         except Exception:
             logger.exception("sync_jobs._run_simulation_fees >>> task failed, job_id=%s", job_id)
@@ -705,10 +765,14 @@ class LocalSyncJobManager:
         snapshot = self._required_job(job_id)
         self._replace_job(
             job_id,
-            status="SUCCEEDED",
+            status=outcome.status,
             progress_current=snapshot.progress_total,
             current_fund_code=None,
-            progress_message=completion_message,
+            progress_message=completion_message
+            if not outcome.issues
+            else "净值同步尚有未完成项，成功数据已保存；待处理项目将按状态继续补拉",
+            error_code="NAV_SYNC_INCOMPLETE" if outcome.issues else None,
+            error_message="；".join(outcome.issues[:100]) or None,
             sync_run_id=outcome.sync_run_id,
             fetched_count=outcome.fetched_count,
             created_count=outcome.created_count,

@@ -91,7 +91,8 @@ def test_incremental_task_uses_market_scope_and_optional_as_of_date(monkeypatch)
     received: dict[str, object] = {}
 
     class StubService:
-        def sync_market_nav_incremental(self, *, as_of_date: date | None) -> SyncOutcome:
+        def sync_market_nav_incremental(self, *, as_of_date: date | None, automatic: bool) -> SyncOutcome:
+            assert automatic is False
             received["as_of_date"] = as_of_date
             return SyncOutcome(
                 sync_run_id=uuid4(),

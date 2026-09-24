@@ -411,7 +411,8 @@ def _run_research(run_id):
                             )
                             if not set(FEATURES) <= features["features"].keys():
                                 continue
-                            dates = [d for d in future if day <= d <= end]
+                            base = date.fromisoformat(target.get("baseNavDate", str(day)))
+                            dates = [d for d in future if base <= d <= end]
                             boundary_day = (
                                 spec["trainEnd"]
                                 if str(day) <= spec["trainEnd"]
@@ -436,6 +437,7 @@ def _run_research(run_id):
                                     "dataAsOf": features["dataAsOf"],
                                     "inputHash": features["featureHash"],
                                     "startDate": str(day),
+                                    "baseNavDate": str(base),
                                     "endDate": str(end),
                                     "totalReturn": str(series[-1] / series[0] - 1),
                                     "dataQuality": "ASSUMED_AVAILABILITY",

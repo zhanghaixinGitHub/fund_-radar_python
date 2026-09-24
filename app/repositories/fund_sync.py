@@ -255,18 +255,24 @@ def complete_sync_run(
     sync_run_id: UUID,
     fetched_count: int,
     write_stats: WriteStats,
+    status: str = "SUCCEEDED",
+    error_summary: str | None = None,
 ) -> None:
     """将同步运行标为成功并更新数据源最近成功时间。"""
     run = _get_sync_run(session, sync_run_id)
     source = _get_source(session, source_id)
     completed_at = datetime.now(UTC)
-    run.status = "SUCCEEDED"
+    run.status = status
     run.fetched_count = fetched_count
     run.created_count = write_stats.created_count
     run.updated_count = write_stats.updated_count
     run.skipped_count = write_stats.skipped_count
-    run.error_summary = None
+    run.error_summary = error_summary
     run.finished_at = completed_at
+    if status != "SUCCEEDED":
+        source.last_error_at = completed_at
+        source.last_error_summary = f"{run.sync_type}: {error_summary}"[:512]
+        return
     source.last_success_at = completed_at
     if source.last_error_summary and source.last_error_summary.startswith(f"{run.sync_type}:"):
         source.last_error_at = None
@@ -386,8 +392,7 @@ def list_active_market_sync_targets(session: Session) -> tuple[MarketSyncTarget,
         .order_by(FundShareClass.fund_code.asc())
     ).all()
     return tuple(
-        MarketSyncTarget(fund_code=fund_code, source_fund_code=source_fund_code)
-        for fund_code, source_fund_code in rows
+        MarketSyncTarget(fund_code=fund_code, source_fund_code=source_fund_code) for fund_code, source_fund_code in rows
     )
 
 
@@ -412,9 +417,7 @@ def assign_source_fund_codes(session: Session, source_fund_codes: dict[str, str]
         share.source_fund_code = source_fund_code
 
 
-def upsert_nav_daily_batch(
-    session: Session, *, source_id: UUID, records: tuple[NavDailyUpsert, ...]
-) -> WriteStats:
+def upsert_nav_daily_batch(session: Session, *, source_id: UUID, records: tuple[NavDailyUpsert, ...]) -> WriteStats:
     """按基金、日期、来源和内容哈希幂等写入净值；未知份额只计数跳过。"""
     if not records:
         return WriteStats()
@@ -650,9 +653,7 @@ def upsert_fund_dividends_batch(
     return WriteStats(created_count=created_count, updated_count=updated_count, skipped_count=skipped_count)
 
 
-def get_latest_nav_dates(
-    session: Session, *, source_id: UUID, fund_codes: tuple[str, ...]
-) -> dict[str, date]:
+def get_latest_nav_dates(session: Session, *, source_id: UUID, fund_codes: tuple[str, ...]) -> dict[str, date]:
     """按数据源返回指定基金已持久化的最新净值日期。
 
     增量同步只能以同一来源的数据推进水位，不能让其他来源的记录掩盖

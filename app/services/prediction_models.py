@@ -16,8 +16,8 @@ from app.services.prediction_contract import PredictionFailure, fingerprint, pre
 from app.services.prediction_direction import (
     BASELINE_ADAPTERS,
     CLASSES,
-    TARGET,
     TRI_ADAPTERS,
+    TRI_TARGETS,
     classify_return,
     direction_fields,
     three_state,
@@ -67,12 +67,14 @@ def validate_package(package: dict):
         )
     if package["featureSchemaVersion"] not in {"NAV_TOTAL_RETURN_V1", "LEGACY_NAV_7_V1"}:
         raise PredictionFailure("FEATURE_SCHEMA_MISMATCH", "MODEL_LOAD", "模型特征版本未接入", retryable=False)
-    is_tri = package["targetDefinitionId"] == TARGET
+    is_tri = package["targetDefinitionId"] in TRI_TARGETS
     if is_tri != (package["adapter"] in TRI_ADAPTERS):
         raise PredictionFailure("MODEL_PACKAGE_INCOMPATIBLE", "MODEL_LOAD", "二分类适配器不能使用三分类目标")
     if is_tri:
         rule = validate_rule(package.get("directionPolicySnapshot", {}))
-        validate_identity(package, package["horizonId"], {"target_definition_id": TARGET, "direction": rule})
+        validate_identity(
+            package, package["horizonId"], {"target_definition_id": package["targetDefinitionId"], "direction": rule}
+        )
     if package["adapter"] in {"LOGISTIC_STANDARDIZED_V1", "DECISION_TREE_V1", "LOGISTIC_MULTICLASS_V2"}:
         if tuple(package["features"]) != FEATURES or package["featureUnits"] != ["RATIO"] * 6 + ["SESSIONS"]:
             raise PredictionFailure(

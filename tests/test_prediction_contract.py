@@ -30,14 +30,15 @@ def test_current_cutoff_and_holiday():
     after = target_dates(calendar(), datetime.fromisoformat("2026-09-22T15:00:00+08:00"), "T5_V1")
     assert before["startDate"] == "2026-09-22"
     assert after["startDate"] == "2026-09-23"
-    assert before["endDate"] == "2026-09-30"
+    assert before["baseNavDate"] == "2026-09-21"
+    assert before["endDate"] == "2026-09-29"
     holiday = target_dates(calendar(), datetime.fromisoformat("2026-10-01T10:00:00+08:00"), "T5_V1")
     assert holiday["startDate"] == "2026-10-08"
 
 
 def test_months_keep_nominal_when_official_year_missing():
     value = target_dates(calendar(), datetime.fromisoformat("2026-09-22T10:00:00+08:00"), "M6_V1")
-    assert value["nominalEndDate"] == "2027-03-22"
+    assert value["nominalEndDate"] == "2027-03-21"
     assert value["endDate"] is None
     assert value["endDateStatus"] == "PENDING_OFFICIAL_CALENDAR"
     assert add_months(date(2024, 8, 31), 6) == date(2025, 2, 28)

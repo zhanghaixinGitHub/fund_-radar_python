@@ -65,7 +65,9 @@ def sync_market_nav_incremental(as_of_date: str | None = None) -> dict[str, obje
     parsed_as_of_date = date.fromisoformat(as_of_date) if as_of_date else None
     service = TushareFundSyncService()
     try:
-        return _with_feature_snapshot_payload(service.sync_market_nav_incremental(as_of_date=parsed_as_of_date))
+        return _with_feature_snapshot_payload(
+            service.sync_market_nav_incremental(as_of_date=parsed_as_of_date, automatic=parsed_as_of_date is None)
+        )
     finally:
         service.close()
 

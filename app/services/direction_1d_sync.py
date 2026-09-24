@@ -13,7 +13,10 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 _BASE = "/internal/v1/direction-1d/sync"
 _REASONS = {
-    "MISSED_DEADLINE": "不在预测时间段内，等待下一期；不能补造已截止预测",
+    "MISSED_DEADLINE": "目标估值日已收盘，等待最新净值后预测下一估值日",
+    "NAV_CURRENT_NOT_READY": "当天净值尚未取得，等待净值后预测下一估值日",
+    "NAV_LATEST_NOT_READY": "上一估值日净值尚未取得，补齐后再预测",
+    "NAV_GAP": "所需历史净值存在缺日，补齐后再预测",
     "WINDOW_CHANGED": "预测期次已变化，请重新创建任务",
     "SPECIAL_POLICY_REQUIRED": "该基金类型暂不支持",
     "NOT_APPLICABLE": "该基金暂不适用现有模型",
@@ -23,6 +26,8 @@ _REASONS = {
     "DATA_PENDING": "净值或必要输入尚未齐全",
     "DATA_INSUFFICIENT": "历史数据不足",
     "NO_LONGER_FOLLOWED": "已不在有效关注范围",
+    "QUEUED": "一日预测已排队，尚未确认留档，等待后续检查",
+    "RUNNING": "一日预测仍在计算，尚未确认留档，等待后续检查",
 }
 
 
@@ -57,9 +62,17 @@ class Direction1dSyncService:
 
     def sync(self, *, progress_reporter: Callable[[int, int, str | None, str], None]) -> Direction1dSyncResult:
         """冻结当前目标日，分页读取关注代码；跨期和数据不齐均保留原因，不伪造预测值。"""
+        target = self.read_target_date()
+        return self.sync_codes(self.read_fund_codes(), target=target, progress_reporter=progress_reporter)
+
+    def read_target_date(self) -> date:
+        """目标日取自核心服务核验过的一日窗口，不能用本机日期代替交易日。"""
         response = self._client.get(f"{_BASE}/window")
         response.raise_for_status()
-        target = date.fromisoformat(response.json()["targetNavDate"])
+        return date.fromisoformat(response.json()["targetNavDate"])
+
+    def read_fund_codes(self) -> list[str]:
+        """读取服务端分页去重后的有效关注范围，供一日与多周期使用同一批基金。"""
         codes, after = [], ""
         while True:
             response = self._client.get(f"{_BASE}/fund-codes", params={"after": after})
@@ -77,6 +90,16 @@ class Direction1dSyncService:
                 break
             codes.extend(page)
             after = page[-1]
+        return codes
+
+    def sync_codes(
+        self,
+        codes: list[str],
+        *,
+        target: date,
+        progress_reporter: Callable[[int, int, str | None, str], None],
+    ) -> Direction1dSyncResult:
+        """仅处理服务端已读取的基金范围；Java仍检查窗口、关注关系及原文留档回执。"""
         total, created, existing = len(codes), 0, 0
         issues = []
         progress_reporter(0, total, None, f"目标日 {target}，正在检查 {total} 只关注基金")
