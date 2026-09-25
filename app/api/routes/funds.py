@@ -32,6 +32,7 @@ from app.services.fund_catalog_read import (
 )
 from app.services.sync_jobs import (
     DIRECTION_1D_JOB_TYPE,
+    FUND_MATERIALS_JOB_TYPE,
     MARKET_ALL_JOB_TYPE,
     MARKET_DETAIL_JOB_TYPE,
     MARKET_FREE_DATA_COMPLETION_JOB_TYPE,
@@ -106,6 +107,32 @@ async def list_internal_fund_summaries_by_codes(
 
 
 @router.post(
+    "/sync-jobs/fund-materials",
+    response_model=InternalSyncJobStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_service_token)],
+)
+def start_internal_fund_materials(fund_code: Annotated[str, Query(alias="fundCode", pattern=r"^002112$")]):
+    """仅允许明确指定试点基金；服务间鉴权由既有依赖完成。"""
+    try:
+        return _to_internal_sync_job_status(get_sync_job_manager().start_fund_materials(fund_code))
+    except SyncJobInProgressError as error:
+        raise HTTPException(
+            status_code=409, detail={"code": "MARKET_SYNC_IN_PROGRESS", "message": "已有同步任务正在执行。"}
+        ) from error
+
+
+@router.get(
+    "/sync-jobs/fund-materials/latest",
+    response_model=InternalSyncJobStatus | None,
+    dependencies=[Depends(require_service_token)],
+)
+def get_latest_internal_fund_materials():
+    snapshot = get_sync_job_manager().get_latest_job(FUND_MATERIALS_JOB_TYPE)
+    return _to_internal_sync_job_status(snapshot) if snapshot else None
+
+
+@router.post(
     "/sync-jobs/all",
     response_model=InternalSyncJobStatus,
     status_code=status.HTTP_202_ACCEPTED,
@@ -117,7 +144,8 @@ def start_internal_all_sync_jobs() -> InternalSyncJobStatus:
         snapshot = get_sync_job_manager().start_all()
         logger.info(
             "funds.start_internal_all_sync_jobs >>> batch created, job_id=%s, trace_id=%s",
-            snapshot.job_id, get_trace_id(),
+            snapshot.job_id,
+            get_trace_id(),
         )
     except SyncJobInProgressError as error:
         raise HTTPException(
@@ -139,8 +167,10 @@ def get_latest_internal_all_sync_jobs() -> InternalSyncJobStatus | None:
 
 
 @router.post(
-    "/sync-jobs/direction-1d-predictions", response_model=InternalSyncJobStatus,
-    status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_service_token)],
+    "/sync-jobs/direction-1d-predictions",
+    response_model=InternalSyncJobStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_service_token)],
 )
 def start_internal_direction_1d_predictions() -> InternalSyncJobStatus:
     """Java 同步管理员已授权的批量预测入口；范围只能由 Java 的有效关注清单提供。"""
@@ -155,7 +185,8 @@ def start_internal_direction_1d_predictions() -> InternalSyncJobStatus:
 
 
 @router.get(
-    "/sync-jobs/direction-1d-predictions/latest", response_model=InternalSyncJobStatus | None,
+    "/sync-jobs/direction-1d-predictions/latest",
+    response_model=InternalSyncJobStatus | None,
     dependencies=[Depends(require_service_token)],
 )
 def get_latest_internal_direction_1d_predictions() -> InternalSyncJobStatus | None:
@@ -165,8 +196,10 @@ def get_latest_internal_direction_1d_predictions() -> InternalSyncJobStatus | No
 
 
 @router.post(
-    "/sync-jobs/multi-predictions", response_model=InternalSyncJobStatus,
-    status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_service_token)],
+    "/sync-jobs/multi-predictions",
+    response_model=InternalSyncJobStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_service_token)],
 )
 def start_internal_multi_predictions() -> InternalSyncJobStatus:
     """Java 同步管理员已授权的批量预测入口；范围只能由 Java 的有效关注清单提供。"""
@@ -181,7 +214,8 @@ def start_internal_multi_predictions() -> InternalSyncJobStatus:
 
 
 @router.get(
-    "/sync-jobs/multi-predictions/latest", response_model=InternalSyncJobStatus | None,
+    "/sync-jobs/multi-predictions/latest",
+    response_model=InternalSyncJobStatus | None,
     dependencies=[Depends(require_service_token)],
 )
 def get_latest_internal_multi_predictions() -> InternalSyncJobStatus | None:
@@ -191,8 +225,10 @@ def get_latest_internal_multi_predictions() -> InternalSyncJobStatus | None:
 
 
 @router.post(
-    "/sync-jobs/simulation-fees", response_model=InternalSyncJobStatus,
-    status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_service_token)],
+    "/sync-jobs/simulation-fees",
+    response_model=InternalSyncJobStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_service_token)],
 )
 def start_internal_simulation_fee_job(
     fund_code: Annotated[str | None, Query(alias="fundCode", pattern=r"^[0-9]{6}$")] = None,
@@ -209,7 +245,8 @@ def start_internal_simulation_fee_job(
 
 
 @router.get(
-    "/sync-jobs/simulation-fees/latest", response_model=InternalSyncJobStatus | None,
+    "/sync-jobs/simulation-fees/latest",
+    response_model=InternalSyncJobStatus | None,
     dependencies=[Depends(require_service_token)],
 )
 def get_latest_internal_simulation_fee_job() -> InternalSyncJobStatus | None:
@@ -414,6 +451,10 @@ def get_internal_sync_job_last_success_times() -> tuple[InternalSyncJobLastSucce
     manager = get_sync_job_manager()
     return (
         InternalSyncJobLastSuccess(
+            job_type=FUND_MATERIALS_JOB_TYPE,
+            last_successful_at=manager.get_last_successful_time(FUND_MATERIALS_JOB_TYPE),
+        ),
+        InternalSyncJobLastSuccess(
             job_type=MARKET_NAV_INCREMENTAL_JOB_TYPE,
             last_successful_at=manager.get_last_successful_time(MARKET_NAV_INCREMENTAL_JOB_TYPE),
         ),
@@ -478,8 +519,7 @@ async def get_internal_watchlist_fund_detail(
 ) -> InternalFundWatchlistDetail:
     """返回本地完整详情；用户关注关系必须由 Java 在调用前完成校验。"""
     logger.info(
-        "funds.get_internal_watchlist_fund_detail >>> persisted full detail requested, "
-        "trace_id=%s, fund_code=%s",
+        "funds.get_internal_watchlist_fund_detail >>> persisted full detail requested, trace_id=%s, fund_code=%s",
         get_trace_id(),
         fund_code,
     )

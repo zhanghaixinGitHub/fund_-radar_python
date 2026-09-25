@@ -17,3 +17,7 @@ joblib==1.6.0
 narwhals==2.25.0
 threadpoolctl==3.6.0
 cloudpickle==3.1.2
+# 公开基金定期报告解析；保留原文与解析版本，供持仓数据逐期核对。
+pypdf==6.10.0
+# 大量公开公告正文提取；与持仓表专用解析分开，PDFium 调用使用互斥锁。
+pypdfium2==5.13.0

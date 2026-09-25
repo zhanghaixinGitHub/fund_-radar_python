@@ -10,3 +10,4 @@ fund_ai.db
 /.local-runs/
 .local-runs/
 data/prediction-models/
+data/fund-materials/

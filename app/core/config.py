@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     app_port: int = 8000
     # 模型正式实验产物独立于研究临时目录；备份需同时包含此目录和模型登记表。
     prediction_model_directory: str = "data/prediction-models"
+    # 页面只读快照由离线构建命令原子发布；原公告和完整财务资料继续保留在采集存储中。
+    fund_material_directory: str = "data/fund-materials"
     ai_service_token: SecretStr = SecretStr("")
     # 费率后台任务回写 Java 的地址；令牌复用 AI_SERVICE_TOKEN，禁止从浏览器传入回调地址。
     core_service_base_url: str = "http://127.0.0.1:8080"

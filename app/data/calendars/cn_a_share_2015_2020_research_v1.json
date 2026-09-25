@@ -1,0 +1,16 @@
+{
+  "version": "CN_A_SHARE_2015_2020_RESEARCH_V1",
+  "coverage_start": "2015-11-16",
+  "coverage_end": "2020-12-31",
+  "construction": "WEEKDAYS_MINUS_OFFICIAL_HOLIDAYS",
+  "reviewed_on": "2026-09-25",
+  "purpose": "002112 C类自身扩展历史研究；不替换正式日历；2015仅覆盖11月16日起，无法用于更早日期",
+  "years": [
+    {"year": 2015, "sources": ["https://www.sse.com.cn/disclosure/dealinstruc/closed/list/c/c_20160104_3979217.shtml"], "closed_ranges": []},
+    {"year": 2016, "sources": ["https://www.sse.com.cn/disclosure/announcement/general/c/c_20151224_4027676.shtml"], "closed_ranges": [["2016-01-01","2016-01-03"],["2016-02-07","2016-02-13"],["2016-04-02","2016-04-04"],["2016-04-30","2016-05-02"],["2016-06-09","2016-06-11"],["2016-09-15","2016-09-17"],["2016-10-01","2016-10-07"]]},
+    {"year": 2017, "sources": ["https://www.sse.com.cn/disclosure/announcement/general/c/c_20161222_4218613.shtml"], "closed_ranges": [["2017-01-01","2017-01-02"],["2017-01-27","2017-02-02"],["2017-04-02","2017-04-04"],["2017-04-29","2017-05-01"],["2017-05-28","2017-05-30"],["2017-10-01","2017-10-08"]]},
+    {"year": 2018, "sources": ["https://www.sse.com.cn/disclosure/announcement/general/c/c_20171222_4438363.shtml"], "closed_ranges": [["2018-01-01","2018-01-01"],["2018-02-15","2018-02-21"],["2018-04-05","2018-04-07"],["2018-04-29","2018-05-01"],["2018-06-16","2018-06-18"],["2018-09-22","2018-09-24"],["2018-10-01","2018-10-07"]]},
+    {"year": 2019, "sources": ["https://www.sse.com.cn/disclosure/announcement/general/c/c_20181220_4696473.shtml","https://www.sse.com.cn/disclosure/announcement/general/c/c_20190418_4771364.shtml"], "closed_ranges": [["2018-12-30","2019-01-01"],["2019-02-04","2019-02-10"],["2019-04-05","2019-04-07"],["2019-05-01","2019-05-04"],["2019-06-07","2019-06-09"],["2019-09-13","2019-09-15"],["2019-10-01","2019-10-07"]]},
+    {"year": 2020, "sources": ["https://www.sse.com.cn/disclosure/announcement/general/c/c_20191220_4969627.shtml","https://www.sse.com.cn/aboutus/mediacenter/hotandd/c/c_20200127_4991580.shtml"], "closed_ranges": [["2020-01-01","2020-01-01"],["2020-01-24","2020-02-02"],["2020-04-04","2020-04-06"],["2020-05-01","2020-05-05"],["2020-06-25","2020-06-27"],["2020-10-01","2020-10-08"]]}
+  ]
+}

@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 from app.services import direction_1d_inference as inference
-from app.services.direction_1d_protocol import ZONE, canonical, digest
+from app.services.direction_1d_protocol import PROTOCOL, TARGET, ZONE, canonical, digest
 
 
 def test_registered_json_hash_and_registry_identity(tmp_path, monkeypatch):
@@ -40,6 +40,9 @@ def test_first_answer_frozen_t_then_append_revisions_without_retraining_inputs(m
 
     frozen = source("2026-09-14", "1")
     body = {
+        # 历史答案也包含协议与目标定义；补齐既有核验入口要求的真实契约字段。
+        "protocol": PROTOCOL,
+        "target_definition": TARGET,
         "task_key": "SYNTHETIC_ONLY",
         "input_snapshot_id": str(uuid4()),
         "fund_code": "123456",

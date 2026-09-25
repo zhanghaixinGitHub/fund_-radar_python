@@ -12,6 +12,22 @@ FIELDS = ["ts_code", "trade_date", "close", "pre_close", "pct_chg", "vol", "amou
 MAX_BYTES, ROW_LIMIT = 4_194_304, 6000
 
 
+def validate_quote_values(row, *, rounding_tolerance=0.00011):
+    """验证同一行价格、成交量和涨幅；默认保留原四位涨幅的舍入容差。
+
+    独立早期研究可按来源实际披露精度指定容差，调用方须留存依据和实际误差；
+    此参数不能用于补价格、改变来源涨幅或放宽全市场覆盖要求。
+    """
+    if any(type(row[k]) not in (int, float) or not math.isfinite(row[k]) for k in FIELDS[2:]):
+        raise ValueError("STOCK_BREADTH_NUMERIC_INVALID")
+    if row["close"] <= 0 or row["pre_close"] <= 0 or row["vol"] < 0 or row["amount"] < 0:
+        raise ValueError("STOCK_BREADTH_PRICE_OR_QUANTITY_INVALID")
+    error = abs(100 * (row["close"] / row["pre_close"] - 1) - row["pct_chg"])
+    if error > rounding_tolerance:
+        raise ValueError("STOCK_BREADTH_PCT_FORMULA_CHANGED")
+    return error
+
+
 def parse(raw, day, minimum_included=3000):
     """严格核验同一天返回数据，再计算固定SH/SZ范围内的广度、中位涨幅与四分位距。
 
@@ -51,13 +67,7 @@ def parse(raw, day, minimum_included=3000):
                 any(type(row[k]) not in (int, float) or not math.isfinite(row[k]) for k in FIELDS[2:])
             )
             continue
-        if any(type(row[k]) not in (int, float) or not math.isfinite(row[k]) for k in FIELDS[2:]):
-            raise ValueError("STOCK_BREADTH_NUMERIC_INVALID")
-        if row["close"] <= 0 or row["pre_close"] <= 0 or row["vol"] < 0 or row["amount"] < 0:
-            raise ValueError("STOCK_BREADTH_PRICE_OR_QUANTITY_INVALID")
-        error = abs(100 * (row["close"] / row["pre_close"] - 1) - row["pct_chg"])
-        if error > 0.00011:
-            raise ValueError("STOCK_BREADTH_PCT_FORMULA_CHANGED")
+        error = validate_quote_values(row)
         maximum_error = max(maximum_error, error)
         included.append(row)
     if len(included) < minimum_included:

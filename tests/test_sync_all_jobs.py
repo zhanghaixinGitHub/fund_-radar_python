@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 STAGES = (
     "SPX_MANUAL",
     "MARKET_FREE_DATA_COMPLETION",
+    "FUND_MATERIALS",
     "MARKET_NAV_INCREMENTAL",
     "STOCK_FEATURE_SNAPSHOT",
     "SIMULATION_FEES",
@@ -97,6 +98,19 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
         def close(self):
             close_hook("MULTI_PREDICTIONS")
 
+    class MaterialsService:
+        def sync(self, code, *, progress_reporter):
+            run("FUND_MATERIALS", progress_reporter)
+            return {
+                "status": "SUCCEEDED",
+                "created": 1,
+                "updated": 0,
+                "skipped": 2,
+                "failed": 0,
+                "errors": [],
+                "message": "资料同步完成",
+            }
+
     return LocalSyncJobManager(
         FundService,
         FeatureService,
@@ -104,6 +118,7 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
         spx_sync,
         FeeService,
         multi_prediction_service_factory=PredictionService,
+        materials_service_factory=MaterialsService,
     )
 
 
@@ -127,8 +142,10 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
         started = manager.start_all()
         result = wait_finished(manager, started.job_id)
         assert calls == list(STAGES)  # 特征只在全部来源完成后生成一次。
-        assert result.status == ("SUCCEEDED" if not failures else "FAILED" if len(failures) == 6 else "PARTIAL_SUCCESS")
-        assert (result.progress_current, result.progress_total) == (6, 6)
+        assert result.status == (
+            "SUCCEEDED" if not failures else "FAILED" if len(failures) == len(STAGES) else "PARTIAL_SUCCESS"
+        )
+        assert (result.progress_current, result.progress_total) == (len(STAGES), len(STAGES))
         # 资料更新服务负责完整资料；批次不能再创建独立任务重复抓取。
         assert manager.get_latest_job("MARKET_DETAIL") is None
         assert result.started_at and result.finished_at
@@ -138,7 +155,12 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
             child = manager.get_latest_job(stage)
             assert child.status == ("FAILED" if stage in failures else "SUCCEEDED")
             assert child.started_at and child.finished_at
-            if stage not in failures and stage not in {"SPX_MANUAL", "SIMULATION_FEES", "MULTI_PREDICTIONS"}:
+            if stage not in failures and stage not in {
+                "SPX_MANUAL",
+                "SIMULATION_FEES",
+                "MULTI_PREDICTIONS",
+                "FUND_MATERIALS",
+            }:
                 assert child.sync_run_id is not None
         next_batch = manager.start_all()
         assert next_batch.job_id != started.job_id
@@ -167,7 +189,7 @@ def test_spx_batch_preserves_actual_attempt_and_timing_result(performed, state, 
         result = wait_finished(manager, manager.start_all().job_id)
         assert manager.get_latest_job("SPX_MANUAL").status == expected
         assert calls == list(STAGES[1:])
-        assert result.progress_current == result.progress_total == 6
+        assert result.progress_current == result.progress_total == len(STAGES)
         assert result.status == ("SUCCEEDED" if expected == "SUCCEEDED" else "PARTIAL_SUCCESS")
     finally:
         manager.close()

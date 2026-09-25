@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
+from pathlib import Path
 from threading import Lock
 from uuid import UUID, uuid4
 
@@ -53,11 +54,13 @@ SPX_MANUAL_JOB_TYPE = "SPX_MANUAL"
 SIMULATION_FEE_JOB_TYPE = "SIMULATION_FEES"
 MULTI_PREDICTION_JOB_TYPE = "MULTI_PREDICTIONS"
 DIRECTION_1D_JOB_TYPE = "DIRECTION_1D_PREDICTIONS"
+FUND_MATERIALS_JOB_TYPE = "FUND_MATERIALS"
 _ALL_JOB_STAGES = (
     # SPX有早上08:00的观测边界，先取这一小份数据，避免被较长的全市场同步拖到截止后。
     (SPX_MANUAL_JOB_TYPE, "标普500"),
     # 资料更新内部已执行完整资料同步，批次不再单独重复抓取同一批资料。
     (MARKET_FREE_DATA_COMPLETION_JOB_TYPE, "基金资料与市场数据更新"),
+    (FUND_MATERIALS_JOB_TYPE, "基金持仓与公司资料更新"),
     (MARKET_NAV_INCREMENTAL_JOB_TYPE, "净值增量"),
     (STOCK_FEATURE_SNAPSHOT_JOB_TYPE, "历史指标计算"),
     # 预测使用前面已同步净值；独立校验输入完整性，来源失败时不能默认算作预测成功。
@@ -126,6 +129,8 @@ class LocalSyncJobManager:
         fee_service_factory: Callable[[], SimulationFeeSyncService] = SimulationFeeSyncService,
         prediction_service_factory: Callable[[], Direction1dSyncService] = Direction1dSyncService,
         multi_prediction_service_factory=MultiPredictionSyncService,
+        materials_service_factory=None,
+        state_path: Path | None = None,
     ) -> None:
         self._service_factory = service_factory
         self._feature_service_factory = feature_service_factory
@@ -134,6 +139,8 @@ class LocalSyncJobManager:
         self._fee_service_factory = fee_service_factory
         self._prediction_service_factory = prediction_service_factory
         self._multi_prediction_service_factory = multi_prediction_service_factory
+        self._materials_service_factory = materials_service_factory
+        self._state_path = state_path
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fund-sync-job")
         self._jobs: dict[UUID, SyncJobSnapshot] = {}
         self._latest_job_ids: dict[str, UUID] = {}
@@ -141,6 +148,55 @@ class LocalSyncJobManager:
         self._active_job_id: UUID | None = None
         self._lock = Lock()
         self._closed = False
+        self._restore()
+
+    def _persist(self):
+        """调用方持有队列锁；生产单例保存任务树，测试可使用独立临时目录。"""
+        if self._state_path:
+            from app.services.fund_exposure_common import save
+
+            save(
+                self._state_path,
+                {
+                    "jobs": [asdict(j) for j in self._jobs.values()],
+                    "latest": self._latest_job_ids,
+                    "children": {str(k): v for k, v in self._batch_child_ids.items()},
+                },
+                replace=True,
+            )
+
+    def _restore(self):
+        """重启不把运行中任务冒充成功；保留断点提示，重试由采集器复用完成成果。"""
+        if not self._state_path or not self._state_path.exists():
+            return
+        from app.services.fund_exposure_common import read
+
+        saved = read(self._state_path)
+        for raw in saved["jobs"]:
+            raw["job_id"] = UUID(raw["job_id"])
+            raw["sync_run_id"] = UUID(raw["sync_run_id"]) if raw["sync_run_id"] else None
+            raw["requested_nav_date"] = date.fromisoformat(raw["requested_nav_date"])
+            raw["fund_codes"] = tuple(raw["fund_codes"])
+            for field in ("started_at", "finished_at"):
+                raw[field] = datetime.fromisoformat(raw[field]) if raw[field] else None
+            if raw["status"] in _ACTIVE_STATUSES:
+                raw.update(
+                    status="FAILED",
+                    error_code="SYNC_INTERRUPTED",
+                    finished_at=datetime.now(UTC),
+                    error_message="服务重启导致任务中断，已保存成果可在重试时复用。",
+                    progress_message="上次任务中断，请重试未完成项目",
+                )
+            self._jobs[raw["job_id"]] = SyncJobSnapshot(**raw)
+        self._latest_job_ids = {k: UUID(v) for k, v in saved["latest"].items()}
+        self._batch_child_ids = {UUID(k): tuple(UUID(v) for v in values) for k, values in saved["children"].items()}
+        self._persist()
+
+    def start_fund_materials(self, fund_code: str) -> SyncJobSnapshot:
+        """基金范围必须明确；空白和其他基金绝不退化为全市场任务。"""
+        if fund_code != "002112":
+            raise ValueError("当前仅支持 002112 的持仓与公司资料更新。")
+        return self._start_job(FUND_MATERIALS_JOB_TYPE, self._run_fund_materials)
 
     def start_market_nav_incremental(self) -> SyncJobSnapshot:
         """创建净值任务，单独执行时保留原有自动特征阶段。"""
@@ -171,7 +227,7 @@ class LocalSyncJobManager:
         return self._start_job(MULTI_PREDICTION_JOB_TYPE, self._run_multi_predictions)
 
     def start_all(self) -> SyncJobSnapshot:
-        """原子登记六个子任务；完整资料由资料更新覆盖，批次不依赖浏览器存活。"""
+        """原子登记全部子任务；完整资料由资料更新覆盖，批次不依赖浏览器存活。"""
         with self._lock:
             self._require_idle()
             parent = replace(
@@ -185,6 +241,7 @@ class LocalSyncJobManager:
                 self._latest_job_ids[snapshot.job_type] = snapshot.job_id
             self._batch_child_ids[parent.job_id] = tuple(child.job_id for child in children)
             self._active_job_id = parent.job_id
+            self._persist()
             self._executor.submit(self._run_all, parent.job_id)
             return parent
 
@@ -225,6 +282,7 @@ class LocalSyncJobManager:
             self._jobs[snapshot.job_id] = snapshot
             self._latest_job_ids[job_type] = snapshot.job_id
             self._active_job_id = snapshot.job_id
+            self._persist()
             self._executor.submit(runner, snapshot.job_id)
             return snapshot
 
@@ -234,6 +292,7 @@ class LocalSyncJobManager:
         runners = (
             self._run_spx_manual,
             self._run_market_free_data_completion,
+            self._run_fund_materials,
             lambda child_id: self._run_market_nav_incremental(child_id, build_features=False),
             self._run_stock_feature_snapshots,
             self._run_simulation_fees,
@@ -319,11 +378,60 @@ class LocalSyncJobManager:
 
     def get_last_successful_time(self, job_type: str) -> datetime | None:
         """从持久化运行记录读取指定任务最近一次完整成功时间。"""
+        if job_type == FUND_MATERIALS_JOB_TYPE:
+            from app.services.fund_exposure_common import read
+            from app.services.fund_materials_store import LIVE
+
+            path = LIVE / "state.json"
+            value = read(path).get("last_success_at") if path.exists() else None
+            return datetime.fromisoformat(value) if value else None
         sync_types = _SYNC_TYPES_BY_JOB_TYPE.get(job_type)
         if sync_types is None:
             raise ValueError("unsupported sync job type")
         with Session(get_engine()) as session:
             return get_latest_successful_sync_time(session, sync_types=sync_types)
+
+    def _run_fund_materials(self, job_id: UUID) -> None:
+        """同步结束后才设置终态；批次和单独入口共用采集器、文件断点和后台锁。"""
+        from app.services.fund_materials_sync import FundMaterialsSyncService, failure_message
+
+        self._replace_job(
+            job_id,
+            status="RUNNING",
+            started_at=datetime.now(UTC),
+            fund_codes=("002112",),
+            progress_message="正在检查基金持仓与公司资料",
+        )
+        try:
+            service = (self._materials_service_factory or FundMaterialsSyncService)()
+            result = service.sync(
+                "002112",
+                progress_reporter=lambda current, total, code, message: self._update_progress(
+                    job_id, current, total, code, message
+                ),
+            )
+            failed_stages = list(dict.fromkeys(e["stage"] + "：" + failure_message(e) for e in result["errors"]))
+            self._replace_job(
+                job_id,
+                status=result["status"],
+                progress_message=result["message"],
+                created_count=result["created"],
+                updated_count=result["updated"],
+                skipped_count=result["skipped"],
+                fetched_count=sum(result[k] for k in ("created", "updated", "skipped")),
+                error_code="MATERIALS_INCOMPLETE" if result["errors"] else None,
+                error_message=("未完成：" + "、".join(failed_stages) + "。重试将复用已保存成果。")
+                if failed_stages
+                else None,
+                finished_at=datetime.now(UTC),
+            )
+        except Exception:
+            logger.exception("sync_jobs._run_fund_materials >>> 资料同步异常, job_id=%s", job_id)
+            self._fail_job(job_id, "MATERIALS_SYNC_FAILED", "资料更新未完成，已保存成果可复用，请稍后重试。")
+        finally:
+            with self._lock:
+                if self._active_job_id == job_id:
+                    self._active_job_id = None
 
     def _run_market_nav_incremental(self, job_id: UUID, *, build_features: bool = True) -> None:
         service: TushareFundSyncService | None = None
@@ -834,6 +942,7 @@ class LocalSyncJobManager:
             snapshot = self._jobs.get(job_id)
             if snapshot is not None:
                 self._jobs[job_id] = replace(snapshot, **changes)
+                self._persist()
 
 
 _manager_lock = Lock()
@@ -845,7 +954,9 @@ def get_sync_job_manager() -> LocalSyncJobManager:
     global _manager
     with _manager_lock:
         if _manager is None:
-            _manager = LocalSyncJobManager()
+            from app.services.fund_exposure_common import ROOT
+
+            _manager = LocalSyncJobManager(state_path=ROOT.parent / "sync-center" / "jobs.json")
         return _manager
 
 
