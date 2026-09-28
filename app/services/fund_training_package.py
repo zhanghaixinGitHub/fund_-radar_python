@@ -318,11 +318,14 @@ def build(progress=lambda *args: None):
     return verify(progress)
 
 
-def verify(progress=lambda *args: None, *, pointer="candidate.json", publish=True):
+def verify(progress=lambda *args: None, *, pointer="candidate.json", publish=True, reference=None):
     """训练前可再次调用；只读重算不能发网络请求，失效或篡改立即拒绝旧的 ready 标记。"""
     if read(STORE / "plan.json") != PLAN:
         raise ValueError("TRAINING_PACKAGE_PLAN_CHANGED")
-    current = read(STORE / pointer)
+    # 离线训练可以指定已冻结的内容地址，恢复时不能重新跟随后台的 ready 指针。
+    if reference is not None and publish:
+        raise ValueError("TRAINING_FROZEN_REFERENCE_READ_ONLY")
+    current = reference if reference is not None else read(STORE / pointer)
     path = (STORE / current["file"]).resolve()
     if path.parent != (STORE / "datasets").resolve():
         raise ValueError("TRAINING_DATASET_PATH")

@@ -38,6 +38,7 @@ from app.models.market_reference import (
     MarketIndexCatalog,
     MarketIndexClassification,
 )
+from app.models.news_research import NewsResearchBundleRow, NewsResearchCardRow
 
 __all__ = [
     "CashForecastRecord",
@@ -72,6 +73,8 @@ __all__ = [
     "NavDaily",
     "NewsItem",
     "NewsSourceReference",
+    "NewsResearchBundleRow",
+    "NewsResearchCardRow",
     "SourceRegistry",
     "SourceSyncCursor",
     "SourceSyncRun",
