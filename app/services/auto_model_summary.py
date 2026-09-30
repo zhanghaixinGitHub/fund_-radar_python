@@ -58,6 +58,8 @@ def effect_summary(codes):
             c,
             """SELECT p.horizon_id,p.payload->>'targetDefinitionId' target_definition_id,
           COALESCE(p.payload->>'directionPolicyHash','') direction_policy_hash,
+          min((p.generated_at AT TIME ZONE 'Asia/Shanghai')::date)::text first_generated_date,
+          max((p.generated_at AT TIME ZONE 'Asia/Shanghai')::date)::text last_generated_date,
           count(*) records,count(DISTINCT p.fund_code) funds,
           count(*) FILTER(WHERE o.payload->>'actualDirection'='UP') up_actual,
           count(*) FILTER(WHERE o.payload->>'actualDirection'='FLAT') flat_actual,

@@ -53,7 +53,7 @@ def coverage(request: Scope):
 @router.post("/forecast-jobs", status_code=202)
 def forecast(request: ForecastRequest):
     try:
-        return submit_forecast(request.fund_code)
+        return submit_forecast(request.fund_code, request.expected_target_date, request.request_id)
     except ValueError as error:
         raise HTTPException(429 if str(error) == "QUEUE_FULL" else 409, str(error)) from error
 

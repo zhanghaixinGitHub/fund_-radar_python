@@ -16,14 +16,27 @@ def domestic_calendar_supported(fund):
     )
 
 
-def expected_dates(sessions, existing, target_date, *, now=None, found_date=None):
-    """扫描本地历史起点至最近收盘日，含中间缺口；无基线时只接受已核验范围内成立日。"""
+def expected_dates(
+    sessions, existing, target_date, *, now=None, found_date=None,
+    purchase_start_date=None, redemption_start_date=None,
+):
+    """核对开放后逐日净值，保留中间缺口；成立至首次开放期间不强制逐交易日公布。
+
+    首次开放取来源登记的申购/赎回起始日中较早者，不依据缺失形状猜日期。
+    缺少元数据时维持原保守范围，异常日期明确报错，已有封闭期净值不删除。
+    """
     now = (now or datetime.now(ZONE)).astimezone(ZONE)
     if target_date > sessions[-1] and target_date.year > sessions[-1].year:
         raise ValueError("CALENDAR_UNAVAILABLE")
     start = min(existing) if existing else found_date
     if start is None or start < sessions[0]:
         raise ValueError("HISTORICAL_BASELINE_REQUIRED")
+    opening_dates = [day for day in (purchase_start_date, redemption_start_date) if day is not None]
+    if opening_dates:
+        opened = min(opening_dates)
+        if found_date is not None and opened < found_date:
+            raise ValueError("FUND_OPEN_DATE_INVALID")
+        start = max(start, opened)
     end = min(target_date, now.date())
     return tuple(d for d in sessions if start <= d <= end and not (d == now.date() and now.time() < time(15)))
 

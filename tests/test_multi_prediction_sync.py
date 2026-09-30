@@ -132,3 +132,28 @@ def test_pending_daily_job_is_not_counted_as_generated(monkeypatch):
         assert all("尚未确认留档" in issue for issue in result.issues)
     finally:
         worker.service.close()
+
+
+def test_unsupported_is_counted_separately_and_does_not_hide_real_errors(monkeypatch):
+    worker = setup_worker(monkeypatch, count=2, daily_results=[
+        {"status": "SPECIAL_POLICY_REQUIRED"}, {"status": "WAITING_DATA"},
+    ], multi_failed=True)
+    original_status = module.task_status
+
+    def result(task_id):
+        task = original_status(task_id)
+        task["items"][0]["result"]["error"] = {
+            "code": "CALENDAR_POLICY_MISSING", "summary": "该基金类型暂不支持",
+        }
+        return task
+
+    monkeypatch.setattr(module, "task_status", result)
+    manager = LocalSyncJobManager(multi_prediction_service_factory=lambda: worker.service)
+    try:
+        job = wait_finished(manager, manager.start_multi_predictions().job_id)
+        assert job.status == "PARTIAL_SUCCESS" and job.skipped_count == 3
+        assert "暂不支持 2，待完成 1" in job.progress_message
+        assert "000002" in job.error_message and "000001" not in job.error_message
+        assert job.created_count + job.updated_count + job.skipped_count == job.fetched_count
+    finally:
+        manager.close()

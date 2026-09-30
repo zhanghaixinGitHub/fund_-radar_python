@@ -200,6 +200,14 @@ class FundMaterialsSyncService:
                     if any(error["stage"] not in STAGES[6:8] for error in state["errors"]):
                         raise ValueError("MATERIAL_SOURCES_INCOMPLETE")
                     result = build(checked_through=cutoff)
+                    # 公共风险事实独立留存，新闻与模型资格不会因页面更新被自动改变。
+                    from app.services.fund_risk_summary import publish
+
+                    try:
+                        result["risk"] = publish(FUND)
+                    except Exception as exc:
+                        logger.exception("fund_materials_sync._run >>> 风险事实未更新, run_id=%s", run_id)
+                        result["errors"] = [{"reason": safe_error(exc), "part": "risk"}]
                 errors = result.get("errors", [])
                 for key in ("created", "updated", "skipped"):
                     counts[key] += result.get(key, 0)
@@ -228,7 +236,11 @@ class FundMaterialsSyncService:
             counts=counts,
             progress_current=len(STAGES),
         )
-        page_updated = stages.get(STAGES[-1], {}).get("status") == "SUCCEEDED"
+        page_stage = stages.get(STAGES[-1], {})
+        # 风险事实失败时仍如实记录公共资料已发布，风险页面继续保留上一份真实日期。
+        page_updated = page_stage.get("status") == "SUCCEEDED" or (
+            page_stage.get("status") == "PARTIAL_SUCCESS" and bool(page_stage.get("result", {}).get("file"))
+        )
         if success:
             state["last_success_at"] = state["finished_at"]
         if page_updated:

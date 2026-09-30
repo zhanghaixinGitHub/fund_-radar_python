@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     prediction_model_directory: str = "data/prediction-models"
     # 页面只读快照由离线构建命令原子发布；原公告和完整财务资料继续保留在采集存储中。
     fund_material_directory: str = "data/fund-materials"
+    # 公共风险和历史评价的不可变结果与当前引用；不保存本人账户资料。
+    fund_insight_directory: str = "data/fund-insights"
     ai_service_token: SecretStr = SecretStr("")
     # 费率后台任务回写 Java 的地址；令牌复用 AI_SERVICE_TOKEN，禁止从浏览器传入回调地址。
     core_service_base_url: str = "http://127.0.0.1:8080"
@@ -39,7 +41,8 @@ class Settings(BaseSettings):
     tushare_market_reference_max_rows_per_query: int = Field(default=8_000, ge=1, le=100_000)
     # CSI 当前最小探测正好达到来源 8,000 行上限，默认不纳入目录同步，防止误写截断结果。
     tushare_index_catalog_markets: str = "SSE,SZSE,SW,CICC,MSCI,OTH"
-    tushare_market_incremental_enabled: bool = True
+    # 兼容旧环境配置；自动计划已撤销，这些字段不再注册后台任务。
+    tushare_market_incremental_enabled: bool = False
     tushare_market_incremental_hour: int = Field(default=20, ge=0, le=23)
     tushare_market_incremental_minute: int = Field(default=0, ge=0, le=59)
 

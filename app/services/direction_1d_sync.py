@@ -40,6 +40,8 @@ class Direction1dSyncResult:
     created: int
     existing: int
     issues: tuple[str, ...]
+    # 明确不适用的基金不算生成或执行失败；仍单独计数和保留原因，便于说明覆盖边界。
+    unsupported: tuple[str, ...] = ()
 
 
 class Direction1dSyncService:
@@ -101,7 +103,7 @@ class Direction1dSyncService:
     ) -> Direction1dSyncResult:
         """仅处理服务端已读取的基金范围；Java仍检查窗口、关注关系及原文留档回执。"""
         total, created, existing = len(codes), 0, 0
-        issues = []
+        issues, unsupported = [], []
         progress_reporter(0, total, None, f"目标日 {target}，正在检查 {total} 只关注基金")
         for index, code in enumerate(codes, 1):
             try:
@@ -115,7 +117,11 @@ class Direction1dSyncService:
                     created += int(not result["reused"])
                 else:
                     reason = result.get("reason") or result.get("status")
-                    issues.append(f"{code}：{_REASONS.get(reason, '本期预测未生成，请查看预测覆盖详情')}")
+                    message = f"{code}：{_REASONS.get(reason, '本期预测未生成，请查看预测覆盖详情')}"
+                    if reason in {"SPECIAL_POLICY_REQUIRED", "NOT_APPLICABLE"}:
+                        unsupported.append(message)
+                    else:
+                        issues.append(message)
             except Exception:
                 issues.append(f"{code}：预测生成或留档未确认，请稍后检查或重试")
                 logger.exception("direction_1d_sync.sync >>> prediction failed, fund_code=%s", code)
@@ -123,6 +129,7 @@ class Direction1dSyncService:
                 index,
                 total,
                 code,
-                f"目标日 {target}：已检查 {index}/{total} 只，新生成 {created}，已有 {existing}，未生成 {len(issues)}",
+                f"目标日 {target}：已检查 {index}/{total} 只，新生成 {created}，已有 {existing}，"
+                f"暂不支持 {len(unsupported)}，待完成 {len(issues)}",
             )
-        return Direction1dSyncResult(target, total, created, existing, tuple(issues))
+        return Direction1dSyncResult(target, total, created, existing, tuple(issues), tuple(unsupported))

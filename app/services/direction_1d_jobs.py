@@ -1,5 +1,6 @@
 """持久化作业状态与独立单线程；Java负责个人范围、先核对后训练和调度时点。"""
 
+import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
@@ -71,13 +72,20 @@ def sync_missing(codes):
     return {"actions": result, "after": inventory(codes)}
 
 
-def submit_forecast(code):
+def submit_forecast(code, expected_target_date=None, request_id=None):
     w = window(repo.clock())
+    if (expected_target_date is None) != (request_id is None):
+        raise ValueError("EXPECTED_TARGET_AND_REQUEST_REQUIRED")
+    if expected_target_date and str(expected_target_date) != w["target_nav_date"]:
+        raise ValueError("WINDOW_CHANGED")
     if w["status"] != "OPEN":
         raise ValueError("MISSED_DEADLINE")
     key = f"{ACTIVE_PROTOCOL}:{code}:{w['target_nav_date']}"
+    if request_id:
+        key += f":request:{request_id}"
     return submit(
-        key, "FORECAST", {"fund_code": code, "target_nav_date": w["target_nav_date"], "protocol": ACTIVE_PROTOCOL}
+        key, "FORECAST", {"fund_code": code, "target_nav_date": w["target_nav_date"], "protocol": ACTIVE_PROTOCOL,
+                          "revisions": request_id is not None}
     )
 
 
@@ -154,7 +162,8 @@ def _execute_locked(job_id, kind, payload):
         if kind == "FORECAST":
             sync_missing([payload["fund_code"]])
             target = payload.get("target_nav_date") or repo.get_job(job_id)["task_key"].rsplit(":", 1)[-1]
-            result = infer(payload["fund_code"], expected_target=target, protocol=payload.get("protocol", PROTOCOL))
+            result = infer(payload["fund_code"], expected_target=target, protocol=payload.get("protocol", PROTOCOL),
+                           revisions=payload.get("revisions", False))
         elif kind == "LABEL_SYNC":
             result = sync_answer(payload)
         else:
@@ -177,13 +186,23 @@ def _execute_locked(job_id, kind, payload):
         )
     finally:
         slots.release()
+    deadline = (
+        json.loads(result["payload_json"])["deadline_at"] if kind == "FORECAST" and state == "SUCCEEDED" else None
+    )
     with get_engine().begin() as c:
         c.execute(
-            text(
-                "UPDATE direction_1d_job SET state=:state,result=CAST(:result AS jsonb),"
-                "finished_at=clock_timestamp() WHERE job_id=:id"
-            ),
-            {"id": job_id, "state": state, "result": canonical(result)},
+            text("""
+                WITH finish AS MATERIALIZED (SELECT clock_timestamp() AS at)
+                UPDATE direction_1d_job SET
+                  state=CASE WHEN CAST(:deadline AS timestamptz) IS NOT NULL
+                    AND finish.at>=CAST(:deadline AS timestamptz) THEN 'FAILED' ELSE :state END,
+                  result=CASE WHEN CAST(:deadline AS timestamptz) IS NOT NULL
+                    AND finish.at>=CAST(:deadline AS timestamptz)
+                    THEN jsonb_build_object('reason','MISSED_DEADLINE','rejected_result',CAST(:result AS jsonb))
+                    ELSE CAST(:result AS jsonb) END,
+                  finished_at=finish.at FROM finish WHERE job_id=:id
+            """),
+            {"id": job_id, "state": state, "result": canonical(result), "deadline": deadline},
         )
 
 

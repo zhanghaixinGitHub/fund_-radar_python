@@ -48,10 +48,10 @@ def test_paged_funds_are_counted_once_and_failures_do_not_stop_later_funds():
     service = worker(handle)
     try:
         result = service.sync(progress_reporter=lambda *args: progress.append(args))
-        assert (result.total, result.created, result.existing, len(result.issues)) == (5, 1, 1, 3)
+        assert (result.total, result.created, result.existing, len(result.issues)) == (5, 1, 1, 2)
         assert calls == ["000001", "000002", "000003", "000004", "000005"]
-        assert "该基金类型暂不支持" in result.issues[1]
-        assert "净值" in result.issues[2]
+        assert result.unsupported == ("000004：该基金类型暂不支持",)
+        assert "净值" in result.issues[1]
         assert [item[0] for item in progress] == list(range(6))
     finally:
         service.close()
@@ -80,6 +80,7 @@ def test_invalid_or_non_advancing_page_fails_without_prediction(page):
         (Direction1dSyncResult(date(2026, 9, 23), 2, 0, 2, ()), "SUCCEEDED"),
         (Direction1dSyncResult(date(2026, 9, 23), 1, 0, 0, ("000001：不在预测时间段",)), "FAILED"),
         (Direction1dSyncResult(date(2026, 9, 23), 0, 0, 0, ()), "SUCCEEDED"),
+        (Direction1dSyncResult(date(2026, 9, 23), 1, 0, 0, (), ("000001：暂不支持",)), "SUCCEEDED"),
     ],
 )
 def test_job_preserves_created_existing_missing_counts_and_target(result, expected):
@@ -98,7 +99,7 @@ def test_job_preserves_created_existing_missing_counts_and_target(result, expect
             result.total,
             result.created,
             result.existing,
-            len(result.issues),
+            len(result.issues) + len(result.unsupported),
         )
         assert job.requested_nav_date == date(2026, 9, 23)
         assert manager.get_latest_job("DIRECTION_1D_PREDICTIONS") == job

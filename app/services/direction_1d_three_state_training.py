@@ -119,7 +119,7 @@ def training_input(connection, now):
       JOIN direction_1d_assessment_ack a ON a.task_key=s.task_key AND a.label_hash=s.content_hash
       JOIN direction_1d_snapshot i ON i.snapshot_id=(s.payload->>'input_snapshot_id')::uuid
       WHERE s.kind='LABEL' AND s.expires_at>:now AND i.expires_at>:now AND a.assessed_at<=:now
-        AND s.payload->>'training_eligible'='true' ORDER BY s.as_of LIMIT 50001"""),
+        AND s.payload->>'training_eligible'='true' ORDER BY i.as_of,s.as_of,s.snapshot_id LIMIT 50001"""),
             {"now": now},
         )
         .mappings()

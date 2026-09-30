@@ -62,28 +62,20 @@ def test_incremental_normalization_rejects_another_fund_and_window_outside_recor
     assert [(record.fund_code, record.nav_date) for record in records] == [("002112", date(2026, 8, 26))]
 
 
-def test_beat_schedule_is_configurable_and_can_be_disabled() -> None:
-    """只有显式启用时注册单一工作日任务，时间从本机配置读取。"""
+def test_old_enabled_configuration_cannot_restore_automatic_schedule() -> None:
+    """即使保留旧启用配置，也不会恢复已撤销的净值定时任务。"""
     enabled = Settings(
         tushare_market_incremental_enabled=True,
         tushare_market_incremental_hour=21,
         tushare_market_incremental_minute=5,
     )
-    schedule = build_beat_schedule(enabled)
-
-    trigger = schedule["market-nav-incremental-weekdays"]["schedule"]
-    assert schedule["market-nav-incremental-weekdays"]["task"] == "fund_ai.tushare.sync_market_nav_incremental"
-    assert trigger.hour == {21}
-    assert trigger.minute == {5}
+    assert build_beat_schedule(enabled) == {}
     assert build_beat_schedule(Settings(tushare_market_incremental_enabled=False)) == {}
 
 
-def test_beat_schedule_defaults_to_weekday_2000() -> None:
-    """未配置环境变量时，日常任务默认在工作日 20:00 投递。"""
-    trigger = build_beat_schedule(Settings())["market-nav-incremental-weekdays"]["schedule"]
-
-    assert trigger.hour == {20}
-    assert trigger.minute == {0}
+def test_beat_schedule_defaults_to_manual_only() -> None:
+    """新安装和旧环境一致，启动 Beat 不会自行采集。"""
+    assert build_beat_schedule(Settings()) == {}
 
 
 def test_incremental_task_uses_market_scope_and_optional_as_of_date(monkeypatch) -> None:

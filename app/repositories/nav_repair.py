@@ -13,6 +13,7 @@ def read_inputs(session, source_id, codes, start, end):
         for r in session.execute(
             text("""
           SELECT f.fund_code,f.fund_name,f.fund_type,p.benchmark,p.source_fund_type,p.invest_type,p.found_date,
+                 p.purchase_start_date,p.redemption_start_date,
                  s.status AS repair_status,s.next_retry_at,s.attempts
           FROM fund_share_class f LEFT JOIN fund_profile p ON p.fund_code=f.fund_code AND p.source_id=:source
           LEFT JOIN nav_sync_state s ON s.fund_code=f.fund_code AND s.source_id=:source

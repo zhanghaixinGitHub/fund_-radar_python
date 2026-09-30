@@ -9,7 +9,6 @@ from app.api.router import api_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.core.middleware import TraceIdMiddleware
-from app.services.nav_repair_scheduler import NavRepairScheduler
 from app.services.sync_jobs import close_sync_job_manager
 
 logger = get_logger(__name__)
@@ -19,12 +18,12 @@ logger = get_logger(__name__)
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """管理进程级资源的启停生命周期，不在启动阶段加载任何行情或外部数据。"""
     logger.info("main.lifespan >>> FastAPI AI service started")
-    repair = NavRepairScheduler()
-    repair.start()
+    # 净值补拉、002112 输入维护和资料补齐统一由同步中心手动触发。
+    # 启动服务不再创建自动取数线程，避免与每日一键同步重复执行。
+    logger.info("main.lifespan >>> 净值补拉、002112 输入维护和资料补齐仅手动触发，未启动定时采集")
     try:
         yield
     finally:
-        repair.close()
         close_sync_job_manager()
     logger.info("main.lifespan >>> FastAPI AI service stopped")
 

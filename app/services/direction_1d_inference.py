@@ -50,7 +50,18 @@ def load_model(row):
     return model
 
 
-def infer(code: str, expected_target: str | None = None, *, protocol: str = PROTOCOL) -> dict:
+def infer(code: str, expected_target: str | None = None, *, protocol: str = PROTOCOL, revisions: bool = False) -> dict:
+    """新入口按基金目标日串行读取，旧研究调用仍保留原始单版本行为。"""
+    if not revisions:
+        return _infer(code, expected_target, protocol=protocol)
+    from app.services.direction_1d_revisions import scope_lock
+
+    target = expected_target or window(repo.clock())["target_nav_date"]
+    with scope_lock(code, target, protocol):
+        return _infer(code, target, protocol=protocol, revisions=True)
+
+
+def _infer(code: str, expected_target: str | None = None, *, protocol: str = PROTOCOL, revisions: bool = False) -> dict:
     """旧调用保留 V1；生产作业显式传入 V2，禁止从旧分数猜测持平类别。"""
     if protocol not in (PROTOCOL, three.PROTOCOL):
         raise ValueError("PROTOCOL_MISMATCH")
@@ -140,6 +151,20 @@ def infer(code: str, expected_target: str | None = None, *, protocol: str = PROT
                 ).mappings()
             ]
             key = f"{protocol}:{cohort}:{code}:{w['target_nav_date']}"
+            revision = None
+            if revisions:
+                from app.services.direction_1d_revisions import identity, select_revision
+
+                frozen_identity = identity(code, w["target_nav_date"], protocol, mapping, observed, locked, events)
+                revision = select_revision(c, frozen_identity, w["deadline_at"])
+                if revision["result"]:
+                    import json
+
+                    previous = json.loads(revision["result"]["payload_json"])
+                    if datetime.fromisoformat(previous["expires_at"]) <= now:
+                        raise ValueError("EVIDENCE_EXPIRED")
+                    return revision["result"]
+                key += f":r{revision['revision_sequence']}"
             snapshot = {
                 "fund_code": code,
                 # 保存当时准入依据；旧预测原文保持不变，不用后来规则重解释旧记录。
@@ -254,8 +279,15 @@ def infer(code: str, expected_target: str | None = None, *, protocol: str = PROT
                                ("MOMENTUM", previous_direction)
                                )
         ]
+    if revision:
+        body.update(revision_sequence=revision["revision_sequence"], input_identity=revision["input_identity"])
     payload = canonical(body)
-    return {"payload_json": payload, "content_hash": hashlib.sha256(payload.encode("utf-8")).hexdigest()}
+    result = {"payload_json": payload, "content_hash": hashlib.sha256(payload.encode("utf-8")).hexdigest()}
+    if revision:
+        from app.services.direction_1d_revisions import complete
+
+        complete(revision["revision_sequence"], result)
+    return result
 
 
 def labels(job_id: UUID):

@@ -252,7 +252,7 @@ def acquire_announcements(*, live_scope=None, progress=None):
     return result
 
 
-def acquire_attachments(*, live=False, progress=None):
+def acquire_attachments(*, live=False, progress=None, announcement_ids=None, request_limit=None):
     """下载已核对公司与日期的公告原文；先保存原文件，再提取正文，逐份记录缺口。"""
     limits_path = SUPPLEMENT / "attachment-limits.json"
     if not limits_path.exists():
@@ -267,10 +267,15 @@ def acquire_attachments(*, live=False, progress=None):
                 "parser": "pypdfium2_5.13.0_with_mutex",
             },
         )
-    client, entries = PublicClient(), {}
+    # 日常消息入口只处理事前选定的有限近期原件；旧资料任务省略参数时保持原范围。
+    # 空集合代表没有原件需要处理，绝不能退化为全量。
+    client = PublicClient(request_limit=request_limit) if request_limit is not None else PublicClient()
+    entries = {}
     directory = LIVE / "supplement" if live else SUPPLEMENT
     for path in (directory / "company-announcements").glob("*.json"):
         for item in read(path)["rows"]:
+            if announcement_ids is not None and item["announcementId"] not in announcement_ids:
+                continue
             entries[item["announcementId"]] = item
 
     def one(item):

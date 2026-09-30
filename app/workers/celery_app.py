@@ -1,25 +1,13 @@
 """隔离数据处理与模型任务的 Celery 配置。"""
 
 from celery import Celery
-from celery.schedules import crontab
 
 from app.core.config import Settings, get_settings
 
 
 def build_beat_schedule(settings: Settings) -> dict[str, dict[str, object]]:
-    """构建基金市场日常增量同步计划；禁用时不注册外部数据调用。"""
-    if not settings.tushare_market_incremental_enabled:
-        return {}
-    return {
-        "market-nav-incremental-weekdays": {
-            "task": "fund_ai.tushare.sync_market_nav_incremental",
-            "schedule": crontab(
-                day_of_week="1-5",
-                hour=settings.tushare_market_incremental_hour,
-                minute=settings.tushare_market_incremental_minute,
-            ),
-        }
-    }
+    """保留旧调用契约，但不再注册净值自动同步，即使旧环境仍配置为启用。"""
+    return {}
 
 """后台任务使用的进程级配置快照。"""
 settings = get_settings()

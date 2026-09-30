@@ -19,7 +19,7 @@ class InternalFundSummary(BaseModel):
     # 目录可以先于首个合规净值同步落库，因此此字段允许为空。
     # 空值只能表示“尚无同步净值”，不能由调用方补成当前日期。
     as_of_date: date | None
-    # 涨跌率均从同一份额已落库的累计净值计算；缺少对应基准净值时保持为空。
+    # 同份额同来源单位净值变化，不含分红/费用，不能当作总回报；缺少有效端点时为空。
     day_change_rate: Decimal | None = None
     week_change_rate: Decimal | None = None
     month_change_rate: Decimal | None = None

@@ -45,7 +45,8 @@ def isolated(monkeypatch):
               CREATE TABLE source_sync_run(sync_run_id uuid PRIMARY KEY);
               CREATE TABLE fund_share_class(fund_code varchar(6) PRIMARY KEY,fund_name text,fund_type text);
               CREATE TABLE fund_profile(fund_code text,source_id uuid,benchmark text,source_fund_type text,
-                                        invest_type text,found_date date);
+                                        invest_type text,found_date date,purchase_start_date date,
+                                        redemption_start_date date);
               CREATE TABLE nav_daily(fund_code text,source_id uuid,nav_date date,unit_nav numeric,
                                      PRIMARY KEY(fund_code,source_id,nav_date));
             """)

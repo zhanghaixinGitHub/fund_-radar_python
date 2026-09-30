@@ -755,7 +755,9 @@ class TushareFundSyncService:
                         domestic = domestic_calendar_supported(meta)
                         if domestic:
                             expected = expected_dates(
-                                sessions, dates[code], target_date, found_date=meta.get("found_date")
+                                sessions, dates[code], target_date, found_date=meta.get("found_date"),
+                                purchase_start_date=meta.get("purchase_start_date"),
+                                redemption_start_date=meta.get("redemption_start_date"),
                             )
                             missing = tuple(d for d in expected if d not in dates[code])
                             ranges = contiguous_ranges(missing, sessions)

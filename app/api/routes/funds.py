@@ -33,6 +33,7 @@ from app.services.fund_catalog_read import (
 from app.services.sync_jobs import (
     DIRECTION_1D_JOB_TYPE,
     FUND_MATERIALS_JOB_TYPE,
+    FUND_NEWS_JOB_TYPE,
     MARKET_ALL_JOB_TYPE,
     MARKET_DETAIL_JOB_TYPE,
     MARKET_FREE_DATA_COMPLETION_JOB_TYPE,
@@ -129,6 +130,22 @@ def start_internal_fund_materials(fund_code: Annotated[str, Query(alias="fundCod
 )
 def get_latest_internal_fund_materials():
     snapshot = get_sync_job_manager().get_latest_job(FUND_MATERIALS_JOB_TYPE)
+    return _to_internal_sync_job_status(snapshot) if snapshot else None
+
+
+@router.post("/sync-jobs/fund-news", response_model=InternalSyncJobStatus, status_code=202,
+             dependencies=[Depends(require_service_token)])
+def start_internal_fund_news(fund_code: Annotated[str, Query(alias="fundCode", pattern=r"^002112$")]):
+    try:
+        return _to_internal_sync_job_status(get_sync_job_manager().start_fund_news(fund_code))
+    except SyncJobInProgressError as error:
+        raise HTTPException(409, "已有同步任务正在执行。") from error
+
+
+@router.get("/sync-jobs/fund-news/latest", response_model=InternalSyncJobStatus | None,
+            dependencies=[Depends(require_service_token)])
+def get_latest_internal_fund_news():
+    snapshot = get_sync_job_manager().get_latest_job(FUND_NEWS_JOB_TYPE)
     return _to_internal_sync_job_status(snapshot) if snapshot else None
 
 
@@ -453,6 +470,10 @@ def get_internal_sync_job_last_success_times() -> tuple[InternalSyncJobLastSucce
         InternalSyncJobLastSuccess(
             job_type=FUND_MATERIALS_JOB_TYPE,
             last_successful_at=manager.get_last_successful_time(FUND_MATERIALS_JOB_TYPE),
+        ),
+        InternalSyncJobLastSuccess(
+            job_type=FUND_NEWS_JOB_TYPE,
+            last_successful_at=manager.get_last_successful_time(FUND_NEWS_JOB_TYPE),
         ),
         InternalSyncJobLastSuccess(
             job_type=MARKET_NAV_INCREMENTAL_JOB_TYPE,

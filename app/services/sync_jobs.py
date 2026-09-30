@@ -55,13 +55,18 @@ SIMULATION_FEE_JOB_TYPE = "SIMULATION_FEES"
 MULTI_PREDICTION_JOB_TYPE = "MULTI_PREDICTIONS"
 DIRECTION_1D_JOB_TYPE = "DIRECTION_1D_PREDICTIONS"
 FUND_MATERIALS_JOB_TYPE = "FUND_MATERIALS"
+FUND_NEWS_JOB_TYPE = "FUND_NEWS"
+FUND_INPUTS_JOB_TYPE = "FUND_INPUTS"
 _ALL_JOB_STAGES = (
     # SPX有早上08:00的观测边界，先取这一小份数据，避免被较长的全市场同步拖到截止后。
     (SPX_MANUAL_JOB_TYPE, "标普500"),
+    (FUND_NEWS_JOB_TYPE, "近期基金公告核验"),
     # 资料更新内部已执行完整资料同步，批次不再单独重复抓取同一批资料。
     (MARKET_FREE_DATA_COMPLETION_JOB_TYPE, "基金资料与市场数据更新"),
     (FUND_MATERIALS_JOB_TYPE, "基金持仓与公司资料更新"),
     (MARKET_NAV_INCREMENTAL_JOB_TYPE, "净值增量"),
+    # 等报告、行情和基金净值更新后再保存当时输入；单独留存失败不会阻断后续指标与预测。
+    (FUND_INPUTS_JOB_TYPE, "002112 分析资料更新与留存"),
     (STOCK_FEATURE_SNAPSHOT_JOB_TYPE, "历史指标计算"),
     # 预测使用前面已同步净值；独立校验输入完整性，来源失败时不能默认算作预测成功。
     (SIMULATION_FEE_JOB_TYPE, "模拟费率"),
@@ -131,6 +136,8 @@ class LocalSyncJobManager:
         multi_prediction_service_factory=MultiPredictionSyncService,
         materials_service_factory=None,
         state_path: Path | None = None,
+        news_synchronizer=None,
+        input_synchronizer=None,
     ) -> None:
         self._service_factory = service_factory
         self._feature_service_factory = feature_service_factory
@@ -140,6 +147,8 @@ class LocalSyncJobManager:
         self._prediction_service_factory = prediction_service_factory
         self._multi_prediction_service_factory = multi_prediction_service_factory
         self._materials_service_factory = materials_service_factory
+        self._news_synchronizer = news_synchronizer
+        self._input_synchronizer = input_synchronizer
         self._state_path = state_path
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fund-sync-job")
         self._jobs: dict[UUID, SyncJobSnapshot] = {}
@@ -197,6 +206,12 @@ class LocalSyncJobManager:
         if fund_code != "002112":
             raise ValueError("当前仅支持 002112 的持仓与公司资料更新。")
         return self._start_job(FUND_MATERIALS_JOB_TYPE, self._run_fund_materials)
+
+    def start_fund_news(self, fund_code: str) -> SyncJobSnapshot:
+        """明确单基金范围，复用任务中心互斥队列；不与历史研究共用运行进度。"""
+        if fund_code != "002112":
+            raise ValueError("仅支持明确指定 002112。")
+        return self._start_job(FUND_NEWS_JOB_TYPE, self._run_fund_news)
 
     def start_market_nav_incremental(self) -> SyncJobSnapshot:
         """创建净值任务，单独执行时保留原有自动特征阶段。"""
@@ -291,9 +306,11 @@ class LocalSyncJobManager:
         self._replace_job(job_id, status="RUNNING", started_at=datetime.now(UTC))
         runners = (
             self._run_spx_manual,
+            self._run_fund_news,
             self._run_market_free_data_completion,
             self._run_fund_materials,
             lambda child_id: self._run_market_nav_incremental(child_id, build_features=False),
+            self._run_fund_inputs,
             self._run_stock_feature_snapshots,
             self._run_simulation_fees,
             self._run_multi_predictions,
@@ -325,7 +342,10 @@ class LocalSyncJobManager:
                 progress_message=message,
                 current_fund_code=None,
                 error_code="SYNC_ALL_INCOMPLETE" if failed_names else None,
-                error_message=("未完成：" + "、".join(failed_names) + "。请查看对应任务详情并单独重试。")
+                error_message=(
+                    "未完成：" + "、".join(failed_names)
+                    + "。请检查结果后重试；分析资料留存可重新执行一键同步。"
+                )
                 if failed_names
                 else None,
                 finished_at=datetime.now(UTC),
@@ -378,6 +398,13 @@ class LocalSyncJobManager:
 
     def get_last_successful_time(self, job_type: str) -> datetime | None:
         """从持久化运行记录读取指定任务最近一次完整成功时间。"""
+        if job_type == FUND_NEWS_JOB_TYPE:
+            from app.services.fund_exposure_common import read
+            from app.services.fund_news_sync import directory
+
+            path = directory() / "state.json"
+            value = read(path).get("last_success_at") if path.exists() else None
+            return datetime.fromisoformat(value) if value else None
         if job_type == FUND_MATERIALS_JOB_TYPE:
             from app.services.fund_exposure_common import read
             from app.services.fund_materials_store import LIVE
@@ -390,6 +417,42 @@ class LocalSyncJobManager:
             raise ValueError("unsupported sync job type")
         with Session(get_engine()) as session:
             return get_latest_successful_sync_time(session, sync_types=sync_types)
+
+    def _run_fund_news(self, job_id: UUID) -> None:
+        """公告事实独立更新，部分来源失败不能写成无事件，也不自动触发训练或交易。"""
+        from app.services.fund_news_sync import synchronize
+
+        self._replace_job(
+            job_id,
+            status="RUNNING",
+            started_at=datetime.now(UTC),
+            fund_codes=("002112",),
+            progress_message="正在核对近期基金公告",
+        )
+        try:
+            result = (self._news_synchronizer or synchronize)(
+                "002112",
+                progress=lambda current, total, code, message: self._update_progress(
+                    job_id, current, total, code, message
+                ),
+            )
+            self._replace_job(
+                job_id,
+                status=result["status"],
+                progress_message=result["message"],
+                fetched_count=result["items"],
+                skipped_count=result["items"] if result.get("reused") else 0,
+                error_code="NEWS_INCOMPLETE" if result["status"] != "SUCCEEDED" else None,
+                error_message=result["message"] if result["status"] != "SUCCEEDED" else None,
+                finished_at=datetime.now(UTC),
+            )
+        except Exception:
+            logger.exception("sync_jobs._run_fund_news >>> 公告核对失败, job_id=%s", job_id)
+            self._fail_job(job_id, "NEWS_SYNC_FAILED", "近期公告核对未完成，保留原有资料，请稍后重试。")
+        finally:
+            with self._lock:
+                if self._active_job_id == job_id:
+                    self._active_job_id = None
 
     def _run_fund_materials(self, job_id: UUID) -> None:
         """同步结束后才设置终态；批次和单独入口共用采集器、文件断点和后台锁。"""
@@ -432,6 +495,31 @@ class LocalSyncJobManager:
             with self._lock:
                 if self._active_job_id == job_id:
                     self._active_job_id = None
+
+    def _run_fund_inputs(self, job_id: UUID) -> None:
+        """一键同步内串行更新 002112 输入；沿用批次锁、真实进度和持久化任务结果。"""
+        from app.services.fund_exposure_runtime import synchronize_inputs
+
+        self._replace_job(
+            job_id, status="RUNNING", started_at=datetime.now(UTC), fund_codes=("002112",),
+            current_fund_code="002112", progress_total=4, progress_message="正在更新 002112 分析资料",
+        )
+        try:
+            result = (self._input_synchronizer or synchronize_inputs)(
+                progress_reporter=lambda current, total, code, message: self._update_progress(
+                    job_id, current, total, code, message
+                ),
+            )
+            complete = result["status"] == "SUCCEEDED"
+            self._replace_job(
+                job_id, status=result["status"], current_fund_code=None,
+                progress_message=result["message"], created_count=result["created"], skipped_count=result["skipped"],
+                error_code=None if complete else "FUND_INPUTS_INCOMPLETE",
+                error_message=None if complete else result["message"], finished_at=datetime.now(UTC),
+            )
+        except Exception:
+            logger.exception("sync_jobs._run_fund_inputs >>> 002112 分析资料更新异常, job_id=%s", job_id)
+            self._fail_job(job_id, "FUND_INPUTS_FAILED", "002112 分析资料未更新，请稍后重新执行一键同步。")
 
     def _run_market_nav_incremental(self, job_id: UUID, *, build_features: bool = True) -> None:
         service: TushareFundSyncService | None = None
@@ -655,7 +743,7 @@ class LocalSyncJobManager:
                         self._active_job_id = None
 
     def _run_direction_1d_predictions(self, job_id: UUID) -> None:
-        """只有 Java 确认留档才计为生成；部分不适用、缺数据、过期均作为未完成展示。"""
+        """只有 Java 确认留档才计为生成；不适用单列，缺数据和执行故障仍显示未完成。"""
         service = None
         self._replace_job(
             job_id,
@@ -691,10 +779,10 @@ class LocalSyncJobManager:
                 fetched_count=result.total,
                 created_count=result.created,
                 updated_count=result.existing,
-                skipped_count=len(result.issues),
+                skipped_count=len(result.issues) + len(result.unsupported),
                 progress_message=(
                     f"目标日 {result.target_date}：共检查 {result.total} 只，新生成 {result.created}，"
-                    f"已有 {result.existing}，未生成 {len(result.issues)}"
+                    f"已有 {result.existing}，暂不支持 {len(result.unsupported)}，待完成 {len(result.issues)}"
                 ),
                 error_code="PREDICTION_INCOMPLETE" if result.issues else None,
                 error_message="；".join(result.issues[:100]) if result.issues else None,
@@ -757,10 +845,10 @@ class LocalSyncJobManager:
                 fetched_count=result.total,
                 created_count=result.created,
                 updated_count=result.existing,
-                skipped_count=len(result.issues),
+                skipped_count=len(result.issues) + len(result.unsupported),
                 progress_message=(
                     f"一日、五日、二十日和半年共处理 {result.total} 个基金周期项，新生成 {result.created}，"
-                    f"已有 {result.existing}，未生成 {len(result.issues)}"
+                    f"已有 {result.existing}，暂不支持 {len(result.unsupported)}，待完成 {len(result.issues)}"
                 ),
                 error_code="PREDICTION_INCOMPLETE" if result.issues else None,
                 error_message="；".join(result.issues[:100]) if result.issues else None,

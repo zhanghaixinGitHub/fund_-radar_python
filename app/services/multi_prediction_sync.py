@@ -17,6 +17,7 @@ class MultiPredictionSyncService(Direction1dSyncService):
         codes = self.read_fund_codes()
         planned = len(codes) * (1 + len(prediction_policy()["horizons"]))
         total, created, reused, issues = 0, 0, 0, []
+        unsupported = []
         progress_reporter(0, planned, None, f"{len(codes)}只基金，正在检查一日、五日、二十日和半年预测")
         if codes:
             try:
@@ -32,6 +33,7 @@ class MultiPredictionSyncService(Direction1dSyncService):
                 )
                 created, reused = daily.created, daily.existing
                 issues.extend(f"一日预测/{issue}" for issue in daily.issues)
+                unsupported.extend(f"一日预测/{item}" for item in daily.unsupported)
             except Exception:
                 # 例如一日窗口服务不可用；不能把未确认结果记为成功，也不能阻塞其他周期。
                 logger.exception("multi_prediction_sync.sync >>> 一日预测阶段未完成，fund_count=%s", len(codes))
@@ -56,11 +58,17 @@ class MultiPredictionSyncService(Direction1dSyncService):
             total += task["plannedItems"]
             created += task["createdItems"]
             reused += task["reusedItems"]
-            issues.extend(
-                f"{item['fundCode']}/{item['horizonId']}：{item['result']['error']['summary']}"
-                for item in task["items"]
-                if item["status"] == "FAILED"
-            )
+            for item in task["items"]:
+                if item["status"] == "FAILED":
+                    error = item["result"]["error"]
+                    message = f"{item['fundCode']}/{item['horizonId']}：{error['summary']}"
+                    # 此代码只表示基金估值政策尚未支持；模型故障、缺净值和未知错误仍算未完成。
+                    if error.get("code") == "CALENDAR_POLICY_MISSING":
+                        unsupported.append(message)
+                    else:
+                        issues.append(message)
+                elif item["status"] not in {"CREATED", "REUSED"}:
+                    issues.append(f"{item['fundCode']}/{item['horizonId']}：预测未确认完成")
             # 公共原文已提交后再生成私人建议；Java不接收Python传来的用户编号或金额。
             response = self._client.post(
                 "/internal/v1/multi-predictions/sync/finalize", json={"taskId": task["taskId"]}
@@ -70,4 +78,4 @@ class MultiPredictionSyncService(Direction1dSyncService):
                 raise RuntimeError("DECISION_ARCHIVE_INCOMPLETE: " + task["taskId"])
             progress_reporter(total, planned, None, f"已检查 {total}/{planned} 个基金周期项")
         verify_outcomes()
-        return Direction1dSyncResult(date.today(), total, created, reused, tuple(issues))
+        return Direction1dSyncResult(date.today(), total, created, reused, tuple(issues), tuple(unsupported))

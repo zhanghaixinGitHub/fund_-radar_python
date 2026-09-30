@@ -46,6 +46,9 @@ def pipeline(tmp_path, monkeypatch):
     monkeypatch.setattr(sync, "supplement_peers", operation("peers", {"errors": [], "created": 1}))
     monkeypatch.setattr(sync, "prepare_training_materials", operation("training_materials", {"errors": []}))
     monkeypatch.setattr(sync, "build", operation("build", {"file": "page"}))
+    from app.services import fund_risk_summary
+
+    monkeypatch.setattr(fund_risk_summary, "publish", lambda code: {"available": True})
     return tmp_path, calls
 
 
@@ -276,6 +279,9 @@ def test_no_new_attachment_never_downloads_historical_pdf(tmp_path, monkeypatch)
     monkeypatch.setattr(module, "PublicClient", Client)
     result = module.acquire_attachments(live=True)
     assert result["errors"] == [] and result["skipped"] == 1 and result["created"] == 0
+    # 近期消息的空选择必须是空任务，不能退回全量附件下载。
+    empty = module.acquire_attachments(live=True, announcement_ids=set())
+    assert empty["expected"] == 0 and empty["skipped"] == 0
 
 
 def test_financial_empty_is_not_zero_and_successful_units_resume(tmp_path_factory, monkeypatch):

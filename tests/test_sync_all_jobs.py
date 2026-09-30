@@ -17,9 +17,11 @@ from fastapi.testclient import TestClient
 
 STAGES = (
     "SPX_MANUAL",
+    "FUND_NEWS",
     "MARKET_FREE_DATA_COMPLETION",
     "FUND_MATERIALS",
     "MARKET_NAV_INCREMENTAL",
+    "FUND_INPUTS",
     "STOCK_FEATURE_SNAPSHOT",
     "SIMULATION_FEES",
     "MULTI_PREDICTIONS",
@@ -111,6 +113,15 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
                 "message": "资料同步完成",
             }
 
+    def news_sync(code, *, progress):
+        assert code == "002112"
+        run("FUND_NEWS", progress)
+        return {"status": "SUCCEEDED", "items": 1, "errors": 0, "message": "公告核对完成"}
+
+    def input_sync(*, progress_reporter):
+        run("FUND_INPUTS", progress_reporter)
+        return {"status": "SUCCEEDED", "created": 1, "skipped": 0, "message": "分析资料已保存"}
+
     return LocalSyncJobManager(
         FundService,
         FeatureService,
@@ -119,6 +130,8 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
         FeeService,
         multi_prediction_service_factory=PredictionService,
         materials_service_factory=MaterialsService,
+        news_synchronizer=news_sync,
+        input_synchronizer=input_sync,
     )
 
 
@@ -160,6 +173,8 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
                 "SIMULATION_FEES",
                 "MULTI_PREDICTIONS",
                 "FUND_MATERIALS",
+                "FUND_NEWS",
+                "FUND_INPUTS",
             }:
                 assert child.sync_run_id is not None
         next_batch = manager.start_all()
@@ -219,6 +234,7 @@ def test_batch_holds_exclusion_across_every_stage_and_restores_live_progress():
                 assert manager.get_latest_job(next_stage).status == "QUEUED"
             for start in (
                 manager.start_all,
+                lambda: manager.start_fund_news("002112"),
                 manager.start_market_details,
                 manager.start_market_free_data_completion,
                 manager.start_market_nav_incremental,
@@ -273,6 +289,36 @@ def test_running_single_job_rejects_batch_and_cleanup_failure_does_not_drop_late
         manager.close()
 
 
+@pytest.mark.parametrize("input_status", ["PARTIAL_SUCCESS", "FAILED"])
+def test_input_gaps_are_preserved_in_batch_result_and_after_restart(tmp_path, input_status):
+    """输入资料缺失不阻断其余步骤，也不能在父批次或进程重启后变成成功。"""
+    calls = []
+    manager = make_manager(calls)
+    manager._state_path = tmp_path / "jobs.json"
+
+    def incomplete(*, progress_reporter):
+        calls.append("FUND_INPUTS")
+        progress_reporter(4, 4, "002112", "分析资料检查结束")
+        return {"status": input_status, "message": "所需净值尚未齐全", "created": 0, "skipped": 0}
+
+    manager._input_synchronizer = incomplete
+    try:
+        result = wait_finished(manager, manager.start_all().job_id)
+        assert calls == list(STAGES)
+        assert result.status == "PARTIAL_SUCCESS"
+        assert "002112 分析资料" in result.error_message
+        assert manager.get_latest_job("FUND_INPUTS").error_message == "所需净值尚未齐全"
+    finally:
+        manager.close()
+    restored = LocalSyncJobManager(state_path=tmp_path / "jobs.json")
+    try:
+        assert restored.get_latest_job(MARKET_ALL_JOB_TYPE).status == "PARTIAL_SUCCESS"
+        assert restored.get_latest_job("FUND_INPUTS").status == input_status
+        assert restored.get_latest_job("FUND_INPUTS").fund_codes == ("002112",)
+    finally:
+        restored.close()
+
+
 def test_internal_batch_api_rejects_browser_and_duplicates_without_starting_more_jobs(monkeypatch):
     from app.api.routes import funds
     from app.main import create_application
@@ -298,6 +344,10 @@ def test_internal_batch_api_rejects_browser_and_duplicates_without_starting_more
                 assert client.get(base + "/all/latest", headers=invalid).status_code == 403
                 assert client.post(base + "/simulation-fees", headers=invalid).status_code == 403
                 assert client.get(base + "/simulation-fees/latest", headers=invalid).status_code == 403
+                assert client.post(base + "/fund-news?fundCode=002112", headers=invalid).status_code == 403
+                assert client.get(base + "/fund-news/latest", headers=invalid).status_code == 403
+            assert client.post(base + "/fund-news", headers=headers).status_code == 422
+            assert client.post(base + "/fund-news?fundCode=008888", headers=headers).status_code == 422
             assert client.post(base + "/simulation-fees?fundCode=invalid", headers=headers).status_code == 422
             assert manager.get_latest_job(MARKET_ALL_JOB_TYPE) is None
             response = client.post(base + "/all", headers=headers)

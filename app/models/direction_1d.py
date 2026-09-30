@@ -5,6 +5,28 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from app.db.base import Base
 
+# 输入顺序由数据库分配；相同实际来源与模型复用最近版本，成功结果由迁移中的触发器保护。
+direction_1d_input_revision = sa.Table(
+    "direction_1d_input_revision", Base.metadata,
+    sa.Column("revision_sequence", sa.BigInteger, sa.Identity(always=True), primary_key=True),
+    sa.Column("fund_code", sa.String(6), nullable=False),
+    sa.Column("target_nav_date", sa.Date, nullable=False),
+    sa.Column("protocol", sa.String(32), nullable=False),
+    sa.Column("input_identity", sa.CHAR(64), nullable=False),
+    sa.Column("identity_payload", JSONB, nullable=False),
+    sa.Column("result", JSONB),
+    sa.Column("observed_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("clock_timestamp()")),
+    sa.Column("completed_at", sa.DateTime(timezone=True)),
+    sa.Column("deadline_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("fund_code ~ '^[0-9]{6}$'"),
+    sa.CheckConstraint("input_identity ~ '^[a-f0-9]{64}$'"),
+    sa.CheckConstraint("completed_at IS NULL OR completed_at < deadline_at"),
+    comment="当前实际输入的有序版本；相同输入复用，变化后追加，成功原文不可更改",
+)
+sa.Index("ix_direction_1d_input_revision_scope", direction_1d_input_revision.c.fund_code,
+         direction_1d_input_revision.c.target_nav_date, direction_1d_input_revision.c.protocol,
+         direction_1d_input_revision.c.revision_sequence.desc())
+
 direction_1d_assessment_ack = sa.Table(
     "direction_1d_assessment_ack",
     Base.metadata,

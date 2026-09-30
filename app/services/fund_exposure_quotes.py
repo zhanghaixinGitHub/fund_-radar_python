@@ -5,6 +5,7 @@ import json
 import math
 import time
 from datetime import date, datetime, timedelta
+from datetime import time as day_time
 from pathlib import Path
 
 import httpx
@@ -13,11 +14,26 @@ from sqlalchemy import text
 from app.core.config import get_settings
 from app.db.session import get_engine
 from app.integrations.tushare_sprint_stock_breadth_v2 import FIELDS, parse
-from app.services.direction_1d_protocol import calendar, digest
+from app.services.direction_1d_protocol import ZONE, calendar, digest
 from app.services.fund_exposure_common import ROOT, blob, initialize, now, read, save
 
 INDICES = {"000300.SH": "沪深300", "000905.SH": "中证500"}
 BASIC_FIELDS = ["ts_code", "trade_date", "turnover_rate", "turnover_rate_f"]
+
+
+def published_quote_end(sessions, checked_at):
+    """只核对已过正常公布时点的交易日；日线来源通常在15至17点更新。
+
+    当天17点前沿用上一交易日，周末和节假日也按已核验日历回退。
+    到时后来源仍返回空值必须报缺口，不能借此无限延后或冒充成功。
+    """
+    checked_at = checked_at.astimezone(ZONE)
+    eligible = [day for day in sessions if day < checked_at.date() or (
+        day == checked_at.date() and checked_at.time() >= day_time(17)
+    )]
+    if not eligible or checked_at.date().year > sessions[-1].year:
+        raise ValueError("QUOTE_CALENDAR_UNAVAILABLE")
+    return max(eligible)
 
 
 def reports():
@@ -187,8 +203,8 @@ def acquire_quotes(*, incremental=False):
     provider = Provider()
     if incremental:
         provider.limit = 30
-    end = now().date()
     sessions, _ = calendar()
+    end = published_quote_end(sessions, now())
     errors = []
     start_day = end - timedelta(days=45) if incremental else date(2021, 1, 1)
     for day in (d for d in sessions if start_day <= d <= end):

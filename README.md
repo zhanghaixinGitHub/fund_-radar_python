@@ -16,15 +16,11 @@ Windows 本地验证 Celery 时，另开终端使用单进程池：
 .\.venv\Scripts\celery.exe -A app.workers.celery_app worker --pool=solo --loglevel=INFO
 ```
 
-基金市场的日常净值补数由独立的 Celery Beat 调度器执行；同一环境只能启动一个 Beat，Windows 本机另开终端运行：
+净值补拉、002112 输入维护和资料补齐已统一改为手动触发：FastAPI 启动不再创建自动维护线程，Celery Beat 也不再注册净值计划。旧的 `TUSHARE_MARKET_INCREMENTAL_ENABLED/HOUR/MINUTE` 配置只保留兼容读取，不会重新启用自动采集；修改代码后需重启旧服务进程才会生效。
 
-```powershell
-.\.venv\Scripts\celery.exe -A app.workers.celery_app beat --loglevel=INFO
-```
+同步中心“一键同步”依次执行九项任务：标普500、近期基金公告、基金资料与市场数据更新、基金持仓与公司资料、净值增量、002112 输入维护、历史指标计算、模拟费率、多周期预测与建议核验。输入维护复用原单基金锁，放在资料与净值更新后；忽略旧自动等待时间，但保留研究日期边界、真实取得时间和快照不覆盖规则，不训练或换模。缺数据、来源不可用和错过留存时间均明确报未完成，其余步骤继续；再次点击一键同步可重试。服务关闭期间不采集，也不补造当时的输入。
 
-默认在 `Asia/Shanghai` 工作日 20:00 触发，补齐基金市场中所有启用基金在 Tushare 来源中缺失的日期。可通过 `.env` 中的 `TUSHARE_MARKET_INCREMENTAL_ENABLED`、`TUSHARE_MARKET_INCREMENTAL_HOUR`、`TUSHARE_MARKET_INCREMENTAL_MINUTE` 调整；中国节假日或当晚尚未发布数据时任务以零变更成功结束。不要同时启动多个 Beat。
-
-后台“数据同步”页面经 Java 调用受保护的 `POST /internal/v1/funds/sync-jobs/market-nav-incremental`，由当前 FastAPI 进程直接执行同步，因此不依赖 Beat 或 Worker。同步范围只从 `fund_share_class` 中来源为 Tushare 且状态为 `ACTIVE` 的基金市场记录读取，用户关注列表不会收窄或扩大范围。手动和定时任务共享 PostgreSQL 咨询锁；已有同步运行时接口返回冲突，绝不重复调用 Tushare。该接口只返回安全的任务进度与统计，不返回 Token 或原始响应。
+后台“数据同步”页面经 Java 调用受保护的 `POST /internal/v1/funds/sync-jobs/market-nav-incremental`，由当前 FastAPI 进程直接执行同步，因此不依赖 Beat 或 Worker。同步范围只从 `fund_share_class` 中来源为 Tushare 且状态为 `ACTIVE` 的基金市场记录读取，用户关注列表不会收窄或扩大范围。手动入口共享 PostgreSQL 咨询锁；已有同步运行时接口返回冲突，绝不重复调用 Tushare。该接口只返回安全的任务进度与统计，不返回 Token 或原始响应。
 
 Linux 部署的并发池应按任务类型和容量另行评估；不要直接沿用 Windows 的 `solo` 结论。
 

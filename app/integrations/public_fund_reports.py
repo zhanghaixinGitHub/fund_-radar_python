@@ -14,14 +14,15 @@ from datetime import datetime, timedelta
 import httpx
 from pypdf import PdfReader
 
-from app.integrations.dbfund_reports import bounded_get, parse_text
+from app.integrations.dbfund_reports import bounded_get
+from app.integrations.fund_report_layout_v3 import parse_text
 from app.services.direction_1d_protocol import digest
 from app.services.fund_exposure_common import ROOT, blob, now, read
 from app.services.fund_materials_store import versioned_save
 
 CATALOG_URL = "https://api.fund.eastmoney.com/f10/JJGG"
 BODY_URL = "https://np-cnotice-fund.eastmoney.com/api/content/ann"
-PARSER = "PUBLIC_REPRINT_HOLDINGS_V1"
+PARSER = "PUBLIC_REPRINT_HOLDINGS_V3"
 PEERS = {
     "002170": "东吴移动互联",
     "004237": "中欧新蓝筹",

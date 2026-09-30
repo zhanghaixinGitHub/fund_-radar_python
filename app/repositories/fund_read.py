@@ -88,6 +88,8 @@ class FundNavHistorySnapshot:
     nav_date: date
     unit_nav: Decimal
     accumulated_nav: Decimal | None
+    # 用于近期变化计算的来源身份；曲线旧投影可以不提供，但不能据此跨来源计算。
+    source_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -125,7 +127,7 @@ class FundSummaryPage:
 
 @dataclass(frozen=True)
 class FundPerformanceSnapshot:
-    """基于同一份额累计净值计算的列表展示涨跌率。"""
+    """同份额、同来源的单位净值变化；不含分红及费用，不代表总回报。"""
 
     day_change_rate: Decimal | None
     week_change_rate: Decimal | None
@@ -547,6 +549,7 @@ def _list_recent_nav_points(
             NavDaily.nav_date.label("nav_date"),
             NavDaily.unit_nav.label("unit_nav"),
             NavDaily.accumulated_nav.label("accumulated_nav"),
+            SourceRegistry.source_code.label("source_code"),
             func.row_number()
             .over(
                 partition_by=(NavDaily.fund_code, NavDaily.nav_date),
@@ -565,17 +568,19 @@ def _list_recent_nav_points(
             ranked_nav.c.nav_date,
             ranked_nav.c.unit_nav,
             ranked_nav.c.accumulated_nav,
+            ranked_nav.c.source_code,
         )
         .where(ranked_nav.c.source_rank == 1)
         .order_by(ranked_nav.c.fund_code.asc(), ranked_nav.c.nav_date.asc())
     ).all()
     points_by_code: dict[str, list[FundNavHistorySnapshot]] = {}
-    for fund_code, nav_date, unit_nav, accumulated_nav in rows:
+    for fund_code, nav_date, unit_nav, accumulated_nav, source_code in rows:
         points_by_code.setdefault(fund_code, []).append(
             FundNavHistorySnapshot(
                 nav_date=nav_date,
                 unit_nav=unit_nav,
                 accumulated_nav=accumulated_nav,
+                source_code=source_code,
             )
         )
     return {fund_code: tuple(points) for fund_code, points in points_by_code.items()}
@@ -635,15 +640,14 @@ def _build_performance(points: tuple[FundNavHistorySnapshot, ...]) -> FundPerfor
 def _calculate_change_rate(
     latest: FundNavHistorySnapshot, base: FundNavHistorySnapshot | None
 ) -> Decimal | None:
-    """优先使用累计净值；两端均缺累计净值时才使用单位净值。"""
-    if base is None:
+    """只计算可复核的单位净值端点变化，缺失、非正数和跨来源均保持未知。
+
+    累计净值包含历年现金分红，其端点比值会改变本期变化的分母，不能充当总回报；
+    来源复权字段的完整算法尚未核准，也不在这里自动替代。前端必须明确本指标
+    不含分红和买卖费用；评分与研究仍使用各自冻结口径，不复用本展示指标。
+    """
+    if base is None or not latest.source_code or latest.source_code != base.source_code:
         return None
-    if latest.accumulated_nav is not None and base.accumulated_nav is not None:
-        latest_value = latest.accumulated_nav
-        base_value = base.accumulated_nav
-    else:
-        latest_value = latest.unit_nav
-        base_value = base.unit_nav
-    if base_value == 0:
+    if any(value is None or not value.is_finite() or value <= 0 for value in (latest.unit_nav, base.unit_nav)):
         return None
-    return latest_value / base_value - Decimal("1")
+    return latest.unit_nav / base.unit_nav - Decimal("1")

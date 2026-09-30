@@ -11,3 +11,5 @@ fund_ai.db
 .local-runs/
 data/prediction-models/
 data/fund-materials/
+# 基金风险、评价与消息的本地运行快照不进入源码仓库。
+data/fund-insights/

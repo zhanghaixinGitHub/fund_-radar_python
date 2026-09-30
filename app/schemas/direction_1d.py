@@ -1,6 +1,8 @@
 """内部1日入口只接收受限公共代码/作业编号，禁止用户身份和任意模型参数。"""
 
+from datetime import date
 from typing import Annotated
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -15,6 +17,8 @@ class Scope(BaseModel):
 class ForecastRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     fund_code: FundCode
+    expected_target_date: date | None = None
+    request_id: UUID | None = None
 
 
 class TrainingRequest(BaseModel):

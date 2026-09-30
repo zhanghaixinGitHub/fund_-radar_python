@@ -325,6 +325,7 @@ def test_effect_counts_unique_funds_latest_answer_and_pending_separately(auto_da
     result = auto_model_summary.effect_summary(["001632", "001632"])
     rows = {v["horizon_id"]: v for v in result["horizons"]}
     assert result["fundCount"] == result["followedFundCount"] == 1
+    assert rows["T5_V1"]["first_generated_date"] == rows["T5_V1"]["last_generated_date"] == "2026-09-15"
     assert rows["T5_V1"]["matured"] == 1 and rows["T5_V1"]["correct"] == 0
     assert rows["T5_V1"]["check_failed"] == 1
     assert rows["T20_V1"]["pending_answers"] == 1 and rows["T20_V1"]["unmatured"] == 0
