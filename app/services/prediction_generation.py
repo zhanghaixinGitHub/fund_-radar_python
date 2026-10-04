@@ -28,55 +28,174 @@ logger = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="live-prediction")
 
 
+def _request_window(instant):
+    """保守地按上海自然日和15点分界判定活动任务可复用性。
+
+    节假日可能对应同一估值期，仍允许结束后按真实期次键复用；活动任务不跨此边界
+    复用，避免未知旧日历、旧策略或重试子集被误算为本次完成。
+    """
+    local = datetime.fromisoformat(instant) if isinstance(instant, str) else instant
+    local = local.astimezone(ZoneInfo("Asia/Shanghai"))
+    return [str(local.date()), "BEFORE_CLOSE" if local.time() < time(15) else "AFTER_CLOSE"]
+
+
+def _creation_time(connection):
+    """生成时间只取数据库；单独封装便于隔离库覆盖跨日/收盘边界。"""
+    return connection.execute(text("SELECT clock_timestamp()")).scalar()
+
+
 def create_task(codes, *, request_key=None, horizons=None, retry_items=None):
-    """浏览器不能指定过去时间或模型；生成时刻由数据库产生。"""
+    """相同期次、策略和项目集合才能复用；冲突旧任务占用时不另起执行者。"""
     codes = sorted(set(codes))
-    allowed = {h["horizon_id"] for h in prediction_policy()["horizons"]}
-    selected = horizons or sorted(allowed)
+    policy = prediction_policy()
+    allowed = {h["horizon_id"] for h in policy["horizons"]}
+    selected = sorted(set(horizons or allowed))
     if len(codes) > 500 or not set(selected) <= allowed:
         raise PredictionFailure(
             "BATCH_INPUT_INVALID", "VALIDATION", "批量最多500只基金且只能使用已开放周期", retryable=False
         )
-    request_key = fingerprint(prediction_policy()) + ":" + (request_key or str(uuid4()))
-    routes = freeze_routes()
-    if not routes:
-        # 新收益口径没有兼容路由时登记其基础方法；旧模型和旧路由保留，不冒充新标签模型。
-        from app.services.prediction_models import bootstrap_models
-
-        bootstrap_models()
-        routes = freeze_routes()
+    wanted = {
+        (code, horizon)
+        for code in codes
+        for horizon in selected
+        if retry_items is None or (code, horizon) in retry_items
+    }
+    policy_hash = fingerprint(policy)
+    explicit_request = request_key is not None
+    request_key = policy_hash + ":" + (request_key or str(uuid4()))
+    # 短事务串行检查创建动作；真实执行另由任务会话锁保护，无关基金批次可正常排队。
     with get_engine().begin() as c:
-        c.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": request_key})
-        existing = one(c, "SELECT task_id FROM prediction_generation_task WHERE request_key=:key", key=request_key)
+        c.execute(text("SELECT pg_advisory_xact_lock(hashtext('prediction-create'))"))
+        now = _creation_time(c)
+        candidates = rows(
+            c,
+            """SELECT DISTINCT t.* FROM prediction_generation_task t
+            JOIN prediction_generation_item i USING(task_id)
+            WHERE t.mode='LIVE' AND t.status IN ('QUEUED','RUNNING','INTERRUPTED')
+            AND i.fund_code=ANY(:codes) AND i.horizon_id=ANY(:horizons)
+            ORDER BY t.created_at""",
+            codes=codes,
+            horizons=selected,
+        )
+        occupied = set()
+        for active in candidates:
+            active_items = rows(
+                c, "SELECT fund_code,horizon_id FROM prediction_generation_item WHERE task_id=:id", id=active["task_id"]
+            )
+            actual = {(i["fund_code"], i["horizon_id"]) for i in active_items}
+            if not wanted.intersection(actual):
+                continue
+            # Java 的私人任务归属表是一任务一所有者。其他显式请求只能收到忙碌提示，
+            # 不能取得另一用户的任务编号/基金集合，也不能抢占原任务归属。
+            if explicit_request and active["request_key"] != request_key:
+                raise PredictionFailure("TASK_SCOPE_BUSY", "GENERATE", "该基金的预测正在处理中，请稍后重试")
+            payload = active["payload"]
+            compatible = (
+                actual == wanted
+                and payload.get("policyHash") == policy_hash
+                and payload.get("generatedAt")
+                and _request_window(payload["generatedAt"]) == _request_window(now)
+            )
+            if compatible and len(candidates) == 1:
+                return {
+                    **task_status(active["task_id"]),
+                    "blockedByPreviousTask": False,
+                    "requestedWindow": _request_window(now),
+                }
+            if explicit_request:
+                raise PredictionFailure(
+                    "REQUEST_KEY_WINDOW_OR_SCOPE_MISMATCH", "VALIDATION", "该请求对应其他日期或范围，请重新发起"
+                )
+            occupied.update(wanted.intersection(actual))
+        blocked_items = [{"fundCode": code, "horizonId": horizon} for code, horizon in sorted(occupied)]
+        # 占用是基金+周期的边界；同一批中的无关项目仍创建任务，不暴露旧任务的额外基金。
+        wanted -= occupied
+        if blocked_items and not wanted:
+            return {
+                "taskId": None,
+                "status": "WAITING_FOR_ACTIVE_TASK",
+                "items": [],
+                "pendingItems": 0,
+                "plannedItems": 0,
+                "blockedItems": blocked_items,
+                "blockedByPreviousTask": True,
+                "requestedWindow": _request_window(now),
+            }
+        existing = one(c, "SELECT * FROM prediction_generation_task WHERE request_key=:key", key=request_key)
         if existing:
-            return task_status(existing["task_id"])
-        now = c.execute(text("SELECT clock_timestamp()")).scalar()
+            payload = existing["payload"]
+            if not payload.get("generatedAt") or _request_window(payload["generatedAt"]) != _request_window(now):
+                raise PredictionFailure(
+                    "REQUEST_KEY_WINDOW_MISMATCH", "VALIDATION", "该请求已属于其他预测日期，请重新发起"
+                )
+            previous = task_status(existing["task_id"])
+            actual = {(i["fundCode"], i["horizonId"]) for i in previous["items"]}
+            if actual != wanted:
+                raise PredictionFailure(
+                    "REQUEST_KEY_SCOPE_MISMATCH", "VALIDATION", "该请求对应其他预测范围，请重新发起"
+                )
+            return previous
+        routes = freeze_routes()
+        if not routes:
+            from app.services.prediction_models import bootstrap_models
+
+            bootstrap_models()
+            routes = freeze_routes()
         task_id = uuid4()
         payload = {
-            "fundCodes": codes,
-            "horizonIds": selected,
+            "fundCodes": sorted({code for code, _ in wanted}),
+            "horizonIds": sorted({horizon for _, horizon in wanted}),
+            "blockedItems": blocked_items,
             "routes": routes,
             "generatedAt": now.isoformat(),
-            "policyVersion": prediction_policy()["version"],
-            "policyHash": fingerprint(prediction_policy()),
-            "predictionPolicy": prediction_policy(),
+            "policyVersion": policy["version"],
+            "policyHash": policy_hash,
+            "predictionPolicy": policy,
         }
         c.execute(
             text("""INSERT INTO prediction_generation_task(task_id,request_key,mode,status,payload)
-          VALUES(:id,:key,'LIVE','QUEUED',CAST(:payload AS jsonb))"""),
+            VALUES(:id,:key,'LIVE','QUEUED',CAST(:payload AS jsonb))"""),
             {"id": task_id, "key": request_key, "payload": encode(payload)},
         )
-        for code in codes:
-            for horizon in selected:
-                if retry_items is not None and (code, horizon) not in retry_items:
-                    continue
-                c.execute(
-                    text("""INSERT INTO prediction_generation_item(task_id,fund_code,horizon_id)
-                  VALUES(:id,:code,:horizon)"""),
-                    {"id": task_id, "code": code, "horizon": horizon},
-                )
-    _executor.submit(run_task, task_id)
+        for code, horizon in sorted(wanted):
+            c.execute(
+                text("""INSERT INTO prediction_generation_item(task_id,fund_code,horizon_id)
+                VALUES(:id,:code,:horizon)"""),
+                {"id": task_id, "code": code, "horizon": horizon},
+            )
+    _dispatch_task(task_id)
     return task_status(task_id)
+
+
+def _dispatch_task(task_id):
+    """数据库提交后派发失败须留下可重试终态；真实执行会话仍持锁时绝不改写状态。"""
+    try:
+        _executor.submit(run_task, task_id)
+        return True
+    except Exception:
+        logger.exception("prediction_generation._dispatch_task >>> task=%s 后台派发失败", task_id)
+        with get_engine().begin() as c:
+            acquired = c.execute(
+                text("SELECT pg_try_advisory_xact_lock(hashtext(:key))"), {"key": "prediction-task:" + str(task_id)}
+            ).scalar()
+            if not acquired:
+                return False
+            changed = c.execute(
+                text("""UPDATE prediction_generation_task
+                SET status='FAILED',lease_until=NULL,finished_at=clock_timestamp()
+                WHERE task_id=:id AND status IN ('QUEUED','INTERRUPTED') RETURNING task_id"""),
+                {"id": task_id},
+            ).scalar()
+            if changed:
+                failure = encode(
+                    {"error": {"code": "TASK_DISPATCH_FAILED", "summary": "预测未能开始，请重试", "retryable": True}}
+                )
+                c.execute(
+                    text("""UPDATE prediction_generation_item SET status='FAILED',result=CAST(:r AS jsonb)
+                    WHERE task_id=:id AND status IN ('PENDING','RUNNING')"""),
+                    {"id": task_id, "r": failure},
+                )
+        return False
 
 
 def task_status(task_id):
@@ -102,6 +221,7 @@ def task_status(task_id):
     return {
         "taskId": str(task_id),
         "status": task["status"],
+        "blockedItems": task["payload"].get("blockedItems", []),
         "createdAt": str(task["created_at"]),
         "finishedAt": str(task["finished_at"]) if task["finished_at"] else None,
         **counts,
@@ -147,13 +267,37 @@ def prediction_payload(data, features, horizon, now, route, *, mode="LIVE", task
 
 
 def run_task(task_id):
-    with get_engine().connect() as c:
-        task = one(c, "SELECT payload FROM prediction_generation_task WHERE task_id=:id", id=task_id)
-    if not task:
-        return
-    frozen = task["payload"].get("predictionPolicy") or legacy_policy()
-    with policy_scope(frozen):
-        return _run_task(task_id)
+    """会话锁覆盖真实执行期；租约仅用于恢复发现，不允许长计算期间抢跑第二个执行者。"""
+    with get_engine().connect() as lock:
+        key = "prediction-task:" + str(task_id)
+        acquired = lock.execute(text("SELECT pg_try_advisory_lock(hashtext(:key))"), {"key": key}).scalar()
+        if not acquired:
+            return
+        try:
+            with get_engine().connect() as c:
+                task = one(c, "SELECT payload FROM prediction_generation_task WHERE task_id=:id", id=task_id)
+            if not task:
+                return
+            frozen = task["payload"].get("predictionPolicy") or legacy_policy()
+            with policy_scope(frozen):
+                return _run_task(task_id)
+        except Exception:
+            logger.exception("prediction_generation.run_task >>> task=%s 执行中断，保留成功项", task_id)
+            # 真实线程退出才释放锁；未提交项明确失败，不能悬挂 RUNNING 或误计成功。
+            with get_engine().begin() as c:
+                failure = encode({"error": {"code": "TASK_EXECUTION_INTERRUPTED", "summary": "预测执行中断，请重试"}})
+                c.execute(
+                    text("""UPDATE prediction_generation_item SET status='FAILED',result=CAST(:r AS jsonb)
+                    WHERE task_id=:id AND status IN ('PENDING','RUNNING')"""),
+                    {"id": task_id, "r": failure},
+                )
+                c.execute(
+                    text("""UPDATE prediction_generation_task SET status='FAILED',lease_until=NULL,
+                    finished_at=clock_timestamp() WHERE task_id=:id AND status<>'CANCELLED'"""),
+                    {"id": task_id},
+                )
+        finally:
+            lock.execute(text("SELECT pg_advisory_unlock(hashtext(:key))"), {"key": key})
 
 
 def prediction_period_key(result):
@@ -329,22 +473,40 @@ def _run_task(task_id):
 
 
 def recover_tasks():
+    """只有租约过期且真实执行会话已经退出的任务才允许恢复。"""
+    pending = []
     with get_engine().begin() as c:
-        pending = rows(
+        candidates = rows(
             c,
-            """UPDATE prediction_generation_task SET status='INTERRUPTED',lease_until=NULL
-          WHERE status IN ('QUEUED','RUNNING','INTERRUPTED') AND (lease_until IS NULL OR lease_until<clock_timestamp())
-          RETURNING task_id""",
+            """SELECT task_id FROM prediction_generation_task
+            WHERE status IN ('QUEUED','RUNNING','INTERRUPTED')
+            AND (lease_until IS NULL OR lease_until<clock_timestamp()) ORDER BY created_at FOR UPDATE SKIP LOCKED""",
         )
-        for task in pending:
+        for task in candidates:
+            acquired = c.execute(
+                text("SELECT pg_try_advisory_xact_lock(hashtext(:key))"),
+                {"key": "prediction-task:" + str(task["task_id"])},
+            ).scalar()
+            if not acquired:
+                continue
+            c.execute(
+                text("UPDATE prediction_generation_task SET status='INTERRUPTED',lease_until=NULL WHERE task_id=:id"),
+                {"id": task["task_id"]},
+            )
             c.execute(
                 text("""INSERT INTO prediction_task_event(event_id,task_id,kind,payload)
-                              VALUES(:id,:task,'RECOVERED','{"reason":"进程中断或租约超时，复用原时间和版本恢复检查点"}')"""),
+                VALUES(:id,:task,'RECOVERED','{"reason":"实际执行已退出，按原日期恢复未完成项"}')"""),
                 {"id": uuid4(), "task": task["task_id"]},
             )
+            pending.append(task)
+    dispatched = 0
     for task in pending:
-        _executor.submit(run_task, task["task_id"])
-    return len(pending)
+        try:
+            dispatched += int(_dispatch_task(task["task_id"]))
+        except Exception:
+            # 数据库本身不可写时也不能中断后续恢复；原租约已释放，下一次维护仍可发现该项。
+            logger.exception("prediction_generation.recover_tasks >>> task=%s 恢复收尾失败", task["task_id"])
+    return dispatched
 
 
 def retry_failed(task_id):
@@ -354,7 +516,7 @@ def retry_failed(task_id):
         original = one(c, "SELECT payload FROM prediction_generation_task WHERE task_id=:id", id=task_id)
     # 重试沿用原任务口径；新版本规则由正常的新建生成任务使用。
     with policy_scope(original["payload"].get("predictionPolicy") or legacy_policy()):
-        return create_task([c for c, _ in failed], retry_items=failed)
+        return create_task([c for c, _ in failed], request_key=str(uuid4()), retry_items=failed)
 
 
 def current_predictions(fund_code):

@@ -22,6 +22,8 @@ def setup_worker(monkeypatch, *, count=4, daily_results=None, window_failed=Fals
             return httpx.Response(200, json=[code for code in codes if code > after][:100])
         if path.endswith("/window"):
             return httpx.Response(503 if window_failed else 200, json={"targetNavDate": "2026-09-24"})
+        if path.endswith("/saved-results"):
+            return httpx.Response(200, json=[])
         if path.endswith("/finalize"):
             assert json.loads(request.content)["taskId"] in finished
             return httpx.Response(200, json={"failed": 0})
@@ -88,7 +90,7 @@ def test_manual_job_combines_four_periods_and_keeps_window_and_data_failures(mon
         assert "一日预测/000004" in job.error_message and "留档未确认" in job.error_message
         assert "000001/T5_V1：缺少净值" in job.error_message
         assert worker.batches == [worker.codes]
-        assert worker.calls[-1] == ("VERIFY", "outcomes")
+        assert ("VERIFY", "outcomes") in worker.calls
     finally:
         manager.close()
 
@@ -135,15 +137,22 @@ def test_pending_daily_job_is_not_counted_as_generated(monkeypatch):
 
 
 def test_unsupported_is_counted_separately_and_does_not_hide_real_errors(monkeypatch):
-    worker = setup_worker(monkeypatch, count=2, daily_results=[
-        {"status": "SPECIAL_POLICY_REQUIRED"}, {"status": "WAITING_DATA"},
-    ], multi_failed=True)
+    worker = setup_worker(
+        monkeypatch,
+        count=2,
+        daily_results=[
+            {"status": "SPECIAL_POLICY_REQUIRED"},
+            {"status": "WAITING_DATA"},
+        ],
+        multi_failed=True,
+    )
     original_status = module.task_status
 
     def result(task_id):
         task = original_status(task_id)
         task["items"][0]["result"]["error"] = {
-            "code": "CALENDAR_POLICY_MISSING", "summary": "该基金类型暂不支持",
+            "code": "CALENDAR_POLICY_MISSING",
+            "summary": "该基金类型暂不支持",
         }
         return task
 

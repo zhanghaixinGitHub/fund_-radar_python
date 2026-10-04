@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     # 公共风险和历史评价的不可变结果与当前引用；不保存本人账户资料。
     fund_insight_directory: str = "data/fund-insights"
     ai_service_token: SecretStr = SecretStr("")
+    # 预测依据只将原预测的公共净值事实发给 DeepSeek；凭据不得出现在浏览器或日志中。
+    # 未配置密钥或模型时保留原有依据，不触发付费请求；已保存的解释仍可读取。
+    deepseek_api_key: SecretStr = SecretStr("")
+    deepseek_model: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_timeout_seconds: float = Field(default=20, ge=3, le=22)
     # 费率后台任务回写 Java 的地址；令牌复用 AI_SERVICE_TOKEN，禁止从浏览器传入回调地址。
     core_service_base_url: str = "http://127.0.0.1:8080"
     ai_database_url: str = "postgresql+psycopg://fund_ai_app:change-me@localhost:54329/fund_ai"

@@ -6,7 +6,7 @@ import re
 from app.integrations.dbfund_reports import parse_text as parse_original
 from app.integrations.fund_report_sections_v2 import normalize_pages
 
-PARSER_VERSION = "FUND_REPORT_LAYOUT_V3"
+PARSER_VERSION = "FUND_REPORT_LAYOUT_V4"
 _HAN = r"\u4e00-\u9fff"
 _ROW = re.compile(r"^(\d{1,4})\s+(\d{5,6})(?=\s|[\u4e00-\u9fff])\s*(.*)$")
 _NUMBER = re.compile(r"[\d,]+(?:\.\d*)?%?$")
@@ -64,43 +64,64 @@ def normalize_layout(pages, *, fund_name):
         original = section[0]
         body = re.sub(
             rf"(?m)^([{_HAN}、，]+)\n\s*([A-S])\s+([\d,]+\.\d{{2}})\s+([\d.]+)\n([{_HAN}、，]+)$",
-            r"\2 \1\5 \3 \4", original,
+            r"\2 \1\5 \3 \4",
+            original,
         )
         body = re.sub(r"(?m)^(合计\s+[\d,]+\.\d)\s+([\d.]+)\n(\d)\s*$", r"\1\3 \2", body)
         if body != original:
             edits.append({"rule": "INDUSTRY_WRAPPED_CELLS", "before": original, "after": body})
-            text = text[:section.start()] + body + text[section.end():]
+            text = text[: section.start()] + body + text[section.end() :]
     # 从后往前替换，避免目录或前面替换改变坐标；不处理找不到结束标题的截断报告。
-    for section in list(re.finditer(
-        r"(?ms)^[578]\.3\s+(?:期末|报告期末)[^\n]*股票\s*投\s*资\s*明\s*细[^\n]*\n(.*?)(?=^[578]\.4\s)", text
-    ))[::-1]:
+    for section in list(
+        re.finditer(
+            r"(?ms)^[578]\.3\s+(?:期末|报告期末)[^\n]*股票\s*投\s*资\s*明\s*细[^\n]*\n(.*?)(?=^[578]\.4\s)", text
+        )
+    )[::-1]:
         body = section[1]
         row_lines = body.splitlines()
         clean = []
-        for line in row_lines:
+        for line_index, line in enumerate(row_lines):
             compact = re.sub(r"\s", "", line)
             # 已绑定基金名称的报告页眉及明确页码可跳过；普通注释不作为股票名称。
             if not line or re.fullmatch(r"第?\s*\d+\s*页(?:\s*共\s*\d+\s*页)?", line):
                 continue
             if fund_name in compact and re.search(r"20\d{2}年.*报告$", compact):
                 continue
+            # 160323 原件：完整基金报告页眉之后独立一行页码，再接完整持仓行。
+            # 必须同时匹配前后上下文，不能把数量/金额折行中的数字当页码删除。
+            previous = re.sub(r"\s", "", row_lines[line_index - 1]) if line_index else ""
+            following = row_lines[line_index + 1] if line_index + 1 < len(row_lines) else ""
+            if (
+                re.fullmatch(r"\d{1,3}", line)
+                and fund_name in previous
+                and re.search(r"20\d{2}年.*报告$", previous)
+                and _ROW.fullmatch(following)
+            ):
+                edits.append({"rule": "REPORT_HEADER_PAGE_NUMBER", "before": line, "after": ""})
+                continue
             clean.append(line)
         starts = [i for i, line in enumerate(clean) if _ROW.fullmatch(line)]
         if not starts:
             continue
-        output = clean[:starts[0]]
+        output = clean[: starts[0]]
         for ordinal, start in enumerate(starts):
             end = starts[ordinal + 1] if ordinal + 1 < len(starts) else len(clean)
             block = clean[start:end]
             # 报告末尾说明保留原位，不能拼进最后一只股票；只切分明确的“注”提示。
-            note = next((i for i, line in enumerate(block[1:], 1)
-                         if line.startswith(("注：", "注:", "注 ")) or re.match(r"[578]\.3\.\d+\s", line)), len(block))
+            note = next(
+                (
+                    i
+                    for i, line in enumerate(block[1:], 1)
+                    if line.startswith(("注：", "注:", "注 ")) or re.match(r"[578]\.3\.\d+\s", line)
+                ),
+                len(block),
+            )
             row = _holding_row(block[:note])
             output.extend([row, *block[note:]])
         repaired = "\n".join(output) + "\n"
         if repaired != body:
             edits.append({"rule": "HOLDING_WRAPPED_CELLS", "before": body, "after": repaired})
-            text = text[:section.start(1)] + repaired + text[section.end(1):]
+            text = text[: section.start(1)] + repaired + text[section.end(1) :]
     return text, {"headings": heading_edits, "blocks": edits}
 
 
@@ -112,9 +133,12 @@ def parse_text(pages, title, *, fund_code="002112", fund_name="德邦鑫星价�
         result = parse_original(pages, title, fund_code=fund_code, fund_name=fund_name, master_code=master_code)
     except ValueError as error:
         if str(error) not in {
-            "REPORT_HOLDINGS_SECTION_MISSING", "REPORT_STOCK_NAV_RATIO_MISSING",
-            "REPORT_HOLDINGS_RANK_OR_DUPLICATE", "REPORT_HOLDINGS_PARSE_EMPTY",
-            "REPORT_FULL_HOLDING_TOTAL_MISMATCH", "REPORT_INDUSTRY_TOTAL_MISMATCH",
+            "REPORT_HOLDINGS_SECTION_MISSING",
+            "REPORT_STOCK_NAV_RATIO_MISSING",
+            "REPORT_HOLDINGS_RANK_OR_DUPLICATE",
+            "REPORT_HOLDINGS_PARSE_EMPTY",
+            "REPORT_FULL_HOLDING_TOTAL_MISMATCH",
+            "REPORT_INDUSTRY_TOTAL_MISMATCH",
         }:
             raise
     else:
@@ -122,9 +146,12 @@ def parse_text(pages, title, *, fund_code="002112", fund_name="德邦鑫星价�
         return result
     normalized, evidence = normalize_layout(pages, fund_name=fund_name)
     result = parse_original([normalized], title, fund_code=fund_code, fund_name=fund_name, master_code=master_code)
-    result.update(parser_version=PARSER_VERSION, layout_normalization={
-        "original_text_sha256": hashlib.sha256("\n".join(pages).encode()).hexdigest(),
-        "normalized_text_sha256": hashlib.sha256(normalized.encode()).hexdigest(),
-        **evidence,
-    })
+    result.update(
+        parser_version=PARSER_VERSION,
+        layout_normalization={
+            "original_text_sha256": hashlib.sha256("\n".join(pages).encode()).hexdigest(),
+            "normalized_text_sha256": hashlib.sha256(normalized.encode()).hexdigest(),
+            **evidence,
+        },
+    )
     return result

@@ -295,7 +295,11 @@ def acquire_older_quotes(rows, reports, trading_days, provider, progress):
                 by_day[day][code] = dict(zip(FIELDS[2:], item[2:], strict=True))
             receipts[code] = receipt
             if not seen:
-                errors.append({"stock_code": code, "reason": "SOURCE_RETURNED_EMPTY"})
+                from app.services.fund_exposure_supplement import SupplementProvider
+                from app.services.historical_security_quotes import explain_empty_history
+
+                error = explain_empty_history(code, days, SupplementProvider())
+                errors.append({**error, "quote_receipt": receipt})
         except Exception as exc:
             errors.append({"stock_code": code, "reason": safe_error(exc)})
     output = {}

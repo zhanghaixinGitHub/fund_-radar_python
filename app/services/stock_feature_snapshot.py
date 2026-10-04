@@ -58,8 +58,10 @@ class StockFeatureBuildSummary:
     created_count: int
     updated_count: int
     skipped_count: int
+    # 单基金计算/提交异常与无净值分开；旧调用默认没有失败项。
+    issues: tuple[str, ...] = ()
 
-    def to_payload(self) -> dict[str, str | int | None]:
+    def to_payload(self) -> dict[str, str | int | list[str] | None]:
         """返回可由 Celery JSON 序列化的安全摘要。"""
         return {
             "status": self.status,
@@ -72,6 +74,7 @@ class StockFeatureBuildSummary:
             "created_count": self.created_count,
             "updated_count": self.updated_count,
             "skipped_count": self.skipped_count,
+            "issues": list(self.issues),
         }
 
 
@@ -116,44 +119,45 @@ class StockFeatureSnapshotService:
                 source_sync_finished_at=source.source_sync_finished_at,
                 history_limit=MIN_NAV_OBSERVATIONS,
             )
-            snapshots_list: list[FeatureSnapshotUpsert] = []
-            for current, item in enumerate(inputs, start=1):
-                snapshot = build_stock_feature_snapshot(item)
-                if snapshot is not None:
-                    snapshots_list.append(snapshot)
-                if progress_reporter is not None:
-                    progress_reporter(
-                        current,
-                        len(inputs),
-                        item.fund_code,
-                        f"正在计算 {item.fund_code} 的历史指标",
-                    )
-            snapshots = tuple(snapshots_list)
-            no_nav_count = len(inputs) - len(snapshots)
-            scorable_count = sum(snapshot.eligibility_status == "SCORABLE" for snapshot in snapshots)
-            data_insufficient_count = sum(
-                snapshot.eligibility_status == "DATA_INSUFFICIENT" for snapshot in snapshots
-            )
+        # 读取会话先关闭；每只基金重新开事务，不让任何失败回滚已保存基金。
+        snapshots, issues = [], []
+        no_nav_count = 0
+        created = updated = skipped = 0
+        for current, item in enumerate(inputs, start=1):
             try:
-                write_stats = upsert_feature_snapshots(session, records=snapshots)
-                session.commit()
+                snapshot = build_stock_feature_snapshot(item)
+                if snapshot is None:
+                    no_nav_count += 1
+                else:
+                    with Session(engine) as fund_session:
+                        try:
+                            stats = upsert_feature_snapshots(fund_session, records=(snapshot,))
+                            fund_session.commit()
+                        except Exception:
+                            fund_session.rollback()
+                            raise
+                    snapshots.append(snapshot)
+                    created += stats.created_count
+                    updated += stats.updated_count
+                    skipped += stats.skipped_count
             except Exception:
-                session.rollback()
-                logger.exception(
-                    "stock_feature_snapshot.build >>> feature build failed, source_code=%s, attempted_fund_count=%s",
-                    source.source_code,
-                    len(inputs),
-                )
-                raise
-
-        summary = _to_summary(
+                day = item.nav_points[-1].nav_date if item.nav_points else "无净值"
+                issues.append(f"{item.fund_code}/{day}：历史指标计算或保存未完成")
+                logger.exception("stock_feature_snapshot.build >>> fund=%s date=%s", item.fund_code, day)
+            if progress_reporter is not None:
+                progress_reporter(current, len(inputs), item.fund_code, f"已检查 {item.fund_code} 的历史指标")
+        summary = StockFeatureBuildSummary(
+            status="COMPLETED" if not issues else "PARTIAL_SUCCESS" if snapshots else "FAILED",
             source_code=source.source_code,
             source_sync_run_id=source.source_sync_run_id,
             attempted_fund_count=len(inputs),
-            scorable_count=scorable_count,
-            data_insufficient_count=data_insufficient_count,
+            scorable_count=sum(s.eligibility_status == "SCORABLE" for s in snapshots),
+            data_insufficient_count=sum(s.eligibility_status == "DATA_INSUFFICIENT" for s in snapshots),
             no_nav_count=no_nav_count,
-            write_stats=write_stats,
+            created_count=created,
+            updated_count=updated,
+            skipped_count=skipped,
+            issues=tuple(issues),
         )
         logger.info(
             "stock_feature_snapshot.build >>> feature build completed, source_code=%s, attempted=%s, scorable=%s, "
@@ -227,10 +231,7 @@ def build_stock_feature_snapshot(input_record: StockFeatureInput) -> FeatureSnap
             input_record,
             latest_nav_date,
             base_payload,
-            reason=(
-                "NAV_HISTORY_SHORTAGE: "
-                f"observed={len(input_record.nav_points)}, required={MIN_NAV_OBSERVATIONS}"
-            ),
+            reason=(f"NAV_HISTORY_SHORTAGE: observed={len(input_record.nav_points)}, required={MIN_NAV_OBSERVATIONS}"),
             completeness=_completeness(len(input_record.nav_points)),
         )
 
@@ -343,8 +344,7 @@ def _volatility(nav_values: tuple[Decimal, ...]) -> Decimal:
     if len(nav_values) < 2:
         raise ValueError("at least two observations are required for volatility")
     returns = tuple(
-        current / previous - Decimal("1")
-        for previous, current in zip(nav_values[:-1], nav_values[1:], strict=True)
+        current / previous - Decimal("1") for previous, current in zip(nav_values[:-1], nav_values[1:], strict=True)
     )
     mean = sum(returns, Decimal("0")) / Decimal(len(returns))
     variance = sum(((value - mean) ** 2 for value in returns), Decimal("0")) / Decimal(len(returns))

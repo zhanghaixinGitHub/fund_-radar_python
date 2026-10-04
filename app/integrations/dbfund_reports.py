@@ -435,10 +435,21 @@ def acquire(*, incremental=False, extended_history=False, progress=lambda *args:
                 print(f"REPORT_OK {parsed['report_end']} {parsed['report_type']} {parsed['holding_count']}", flush=True)
             except Exception as exc:
                 # 公开报告错误码可记录；网络异常只记录类型，避免输出完整请求上下文。
-                reason = (
-                    str(exc) if isinstance(exc, ValueError) and str(exc).startswith("REPORT_") else type(exc).__name__
+                from app.integrations.public_fund_reports import report_period
+                from app.services.fund_exposure_quotes import safe_error
+
+                reason = safe_error(exc)
+                period = report_period(entry["title"])
+                errors.append(
+                    {
+                        "title": entry["title"],
+                        "url": entry["url"],
+                        "reason": reason,
+                        "report_end": period[0] if period else None,
+                        "report_type": period[1] if period else None,
+                        "http_status": exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None,
+                    }
                 )
-                errors.append({"title": entry["title"], "url": entry["url"], "reason": reason})
                 print(f"REPORT_ERROR {entry['title']} {reason}", flush=True)
     result = {
         "at": now().isoformat(),

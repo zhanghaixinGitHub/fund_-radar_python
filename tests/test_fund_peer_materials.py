@@ -189,6 +189,8 @@ def test_quote_gap_keeps_unknown_separate_from_proven_nontrading(tmp_path, monke
             }, {}
 
     monkeypatch.setattr(peers, "SupplementProvider", Provider)
+    # 新增BJ来源能力也必须被替身覆盖，本测试不访问真实行情。
+    monkeypatch.setattr(peers, "Provider", lambda: (_ for _ in ()).throw(ValueError("REPORT_SOURCE_UNAVAILABLE")))
     result = peers.explain_quote_gaps(
         {"688001.SH": {"2023-01-03", "2023-01-05", "2023-01-06"}, "833819.BJ": {"2023-01-06"}}, lambda *a: None
     )
@@ -216,3 +218,21 @@ def test_recheck_failure_preserves_previously_verified_report(tmp_path, monkeypa
     saved = read(tmp_path / "005187/manifest.json")
     assert saved["documents"]["a"]["file"] == "old.json"
     assert result["errors"]
+
+
+def test_download_failure_and_missing_period_are_one_gap_with_both_reasons(tmp_path, monkeypatch):
+    monkeypatch.setattr(peers, "STORE", tmp_path)
+    monkeypatch.setattr(peers, "PEERS", {"007509": "华商润丰"})
+    monkeypatch.setattr(peers, "expected_periods", lambda code: [("2020-09-30", "QUARTER")])
+    monkeypatch.setattr(
+        peers, "ReportClient", lambda *a: SimpleNamespace(count=0, close=lambda: None, invalidate_body=lambda a: None)
+    )
+    entry = {"ID": "test", "report_end": "2020-09-30", "report_type": "QUARTER"}
+    monkeypatch.setattr(peers, "catalog", lambda *args: ([entry], []))
+    monkeypatch.setattr(
+        peers, "acquire_one", lambda *args: (_ for _ in ()).throw(ValueError("REPORT_BODY_EMPTY_OR_TRUNCATED"))
+    )
+    result = peers.sync_reports("isolated", lambda *args: None)
+    assert len(result["errors"]) == 1
+    assert result["errors"][0]["reason"] == "REPORT_BODY_EMPTY_OR_TRUNCATED"
+    assert result["errors"][0]["related_reasons"] == ["REPORT_PERIODS_MISSING"]

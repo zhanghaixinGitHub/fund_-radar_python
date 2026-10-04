@@ -205,6 +205,7 @@ class InternalSyncJobStatus(BaseModel):
     error_message: str | None
     started_at: datetime | None
     finished_at: datetime | None
+    result_summary: dict | None = None
 
 
 class InternalSyncJobLastSuccess(BaseModel):

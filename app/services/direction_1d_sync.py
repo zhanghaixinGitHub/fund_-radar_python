@@ -42,6 +42,10 @@ class Direction1dSyncResult:
     issues: tuple[str, ...]
     # 明确不适用的基金不算生成或执行失败；仍单独计数和保留原因，便于说明覆盖边界。
     unsupported: tuple[str, ...] = ()
+    # issues 仍兼容旧聚合接口；items 是互斥业务状态，附真实目标日，不能用旧结果凑本次成功。
+    items: tuple[dict, ...] = ()
+    followup_issues: tuple[str, ...] = ()
+    saved_results: tuple[dict, ...] = ()
 
 
 class Direction1dSyncService:
@@ -103,9 +107,10 @@ class Direction1dSyncService:
     ) -> Direction1dSyncResult:
         """仅处理服务端已读取的基金范围；Java仍检查窗口、关注关系及原文留档回执。"""
         total, created, existing = len(codes), 0, 0
-        issues, unsupported = [], []
+        issues, unsupported, items = [], [], []
         progress_reporter(0, total, None, f"目标日 {target}，正在检查 {total} 只关注基金")
         for index, code in enumerate(codes, 1):
+            item = {"fundCode": code, "horizonId": "T1", "targetDate": str(target), "state": "ERROR"}
             try:
                 response = self._client.post(f"{_BASE}/{code}", json={"targetNavDate": str(target)})
                 response.raise_for_status()
@@ -113,18 +118,39 @@ class Direction1dSyncService:
                 if result.get("status") == "PREDICTED":
                     if not isinstance(result.get("reused"), bool):
                         raise ValueError("预测保存回执不完整")
+                    item["state"] = "COMPLETED"
                     existing += int(result["reused"])
                     created += int(not result["reused"])
                 else:
                     reason = result.get("reason") or result.get("status")
                     message = f"{code}：{_REASONS.get(reason, '本期预测未生成，请查看预测覆盖详情')}"
                     if reason in {"SPECIAL_POLICY_REQUIRED", "NOT_APPLICABLE"}:
+                        item["state"] = "UNSUPPORTED"
                         unsupported.append(message)
                     else:
+                        item["state"] = (
+                            "WAITING"
+                            if reason
+                            in {
+                                "MISSED_DEADLINE",
+                                "NAV_CURRENT_NOT_READY",
+                                "NAV_LATEST_NOT_READY",
+                                "NAV_GAP",
+                                "WINDOW_CHANGED",
+                                "WAITING_DATA",
+                                "DATA_PENDING",
+                                "DATA_INSUFFICIENT",
+                                "QUEUED",
+                                "RUNNING",
+                            }
+                            else "ERROR"
+                        )
                         issues.append(message)
+                    item["reason"] = _REASONS.get(reason, "本期预测未生成")
             except Exception:
                 issues.append(f"{code}：预测生成或留档未确认，请稍后检查或重试")
                 logger.exception("direction_1d_sync.sync >>> prediction failed, fund_code=%s", code)
+            items.append(item)
             progress_reporter(
                 index,
                 total,
@@ -132,4 +158,4 @@ class Direction1dSyncService:
                 f"目标日 {target}：已检查 {index}/{total} 只，新生成 {created}，已有 {existing}，"
                 f"暂不支持 {len(unsupported)}，待完成 {len(issues)}",
             )
-        return Direction1dSyncResult(target, total, created, existing, tuple(issues), tuple(unsupported))
+        return Direction1dSyncResult(target, total, created, existing, tuple(issues), tuple(unsupported), tuple(items))

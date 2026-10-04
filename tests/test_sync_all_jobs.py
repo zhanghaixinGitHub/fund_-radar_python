@@ -17,14 +17,14 @@ from fastapi.testclient import TestClient
 
 STAGES = (
     "SPX_MANUAL",
-    "FUND_NEWS",
-    "MARKET_FREE_DATA_COMPLETION",
-    "FUND_MATERIALS",
     "MARKET_NAV_INCREMENTAL",
-    "FUND_INPUTS",
+    "MARKET_FREE_DATA_COMPLETION",
     "STOCK_FEATURE_SNAPSHOT",
     "SIMULATION_FEES",
     "MULTI_PREDICTIONS",
+    "FUND_NEWS",
+    "FUND_MATERIALS",
+    "FUND_INPUTS",
 )
 
 
@@ -154,7 +154,7 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
     try:
         started = manager.start_all()
         result = wait_finished(manager, started.job_id)
-        assert calls == list(STAGES)  # 特征只在全部来源完成后生成一次。
+        assert calls == list(STAGES)  # 净值与基础资料之后只计算一次指标，预测不等待后面的资料补齐。
         assert result.status == (
             "SUCCEEDED" if not failures else "FAILED" if len(failures) == len(STAGES) else "PARTIAL_SUCCESS"
         )
@@ -227,9 +227,13 @@ def test_batch_holds_exclusion_across_every_stage_and_restores_live_progress():
             assert parent.job_id == started.job_id
             assert parent.status == "RUNNING"
             assert parent.progress_current == index
+            assert f"第 {index + 1}/{len(STAGES)} 项" in parent.progress_message
             assert parent.current_fund_code == (None if stage == "SPX_MANUAL" else "000001.OF")
             assert ("0/1" if stage == "SPX_MANUAL" else "1/2") in parent.progress_message
             assert manager.get_latest_job(stage).status == "RUNNING"
+            # 后面的公告/持仓/留存仍在执行时，前面的净值和预测已经完成，批次互斥继续保持。
+            for previous_stage in STAGES[:index]:
+                assert manager.get_latest_job(previous_stage).status == "SUCCEEDED"
             for next_stage in STAGES[index + 1 :]:
                 assert manager.get_latest_job(next_stage).status == "QUEUED"
             for start in (

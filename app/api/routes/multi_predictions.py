@@ -4,7 +4,7 @@ from datetime import date, datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -110,6 +110,17 @@ def read_history(
     beforeId: UUID | None = None,
 ):
     return {"items": history(fund_code, limit=limit, before=before, before_id=beforeId)}
+
+
+@router.post("/funds/{fund_code}/predictions/{prediction_id}/narrative")
+def prediction_narrative(fund_code: FundCode, prediction_id: UUID, x_trace_id: str = Header(default="")):
+    """按原预测整理解释；不接收客户端事实、未来信息或自定义提示词。"""
+    from app.services.prediction_narrative import ensure
+
+    try:
+        return ensure("multi", prediction_id, fund_code, x_trace_id[:128])
+    except (ValueError, KeyError, TypeError) as error:
+        raise HTTPException(409, "PREDICTION_EVIDENCE_UNAVAILABLE") from error
 
 
 @router.get("/funds/{fund_code}/replay-inputs")

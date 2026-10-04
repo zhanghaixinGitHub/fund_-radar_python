@@ -46,13 +46,21 @@ def failure_message(error: dict) -> str:
         "REPORT_BODY_EMPTY_OR_TRUNCATED": "来源正文为空或内容不足，尚未补齐",
         "REPORT_REPRINT_PERIOD_NOT_FOUND": "公开来源暂未找到该期完整报告，相关日期未用于训练",
         "SOURCE_RETURNED_EMPTY": "来源未返回该段历史行情，相关日期已排除",
+        "REPORT_SECURITY_OUTSIDE_LISTING": "所需历史日期不在该证券上市期间，相关日期已排除",
+        "HTTP_STATUS_404": "公开报告的原链接已失效，该期资料仍未补齐",
         "REPORT_PEER_QUOTES_INCOMPLETE": "部分参照股票的历史行情仍未核验，已保留具体缺口",
         "MORE_QUALIFIED_TRAINING_DATA_REQUIRED": "可用于一日研究的完整记录还不够，已保存合格部分和具体缺口",
         "EXPOSURE_PROVIDER_REJECTED": "来源拒绝本次请求，请核对现有权限或稍后重试",
     }
     if reason in messages:
         return messages[reason]
-    if reason in {"ReadTimeout", "ConnectTimeout", "ConnectError", "HTTPStatusError", "ReadError"}:
+    if reason.startswith("HTTP_STATUS_") or reason in {
+        "ReadTimeout",
+        "ConnectTimeout",
+        "ConnectError",
+        "HTTPStatusError",
+        "ReadError",
+    }:
         return "来源暂时无法访问，已保存成果可在重试时复用"
     if "LIMIT" in reason or "BUDGET" in reason:
         return "达到本轮检查上限，已保存进度"
@@ -259,21 +267,28 @@ class FundMaterialsSyncService:
                 else "资料尚有未完成项；成功成果已保存，页面保留上一份完整资料"
             )
         )
-        peer_result = stages.get(STAGES[6], {}).get("result", {})
-        if peer_result.get("coverage"):
-            count = peer_result["coverage"]["fit_504"]
-            message += (
-                f"；参照基金已配齐 {count['rows']} 条历史记录（持平 {count['directions']['FLAT']} 条），尚未用于训练"
-            )
-        readiness = stages.get(STAGES[7], {}).get("result", {}).get("readiness", {})
-        if readiness.get("training_ready"):
-            message += "；已达到 002112 一日离线训练的数据条件，尚未训练或启用"
+        historical = [e for e in state["errors"] if e["stage"] in STAGES[6:8]]
+        current = [e for e in state["errors"] if e["stage"] not in STAGES[6:8]]
+        # 日常资料是否已发布与独立历史缺口分开；旧研究状态只留在后台版本化记录。
+        summary = {
+            "dailyUpdated": page_updated,
+            "historicalGapCount": len(historical),
+            "currentIssueCount": len(current),
+        }
+        if historical:
+            message += f"；历史资料仍有 {len(historical)} 项缺口"
         message += (
             f"；新增 {counts['created']}，更新 {counts['updated']}，复用 {counts['skipped']} 条记录或文件；"
             f"未完成 {counts['failed']} 项"
         )
         reporter(len(STAGES), len(STAGES), FUND, message)
-        return {"status": state["status"], "message": message, "errors": state["errors"], **counts}
+        return {
+            "status": state["status"],
+            "message": message,
+            "errors": state["errors"],
+            "result_summary": summary,
+            **counts,
+        }
 
 
 def schedule_if_due():

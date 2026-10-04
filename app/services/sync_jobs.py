@@ -60,17 +60,19 @@ FUND_INPUTS_JOB_TYPE = "FUND_INPUTS"
 _ALL_JOB_STAGES = (
     # SPX有早上08:00的观测边界，先取这一小份数据，避免被较长的全市场同步拖到截止后。
     (SPX_MANUAL_JOB_TYPE, "标普500"),
-    (FUND_NEWS_JOB_TYPE, "近期基金公告核验"),
-    # 资料更新内部已执行完整资料同步，批次不再单独重复抓取同一批资料。
-    (MARKET_FREE_DATA_COMPLETION_JOB_TYPE, "基金资料与市场数据更新"),
-    (FUND_MATERIALS_JOB_TYPE, "基金持仓与公司资料更新"),
+    # 先更新日常最关心的净值；批次内不在此重复计算指标，等基础资料完成后统一计算一次。
     (MARKET_NAV_INCREMENTAL_JOB_TYPE, "净值增量"),
-    # 等报告、行情和基金净值更新后再保存当时输入；单独留存失败不会阻断后续指标与预测。
-    (FUND_INPUTS_JOB_TYPE, "002112 分析资料更新与留存"),
+    # 预测读取分红等基础资料，因此这一步仍须在预测之前；内部已覆盖完整资料同步。
+    (MARKET_FREE_DATA_COMPLETION_JOB_TYPE, "基金资料与市场数据更新"),
     (STOCK_FEATURE_SNAPSHOT_JOB_TYPE, "历史指标计算"),
     # 预测使用前面已同步净值；独立校验输入完整性，来源失败时不能默认算作预测成功。
     (SIMULATION_FEE_JOB_TYPE, "模拟费率"),
     (MULTI_PREDICTION_JOB_TYPE, "全部关注多周期预测、综合建议与到期核验"),
+    # 公告、持仓公司资料及试点输入尚未用于正式预测，后置以免长时间补齐阻挡净值和预测。
+    (FUND_NEWS_JOB_TYPE, "近期基金公告核验"),
+    (FUND_MATERIALS_JOB_TYPE, "基金持仓与公司资料更新"),
+    # 等报告、行情和基金净值更新后再留存；仍检查真实取得时间，不能因后置而放宽截止规则。
+    (FUND_INPUTS_JOB_TYPE, "002112 分析资料更新与留存"),
 )
 _ACTIVE_STATUSES = frozenset({"QUEUED", "RUNNING"})
 _SYNC_TYPES_BY_JOB_TYPE = {
@@ -83,8 +85,8 @@ _SYNC_TYPES_BY_JOB_TYPE = {
 def _feature_completion_message(summary: StockFeatureBuildSummary) -> str:
     """返回可展示的特征构建结果摘要，不混淆为预测或回测结论。"""
     return (
-        "历史指标计算完成："
-        f"处理 {summary.attempted_fund_count} 只，新建 {summary.created_count}，"
+        ("历史指标部分未完成：" if summary.issues else "历史指标计算完成：")
+        + f"处理 {summary.attempted_fund_count} 只，新建 {summary.created_count}，"
         f"更新 {summary.updated_count}，未变化 {summary.skipped_count}"
     )
 
@@ -115,6 +117,8 @@ class SyncJobSnapshot:
     error_message: str | None
     started_at: datetime | None
     finished_at: datetime | None
+    # 可选业务摘要；旧持久记录缺失时按未知处理，不推断为 0 或成功。
+    result_summary: dict | None = None
 
 
 SyncServiceFactory = Callable[[], TushareFundSyncService]
@@ -306,14 +310,14 @@ class LocalSyncJobManager:
         self._replace_job(job_id, status="RUNNING", started_at=datetime.now(UTC))
         runners = (
             self._run_spx_manual,
-            self._run_fund_news,
-            self._run_market_free_data_completion,
-            self._run_fund_materials,
             lambda child_id: self._run_market_nav_incremental(child_id, build_features=False),
-            self._run_fund_inputs,
+            self._run_market_free_data_completion,
             self._run_stock_feature_snapshots,
             self._run_simulation_fees,
             self._run_multi_predictions,
+            self._run_fund_news,
+            self._run_fund_materials,
+            self._run_fund_inputs,
         )
         try:
             child_ids = self._batch_child_ids[job_id]
@@ -343,8 +347,7 @@ class LocalSyncJobManager:
                 current_fund_code=None,
                 error_code="SYNC_ALL_INCOMPLETE" if failed_names else None,
                 error_message=(
-                    "未完成：" + "、".join(failed_names)
-                    + "。请检查结果后重试；分析资料留存可重新执行一键同步。"
+                    "未完成：" + "、".join(failed_names) + "。请检查结果后重试；分析资料留存可重新执行一键同步。"
                 )
                 if failed_names
                 else None,
@@ -478,6 +481,7 @@ class LocalSyncJobManager:
                 job_id,
                 status=result["status"],
                 progress_message=result["message"],
+                result_summary=result.get("result_summary"),
                 created_count=result["created"],
                 updated_count=result["updated"],
                 skipped_count=result["skipped"],
@@ -501,8 +505,13 @@ class LocalSyncJobManager:
         from app.services.fund_exposure_runtime import synchronize_inputs
 
         self._replace_job(
-            job_id, status="RUNNING", started_at=datetime.now(UTC), fund_codes=("002112",),
-            current_fund_code="002112", progress_total=4, progress_message="正在更新 002112 分析资料",
+            job_id,
+            status="RUNNING",
+            started_at=datetime.now(UTC),
+            fund_codes=("002112",),
+            current_fund_code="002112",
+            progress_total=4,
+            progress_message="正在更新 002112 分析资料",
         )
         try:
             result = (self._input_synchronizer or synchronize_inputs)(
@@ -512,10 +521,15 @@ class LocalSyncJobManager:
             )
             complete = result["status"] == "SUCCEEDED"
             self._replace_job(
-                job_id, status=result["status"], current_fund_code=None,
-                progress_message=result["message"], created_count=result["created"], skipped_count=result["skipped"],
+                job_id,
+                status=result["status"],
+                current_fund_code=None,
+                progress_message=result["message"],
+                created_count=result["created"],
+                skipped_count=result["skipped"],
                 error_code=None if complete else "FUND_INPUTS_INCOMPLETE",
-                error_message=None if complete else result["message"], finished_at=datetime.now(UTC),
+                error_message=None if complete else result["message"],
+                finished_at=datetime.now(UTC),
             )
         except Exception:
             logger.exception("sync_jobs._run_fund_inputs >>> 002112 分析资料更新异常, job_id=%s", job_id)
@@ -621,7 +635,7 @@ class LocalSyncJobManager:
         self._replace_job(job_id, status="RUNNING", started_at=datetime.now(UTC), progress_message="正在读取已同步净值")
         try:
             feature_summary = self._build_feature_snapshots(job_id)
-            if feature_summary.status != "COMPLETED":
+            if feature_summary.status == "SOURCE_NOT_READY":
                 self._fail_job(
                     job_id,
                     "FEATURE_SOURCE_NOT_READY",
@@ -830,13 +844,25 @@ class LocalSyncJobManager:
             )
             status = (
                 "SUCCEEDED"
-                if not result.issues
+                if not result.issues and not result.followup_issues
                 else "PARTIAL_SUCCESS"
                 if result.created + result.existing
                 else "FAILED"
             )
+            states = {
+                state: sum(item["state"] == state for item in result.items)
+                for state in ("COMPLETED", "WAITING", "UNSUPPORTED", "ERROR")
+            }
+            summary = {
+                "counts": states,
+                "items": list(result.items),
+                "savedResults": list(result.saved_results),
+                "followupIssues": list(result.followup_issues),
+            }
+            all_issues = result.issues + result.followup_issues
             self._replace_job(
                 job_id,
+                result_summary=summary,
                 status=status,
                 requested_nav_date=result.target_date,
                 progress_current=result.total,
@@ -849,9 +875,11 @@ class LocalSyncJobManager:
                 progress_message=(
                     f"一日、五日、二十日和半年共处理 {result.total} 个基金周期项，新生成 {result.created}，"
                     f"已有 {result.existing}，暂不支持 {len(result.unsupported)}，待完成 {len(result.issues)}"
+                    + (f"（等待资料 {states['WAITING']}，执行异常 {states['ERROR']}）" if result.items else "")
+                    + (f"；另有 {len(result.followup_issues)} 项收尾待处理" if result.followup_issues else "")
                 ),
-                error_code="PREDICTION_INCOMPLETE" if result.issues else None,
-                error_message="；".join(result.issues[:100]) if result.issues else None,
+                error_code="PREDICTION_INCOMPLETE" if all_issues else None,
+                error_message="；".join(all_issues[:100]) if all_issues else None,
                 finished_at=datetime.now(UTC),
             )
             logger.info(
@@ -966,8 +994,12 @@ class LocalSyncJobManager:
             current_fund_code=None,
             progress_message=completion_message
             if not outcome.issues
-            else "净值同步尚有未完成项，成功数据已保存；待处理项目将按状态继续补拉",
-            error_code="NAV_SYNC_INCOMPLETE" if outcome.issues else None,
+            else "部分资料尚未完成，成功数据已保存；请按具体原因重试",
+            error_code=(
+                "NAV_SYNC_INCOMPLETE" if outcome.sync_type == "MARKET_NAV_INCREMENTAL" else "DATA_SYNC_INCOMPLETE"
+            )
+            if outcome.issues
+            else None,
             error_message="；".join(outcome.issues[:100]) or None,
             sync_run_id=outcome.sync_run_id,
             fetched_count=outcome.fetched_count,
@@ -982,9 +1014,11 @@ class LocalSyncJobManager:
         snapshot = self._required_job(job_id)
         self._replace_job(
             job_id,
-            status="SUCCEEDED",
+            status="SUCCEEDED" if not summary.issues else summary.status,
             progress_current=snapshot.progress_total,
             current_fund_code=None,
+            error_code="FEATURE_BUILD_INCOMPLETE" if summary.issues else None,
+            error_message="；".join(summary.issues) or None,
             progress_message=_feature_completion_message(summary),
             sync_run_id=summary.source_sync_run_id,
             fetched_count=summary.attempted_fund_count,

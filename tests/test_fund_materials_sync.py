@@ -140,16 +140,21 @@ def test_real_materials_pipeline_keeps_one_click_running_until_peer_stage_finish
         assert entered.wait(3)
         assert manager.get_job(parent.job_id).status == "RUNNING"
         assert manager.get_latest_job("FUND_MATERIALS").status == "RUNNING"
-        assert "MARKET_NAV_INCREMENTAL" not in calls
+        # 净值与预测已先完成；资料补齐期间批次仍在运行，最后的分析资料留存尚未执行。
+        assert "MARKET_NAV_INCREMENTAL" in calls
+        assert "MULTI_PREDICTIONS" in calls
+        assert "FUND_INPUTS" not in calls
         with pytest.raises(SyncJobInProgressError):
             manager.start_fund_materials("002112")
         release.set()
         assert wait_finished(manager, parent.job_id).status == "PARTIAL_SUCCESS"
         assert manager.get_latest_job("FUND_MATERIALS").status == "PARTIAL_SUCCESS"
-        assert "MULTI_PREDICTIONS" in calls
+        assert "FUND_INPUTS" in calls
     finally:
         release.set()
         manager.close()
+        # 先等后台任务退出再撤销测试替身，避免断言失败后继续调用真实资料来源。
+        manager._executor.shutdown(wait=True)
 
 
 @pytest.mark.parametrize("code", [None, "", " ", "008888", "002112.OF"])
@@ -187,7 +192,15 @@ def test_manager_duplicate_and_restart_restore_interruption(tmp_path):
         def sync(self, code, *, progress_reporter):
             entered.set()
             assert release.wait(5)
-            return {"status": "SUCCEEDED", "message": "完成", "created": 0, "updated": 0, "skipped": 1, "errors": []}
+            return {
+                "status": "SUCCEEDED",
+                "message": "完成",
+                "created": 0,
+                "updated": 0,
+                "skipped": 1,
+                "errors": [],
+                "result_summary": {"dailyUpdated": True, "historicalGapCount": 0, "currentIssueCount": 0},
+            }
 
     path = tmp_path / "jobs.json"
     manager = LocalSyncJobManager(materials_service_factory=Service, state_path=path)
@@ -207,6 +220,7 @@ def test_manager_duplicate_and_restart_restore_interruption(tmp_path):
         assert wait_finished(manager, job.job_id).status == "SUCCEEDED"
         restored = LocalSyncJobManager(state_path=path)
         assert restored.get_latest_job("FUND_MATERIALS").status == "SUCCEEDED"
+        assert restored.get_latest_job("FUND_MATERIALS").result_summary["dailyUpdated"] is True
         restored.close()
     finally:
         release.set()

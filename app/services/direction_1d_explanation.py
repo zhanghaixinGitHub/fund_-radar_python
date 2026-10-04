@@ -15,7 +15,7 @@ from app.services.direction_1d_inference import load_model
 from app.services.direction_1d_protocol import FEATURES, canonical, digest, score
 
 
-def explain_original(body, model_loader):
+def explain_original(body, model_loader, *, include_reasoning=False):
     """将每项标准化输入乘以原系数，保留支持与反对作用，不把分数解释为概率。"""
     source = body["input"]
     if source.get("fund_code") != body["fund_code"] or digest(source) != body["input_hash"]:
@@ -33,9 +33,12 @@ def explain_original(body, model_loader):
         restored = classification["score"] if classification else score(model, values)
         original = branch["score"]
         expected = classification["direction"] if classification else "UP" if restored > 0.5 else "NON_UP"
-        if classification and (set(branch.get("class_scores", {})) != set(three.CLASSES)
-                              or any(abs(branch["class_scores"][key] - classification["class_scores"][key]) > 1e-12
-                                     for key in three.CLASSES)):
+        if classification and (
+            set(branch.get("class_scores", {})) != set(three.CLASSES)
+            or any(
+                abs(branch["class_scores"][key] - classification["class_scores"][key]) > 1e-12 for key in three.CLASSES
+            )
+        ):
             raise ValueError("PREDICTION_RESTORE_MISMATCH")
         if (
             not isinstance(original, (int, float))
@@ -63,6 +66,26 @@ def explain_original(body, model_loader):
         ]
         if any(not math.isfinite(item["contribution"]) for item in impacts):
             raise ValueError("INVALID_CONTRIBUTION")
+        if include_reasoning:
+            # 对照仅替换一项输入为当时保存的参考值，其余六项保持原值；不读取新行情或重训。
+            # 这是解释原判断的假设计算，不是新的预测，也不是可实际发生的市场情景。
+            reference_direction = classification["runner"] if classification else "NON_UP" if expected == "UP" else "UP"
+            for i, item in enumerate(impacts):
+                reference_values = list(values)
+                reference_values[i] = model["mean"][i]
+                direction_at_reference = (
+                    three.predict(model, reference_values)["direction"]
+                    if classification
+                    else "UP"
+                    if score(model, reference_values) > 0.5
+                    else "NON_UP"
+                )
+                item["reasoning"] = {
+                    "referenceValue": model["mean"][i],
+                    "relativeWeight": weights[i] if classification or expected == "UP" else -weights[i],
+                    "comparisonDirection": reference_direction,
+                    "directionAtReference": direction_at_reference,
+                }
         branches.append(
             {
                 "branchId": branch["branch_id"],
@@ -85,7 +108,7 @@ def explain_original(body, model_loader):
     }
 
 
-def read_explanation(job_id: UUID):
+def read_explanation(job_id: UUID, *, include_reasoning=False):
     """仅接纳已成功留档的作业；一日数据到期、原文损坏或模型版本不符时拒绝还原。"""
     job = repo.get_job(job_id)
     if not job or job["kind"] != "FORECAST" or job["state"] != "SUCCEEDED":
@@ -109,5 +132,5 @@ def read_explanation(job_id: UUID):
             raise ValueError("MODEL_REGISTRY_MISMATCH")
         return load_model(row)
 
-    result = explain_original(body, original_model)
+    result = explain_original(body, original_model, include_reasoning=include_reasoning)
     return json.loads(canonical(result | {"contentHash": content_hash}))

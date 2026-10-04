@@ -88,21 +88,33 @@ class TushareFreeDataCompletionService:
         market_reference_service: MarketReferenceSyncService | None = None
         try:
             _report(progress_reporter, 0, 2, None, "正在补齐基金档案、净值、经理、份额和分红")
-            fund_service = self._fund_service_factory()
-            fund_result = fund_service.sync_market_details(
-                history_end_date=target_date,
-                progress_reporter=progress_reporter,
-            )
-            self._link_market_detail_runs(parent_sync_run_id, fund_result)
-
+            outcomes, stage_issues = [], []
+            try:
+                fund_service = self._fund_service_factory()
+                fund_result = fund_service.sync_market_details(
+                    history_end_date=target_date,
+                    progress_reporter=progress_reporter,
+                )
+                outcomes.extend(fund_result.outcomes)
+                stage_issues.extend(fund_result.overall_outcome.issues)
+                self._link_market_detail_runs(parent_sync_run_id, fund_result)
+            except Exception:
+                logger.exception("tushare_free_data_completion.sync >>> 基金资料阶段未完成 run=%s", parent_sync_run_id)
+                stage_issues.append("基金资料：执行未完成，成功成果保留")
             _report(progress_reporter, 1, 2, None, "正在补齐场内基金与市场参考指数数据")
-            market_reference_service = self._market_reference_service_factory()
-            market_result = market_reference_service.sync_all(
-                parent_sync_run_id=parent_sync_run_id,
-                as_of_date=target_date,
-                progress_reporter=progress_reporter,
-            )
-            all_outcomes = fund_result.outcomes + market_result.outcomes
+            try:
+                market_reference_service = self._market_reference_service_factory()
+                market_result = market_reference_service.sync_all(
+                    parent_sync_run_id=parent_sync_run_id,
+                    as_of_date=target_date,
+                    progress_reporter=progress_reporter,
+                )
+                outcomes.extend(market_result.outcomes)
+            except Exception:
+                logger.exception("tushare_free_data_completion.sync >>> 市场资料阶段未完成 run=%s", parent_sync_run_id)
+                stage_issues.append("市场参考资料：执行未完成，成功成果保留")
+            all_outcomes = tuple(outcomes)
+            issues = tuple(dict.fromkeys([*stage_issues, *(i for outcome in outcomes for i in outcome.issues)]))
             all_stats = _combine_write_stats(all_outcomes)
             overall_outcome = SyncOutcome(
                 sync_run_id=parent_sync_run_id,
@@ -112,6 +124,12 @@ class TushareFreeDataCompletionService:
                 created_count=all_stats.created_count,
                 updated_count=all_stats.updated_count,
                 skipped_count=all_stats.skipped_count,
+                status="SUCCEEDED"
+                if not issues
+                else "PARTIAL_SUCCESS"
+                if any(o.status != "FAILED" for o in outcomes)
+                else "FAILED",
+                issues=issues,
             )
             with Session(self._engine) as session, session.begin():
                 complete_sync_run(
@@ -120,8 +138,10 @@ class TushareFreeDataCompletionService:
                     sync_run_id=parent_sync_run_id,
                     fetched_count=overall_outcome.fetched_count,
                     write_stats=all_stats,
+                    status=overall_outcome.status,
+                    error_summary="；".join(issues)[:512] or None,
                 )
-            _report(progress_reporter, 2, 2, None, "基金资料与市场数据更新完成")
+            _report(progress_reporter, 2, 2, None, "基金资料与市场数据检查结束")
             logger.info(
                 "tushare_free_data_completion.sync >>> completed parent_run_id=%s fetched=%s created=%s "
                 "updated=%s skipped=%s",
@@ -138,11 +158,9 @@ class TushareFreeDataCompletionService:
                     session,
                     source_id=source_id,
                     sync_run_id=parent_sync_run_id,
-                    error_summary=f"{type(error).__name__}: {str(error)}",
+                    error_summary=f"{type(error).__name__}: 资料编排未完成",
                 )
-            logger.exception(
-                "tushare_free_data_completion.sync >>> failed parent_run_id=%s", parent_sync_run_id
-            )
+            logger.exception("tushare_free_data_completion.sync >>> failed parent_run_id=%s", parent_sync_run_id)
             raise
         finally:
             if fund_service is not None:

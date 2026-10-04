@@ -88,7 +88,15 @@ def sync_reports(check_id, progress):
                         previous = old["documents"].get(entry["ID"])
                         if previous:
                             documents[entry["ID"]] = {**previous, "recheck_status": "FAILED"}
-                        errors.append({"fund_code": code, "article_id": entry["ID"], "reason": safe_error(exc)})
+                        errors.append(
+                            {
+                                "fund_code": code,
+                                "article_id": entry["ID"],
+                                "reason": safe_error(exc),
+                                "report_end": entry["report_end"],
+                                "report_type": entry["report_type"],
+                            }
+                        )
                 listed = {e["ID"] for e in entries}
                 disappeared = {
                     key: {**doc, "listing_status": "NOT_LISTED_ON_RECHECK"}
@@ -102,7 +110,23 @@ def sync_reports(check_id, progress):
                 present = {(d["report_end"], d["report_type"]) for d in documents.values()}
                 missing = [list(p) for p in expected_periods(code) if p not in present]
                 if missing:
-                    errors.append({"fund_code": code, "reason": "REPORT_PERIODS_MISSING", "periods": missing})
+                    # 同一期的下载/解析失败已经是一个缺口，补充关联原因而不重复计数；原日志仍保留。
+                    for period, kind in missing:
+                        cause = next(
+                            (e for e in errors if e.get("report_end") == period and e.get("report_type") == kind), None
+                        )
+                        if cause is not None:
+                            cause["related_reasons"] = ["REPORT_PERIODS_MISSING"]
+                        else:
+                            errors.append(
+                                {
+                                    "fund_code": code,
+                                    "reason": "REPORT_PERIODS_MISSING",
+                                    "report_end": period,
+                                    "report_type": kind,
+                                    "periods": [[period, kind]],
+                                }
+                            )
                 manifest = {
                     "fund_code": code,
                     "at": now().isoformat(),
@@ -171,12 +195,13 @@ def nav_history():
 class QuoteDays:
     """按日加载已保存的全市场原文；有限缓存，不复制或重下全部股票行情。
 
-    SH/SZ 沿用原始核验器；BJ/HK 的历史身份或报价口径尚未获本方案核验，不能借用
-    其他市场价格。缺失原文件才调用已授权日线接口，原文件存在但缺某股时另记缺口。
+    SH/SZ 沿用原始核验器；新资料核对可显式传入独立核验的BJ历史版本。
+    默认不加载新BJ资料，已冻结研究保持原范围；HK仍不支持。缺失原文件才调用已授权日线接口，原文件存在但缺某股时另记缺口。
     """
 
-    def __init__(self, *, allow_fetch=True):
+    def __init__(self, *, allow_fetch=True, verified_bj_history=None):
         self.allow_fetch = allow_fetch
+        self.verified_bj_history = verified_bj_history or {}
         self.index, self.provider = {}, None
         self.cache = OrderedDict()
         source = permission()
@@ -215,18 +240,31 @@ class QuoteDays:
             for item in data["items"]
             if item[0].endswith((".SH", ".SZ"))
         }
+        additions = self.verified_bj_history.get(day, {})
+        if additions:
+            rows.update({code: value["row"] for code, value in additions.items()})
+            sources = {code: value["receipt"]["sha256"] for code, value in additions.items()}
+            receipt = {
+                **receipt,
+                "sha256": digest({"sh_sz": receipt["sha256"], "bj": sources}),
+                "sh_sz_receipt": receipt,
+                "bj_sources": additions,
+                "training_eligible": False,
+            }
         self.index[day] = {"raw_path": str(rawpath), "receipt": receipt, "stock_rows": len(rows)}
         return {"rows": rows, "receipt": receipt}
 
 
-def build_coverage(progress):
+def build_coverage(progress, *, retry_bj=True):
     """按相同截止时刻拼齐输入，只生成独立检查资料，不拟合、登记或启用模型。"""
     history = nav_history()
     samples = build_samples(history)
     navs = {f["fund_code"]: {r["date"]: r for r in f["rows"]} for f in history["funds"]}
     sessions, _ = calendar()
     positions = {str(d): i for i, d in enumerate(sessions)}
-    quote_days = QuoteDays()
+    from app.services.historical_security_quotes import load_history
+
+    quote_days = QuoteDays(verified_bj_history=load_history())
     indices = {code: read(ROOT / "indices" / (code + ".json")) for code in INDICES}
     reports = {}
     for code in PEERS:
@@ -301,6 +339,8 @@ def build_coverage(progress):
         }
 
     gap_audit = explain_quote_gaps(gaps, progress)
+    if retry_bj and any(v.get("received_dates", 0) for v in gap_audit["stocks"].values()):
+        return build_coverage(progress, retry_bj=False)
     result = {
         "at": now().isoformat(),
         "kind": "PEER_DATA_COVERAGE_ONLY_NOT_A_TRAINING_RUN",
@@ -318,7 +358,7 @@ def build_coverage(progress):
             "HISTORICAL_AVAILABILITY_RECONSTRUCTED",
             "COHORT_COMPATIBILITY_NOT_APPROVED",
             "PUBLIC_REPRINT_NOT_ISSUER_PDF",
-            "BJ_HK_QUOTES_NOT_VERIFIED",
+            "ONLY_13_BJ_IDENTITIES_VERIFIED_HK_NOT_SUPPORTED",
         ],
     }
     versioned_save(STORE / "quote-index.json", {"days": quote_days.index})
@@ -350,19 +390,40 @@ def explain_quote_gaps(gaps, progress):
     仅询问本次报告实际涉及的缺失股票和日期范围。证据不全、空返回和未经核验的
     市场仍为未完成；已确认未上市或全天停牌的记录排除出候选资料，但不反复拉行情。
     """
+    from app.services.historical_security_quotes import acquire_history, security_absence
+
     provider, details, unresolved = None, {}, []
+    daily_provider = None
     for i, (code, dates) in enumerate(sorted(gaps.items())):
         dates = sorted(dates)
         progress(i, len(gaps), code, f"核对 {code} 缺报价的原因 {i + 1}/{len(gaps)}")
-        if not code.endswith((".SH", ".SZ")):
+        if not code.endswith((".SH", ".SZ", ".BJ")):
             details[code] = {"dates": dates, "status": "MARKET_NOT_VERIFIED"}
             unresolved.append(code)
             continue
         try:
+            if code.endswith(".BJ"):
+                daily_provider = daily_provider or Provider()
+                details[code] = acquire_history(code, dates, daily_provider)
+                if details[code]["unresolved_dates"]:
+                    unresolved.append(code)
+                continue
             if provider is None:
                 provider = SupplementProvider()
                 provider.scope = {**provider.scope, "maximum_new_requests": 160}
-            basic, br = provider.query("stock_basic", {"ts_code": code}, "ts_code,list_date,delist_date")
+            basics, basic_receipts = [], []
+            for listing_status in ("L", "D", "P"):
+                basic, br = provider.query(
+                    "stock_basic", {"ts_code": code, "list_status": listing_status}, "ts_code,list_date,delist_date"
+                )
+                data = basic["data"]
+                values = [dict(zip(data["fields"], r, strict=True)) for r in data["items"]]
+                if any(r.get("ts_code") != code for r in values):
+                    raise ValueError("REPORT_QUOTE_CONTEXT_IDENTITY_MISMATCH")
+                basics.extend(values)
+                basic_receipts.append(br)
+                if values:
+                    break
             suspended, sr = provider.query(
                 "suspend_d",
                 {"ts_code": code, "start_date": dates[0].replace("-", ""), "end_date": dates[-1].replace("-", "")},
@@ -375,22 +436,21 @@ def explain_quote_gaps(gaps, progress):
                     raise ValueError("REPORT_QUOTE_CONTEXT_IDENTITY_MISMATCH")
                 return rows
 
-            basics, pauses = source_rows(basic), source_rows(suspended)
-            listed = min((str(r["list_date"]) for r in basics if r.get("list_date")), default="")
+            pauses = source_rows(suspended)
             full_pause = {
                 str(r["trade_date"]) for r in pauses if r.get("suspend_type") == "S" and not r.get("suspend_timing")
             }
             explained = {
-                d: "BEFORE_LISTING" if listed and d.replace("-", "") < listed else "FULL_DAY_SUSPENSION"
+                d: security_absence(basics, d) or "FULL_DAY_SUSPENSION"
                 for d in dates
-                if (listed and d.replace("-", "") < listed) or d.replace("-", "") in full_pause
+                if security_absence(basics, d) or d.replace("-", "") in full_pause
             }
             missing = [d for d in dates if d not in explained]
             details[code] = {
                 "dates": dates,
                 "explained": explained,
                 "unresolved_dates": missing,
-                "basic_receipt": br,
+                "basic_receipts": basic_receipts,
                 "suspension_receipt": sr,
                 "status": "UNRESOLVED" if missing else "KNOWN_NO_QUOTE",
             }
@@ -399,7 +459,11 @@ def explain_quote_gaps(gaps, progress):
         except Exception as exc:
             details[code] = {"dates": dates, "status": "FETCH_FAILED", "reason": safe_error(exc)}
             unresolved.append(code)
-    audit = {"stocks": details, "unresolved_stocks": unresolved, "new_requests": provider.count if provider else 0}
+    audit = {
+        "stocks": details,
+        "unresolved_stocks": unresolved,
+        "new_requests": (provider.count if provider else 0) + (daily_provider.count if daily_provider else 0),
+    }
     versioned_save(STORE / "quote-gap-audit.json", audit)
     return audit
 

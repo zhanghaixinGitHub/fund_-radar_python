@@ -133,8 +133,12 @@ def get_latest_internal_fund_materials():
     return _to_internal_sync_job_status(snapshot) if snapshot else None
 
 
-@router.post("/sync-jobs/fund-news", response_model=InternalSyncJobStatus, status_code=202,
-             dependencies=[Depends(require_service_token)])
+@router.post(
+    "/sync-jobs/fund-news",
+    response_model=InternalSyncJobStatus,
+    status_code=202,
+    dependencies=[Depends(require_service_token)],
+)
 def start_internal_fund_news(fund_code: Annotated[str, Query(alias="fundCode", pattern=r"^002112$")]):
     try:
         return _to_internal_sync_job_status(get_sync_job_manager().start_fund_news(fund_code))
@@ -142,8 +146,11 @@ def start_internal_fund_news(fund_code: Annotated[str, Query(alias="fundCode", p
         raise HTTPException(409, "已有同步任务正在执行。") from error
 
 
-@router.get("/sync-jobs/fund-news/latest", response_model=InternalSyncJobStatus | None,
-            dependencies=[Depends(require_service_token)])
+@router.get(
+    "/sync-jobs/fund-news/latest",
+    response_model=InternalSyncJobStatus | None,
+    dependencies=[Depends(require_service_token)],
+)
 def get_latest_internal_fund_news():
     snapshot = get_sync_job_manager().get_latest_job(FUND_NEWS_JOB_TYPE)
     return _to_internal_sync_job_status(snapshot) if snapshot else None
@@ -527,6 +534,7 @@ def _to_internal_sync_job_status(snapshot: SyncJobSnapshot) -> InternalSyncJobSt
         error_message=snapshot.error_message,
         started_at=snapshot.started_at,
         finished_at=snapshot.finished_at,
+        result_summary=snapshot.result_summary,
     )
 
 

@@ -28,9 +28,11 @@ def published_quote_end(sessions, checked_at):
     到时后来源仍返回空值必须报缺口，不能借此无限延后或冒充成功。
     """
     checked_at = checked_at.astimezone(ZONE)
-    eligible = [day for day in sessions if day < checked_at.date() or (
-        day == checked_at.date() and checked_at.time() >= day_time(17)
-    )]
+    eligible = [
+        day
+        for day in sessions
+        if day < checked_at.date() or (day == checked_at.date() and checked_at.time() >= day_time(17))
+    ]
     if not eligible or checked_at.date().year > sessions[-1].year:
         raise ValueError("QUOTE_CALENDAR_UNAVAILABLE")
     return max(eligible)
@@ -332,6 +334,8 @@ def acquire_quotes(*, incremental=False):
 
 def safe_error(exc):
     """只记录本模块定义的错误码；不把 HTTP 请求和配置带入日志。"""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP_STATUS_{exc.response.status_code}"
     return (
         str(exc)
         if isinstance(exc, ValueError) and str(exc).startswith(("EXPOSURE_", "STOCK_BREADTH_", "MATERIAL_", "REPORT_"))

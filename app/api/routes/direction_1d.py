@@ -3,7 +3,7 @@
 from datetime import datetime, time, timedelta
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import text
 
 from app.api.dependencies import require_service_token
@@ -78,6 +78,17 @@ def prediction_evidence(job_id: UUID):
     try:
         return read_explanation(job_id)
     except (ValueError, KeyError, TypeError, OSError) as error:
+        raise HTTPException(409, "PREDICTION_EVIDENCE_UNAVAILABLE") from error
+
+
+@router.post("/forecast-jobs/{job_id}/narrative")
+def prediction_narrative(job_id: UUID, fund_code: str, x_trace_id: str = Header(default="")):
+    """原作业身份由 Java 授权后传入；新正文的外部生成仅通过 POST 触发。"""
+    from app.services.prediction_narrative import ensure
+
+    try:
+        return ensure("daily", job_id, fund_code, x_trace_id[:128])
+    except (ValueError, KeyError, TypeError) as error:
         raise HTTPException(409, "PREDICTION_EVIDENCE_UNAVAILABLE") from error
 
 

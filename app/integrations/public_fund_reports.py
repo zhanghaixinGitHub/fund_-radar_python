@@ -22,7 +22,7 @@ from app.services.fund_materials_store import versioned_save
 
 CATALOG_URL = "https://api.fund.eastmoney.com/f10/JJGG"
 BODY_URL = "https://np-cnotice-fund.eastmoney.com/api/content/ann"
-PARSER = "PUBLIC_REPRINT_HOLDINGS_V3"
+PARSER = "PUBLIC_REPRINT_HOLDINGS_V4"
 PEERS = {
     "002170": "东吴移动互联",
     "004237": "中欧新蓝筹",

@@ -1,0 +1,142 @@
+{
+  "version": "BSE_HISTORY_IDENTITY_13_V1",
+  "scope": "ONLY_13_VERIFIED_HISTORICAL_SECURITIES",
+  "identity_source": "https://tushare.pro/document/2?doc_id=375",
+  "switch_sources": [
+    "https://www.bse.cn/important_news/200025603.html",
+    "https://www.bse.cn/important_news/200026735.html"
+  ],
+  "training_eligible": false,
+  "securities": [
+    {
+      "historical_code": "430047.BJ",
+      "provider_code": "920047.BJ",
+      "name": "诺思兰德",
+      "source_list_date": "20201124",
+      "valid_from": "2021-11-15",
+      "switch_date": "2025-10-09",
+      "mapping_sha256": "1df80beb0734f0368516c7aec04fe4a2420c718982d7ec1b2d9b0ca19a3a2901",
+      "mapping_checked_at": "2026-09-30T19:06:39.112552+08:00"
+    },
+    {
+      "historical_code": "830809.BJ",
+      "provider_code": "920809.BJ",
+      "name": "安达科技",
+      "source_list_date": "20230323",
+      "valid_from": "2023-03-23",
+      "switch_date": "2025-10-09",
+      "mapping_sha256": "31cc936426b25d0abc4fc45db7f3fd2da56ca6f54ff6e4d1a20a9e5c9ff33222",
+      "mapping_checked_at": "2026-09-30T19:06:40.134256+08:00"
+    },
+    {
+      "historical_code": "831370.BJ",
+      "provider_code": "920370.BJ",
+      "name": "新安洁",
+      "source_list_date": "20200727",
+      "valid_from": "2021-11-15",
+      "switch_date": "2025-10-09",
+      "mapping_sha256": "8db55b745f67a9569c4ea41faf84d7b6c8e76fc52833ec7f3f68c657fbd8388e",
+      "mapping_checked_at": "2026-09-30T19:06:41.157941+08:00"
+    },
+    {
+      "historical_code": "831445.BJ",
+      "provider_code": "920445.BJ",
+      "name": "龙竹科技",
+      "source_list_date": "20200727",
+      "valid_from": "2021-11-15",
+      "switch_date": "2025-05-06",
+      "mapping_sha256": "e1a7714887f6468569ebadc8164e287cc08556d1e332cbf3cced74bbaa7f4557",
+      "mapping_checked_at": "2026-09-30T19:06:42.178342+08:00"
+    },
+    {
+      "historical_code": "833523.BJ",
+      "provider_code": "920523.BJ",
+      "name": "德瑞锂电",
+      "source_list_date": "20210603",
+      "valid_from": "2021-11-15",
+      "switch_date": "2025-10-09",
+      "mapping_sha256": "3ef0706be13e1e9b3e860b0c39960aae98a22733bee08982ffe87740638df089",
+      "mapping_checked_at": "2026-09-30T19:06:43.200259+08:00"
+    },
+    {
+      "historical_code": "833819.BJ",
+      "provider_code": "920819.BJ",
+      "name": "颖泰生物",
+      "source_list_date": "20200727",
+      "valid_from": "2021-11-15",
+      "switch_date": "2025-05-06",
+      "mapping_sha256": "14bd637e233f8614b65c99c371c510fe5eb0bff0130e77e839b3066d9e2e83af",
+      "mapping_checked_at": "2026-09-30T19:06:44.220209+08:00"
+    },
+    {
+      "historical_code": "834261.BJ",
+      "provider_code": "920261.BJ",
+      "name": "一诺威",
+      "source_list_date": "20230403",
+      "valid_from": "2023-04-03",
+      "switch_date": "2025-10-09",
+      "mapping_sha256": "f2da12f93b176a58df63f260dc1f11df4df8d31c68426dc3f2c8970b59daba96",
+      "mapping_checked_at": "2026-09-30T19:06:45.246435+08:00"
+    },
+    {
+      "historical_code": "834599.BJ",
+      "provider_code": "920599.BJ",
+      "name": "同力股份",
+      "source_list_date": "20210222",
+      "valid_from": "2021-11-15",
+      "switch_date": "2025-10-09",
+      "mapping_sha256": "6286c09b35cb1620c776c29ff5bea7aff9a6408e6e6e0ec4a14d79ddc9d0475b",
+      "mapping_checked_at": "2026-09-30T19:06:46.268474+08:00"
+    },
+    {
+      "historical_code": "835185.BJ",
+      "provider_code": "920185.BJ",
+      "name": "贝特瑞",
+      "source_list_date": "20200727",
+      "valid_from": "2021-11-15",
+      "switch_date": "2025-10-09",
+      "mapping_sha256": "19eb0d7be97c1e840d1b0e4de210d4c362124f2507410a7c0b32c40973caec45",
+      "mapping_checked_at": "2026-09-30T19:06:47.341821+08:00"
+    },
+    {
+      "historical_code": "836077.BJ",
+      "provider_code": "920077.BJ",
+      "name": "吉林碳谷",
+      "source_list_date": "20210831",
+      "valid_from": "2021-11-15",
+      "switch_date": "2025-10-09",
+      "mapping_sha256": "6b8fc403aaf09c4466ccbb79cc20e5a0e2da2991903aef0a816154ab40515034",
+      "mapping_checked_at": "2026-09-30T19:06:48.362046+08:00"
+    },
+    {
+      "historical_code": "836239.BJ",
+      "provider_code": "920239.BJ",
+      "name": "长虹能源",
+      "source_list_date": "20210209",
+      "valid_from": "2021-11-15",
+      "switch_date": "2025-10-09",
+      "mapping_sha256": "f852515a8c845ff5cf56bb562a54074e2f5ea898d40ff7def1eb78e6b217f393",
+      "mapping_checked_at": "2026-09-30T19:06:49.389431+08:00"
+    },
+    {
+      "historical_code": "837212.BJ",
+      "provider_code": "920212.BJ",
+      "name": "智新电子",
+      "source_list_date": "20210608",
+      "valid_from": "2021-11-15",
+      "switch_date": "2025-10-09",
+      "mapping_sha256": "d39ac72c886a817f24b63900c2a19e1c8c5d5d8e127a70dadf290b6cb34aba43",
+      "mapping_checked_at": "2026-09-30T19:06:50.411215+08:00"
+    },
+    {
+      "historical_code": "839729.BJ",
+      "provider_code": "920729.BJ",
+      "name": "永顺生物",
+      "source_list_date": "20200727",
+      "valid_from": "2021-11-15",
+      "switch_date": "2025-10-09",
+      "mapping_sha256": "58507acb2574268991c9fe36688094e11a00f934db466497020854c38e631910",
+      "mapping_checked_at": "2026-09-30T19:06:51.433680+08:00"
+    }
+  ]
+}
