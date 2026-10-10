@@ -34,6 +34,7 @@ from app.services.sync_jobs import (
     DIRECTION_1D_JOB_TYPE,
     FUND_MATERIALS_JOB_TYPE,
     FUND_NEWS_JOB_TYPE,
+    FUND_RATINGS_JOB_TYPE,
     MARKET_ALL_JOB_TYPE,
     MARKET_DETAIL_JOB_TYPE,
     MARKET_FREE_DATA_COMPLETION_JOB_TYPE,
@@ -474,6 +475,10 @@ def get_internal_sync_job_last_success_times() -> tuple[InternalSyncJobLastSucce
     """读取各类任务最近一次完整成功时间；不触发外部数据请求。"""
     manager = get_sync_job_manager()
     return (
+        InternalSyncJobLastSuccess(
+            job_type=FUND_RATINGS_JOB_TYPE,
+            last_successful_at=manager.get_last_successful_time(FUND_RATINGS_JOB_TYPE),
+        ),
         InternalSyncJobLastSuccess(
             job_type=FUND_MATERIALS_JOB_TYPE,
             last_successful_at=manager.get_last_successful_time(FUND_MATERIALS_JOB_TYPE),

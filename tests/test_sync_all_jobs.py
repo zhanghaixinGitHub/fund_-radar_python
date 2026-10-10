@@ -24,6 +24,7 @@ STAGES = (
     "FUND_NEWS",
     "FUND_MATERIALS",
     "FUND_INPUTS",
+    "FUND_RATINGS",
     "MULTI_PREDICTIONS",
 )
 
@@ -122,6 +123,10 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
         run("FUND_INPUTS", progress_reporter)
         return {"status": "SUCCEEDED", "created": 1, "skipped": 0, "message": "分析资料已保存"}
 
+    def rating_update(code=None, *, progress_reporter):
+        run("FUND_RATINGS", progress_reporter)
+        return {"target": 2, "rated": 0, "notRated": 2, "failures": []}
+
     return LocalSyncJobManager(
         FundService,
         FeatureService,
@@ -132,6 +137,7 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
         materials_service_factory=MaterialsService,
         news_synchronizer=news_sync,
         input_synchronizer=input_sync,
+        rating_updater=rating_update,
     )
 
 
@@ -175,6 +181,7 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
                 "FUND_MATERIALS",
                 "FUND_NEWS",
                 "FUND_INPUTS",
+                "FUND_RATINGS",
             }:
                 assert child.sync_run_id is not None
         next_batch = manager.start_all()

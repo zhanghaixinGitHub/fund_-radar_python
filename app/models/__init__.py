@@ -1,6 +1,7 @@
 """由 AI 服务维护的 SQLAlchemy 领域模型。"""
 
 from app.models import direction_1d as direction_1d  # 显式登记独立证据表，防止后续迁移误删。
+from app.models import fund_rating as fund_rating  # 公共评级与个人预测分开存储。
 from app.models.analysis import (
     AnalysisModelRelease,
     BacktestRun,

@@ -60,6 +60,7 @@ DIRECTION_1D_JOB_TYPE = "DIRECTION_1D_PREDICTIONS"
 FUND_MATERIALS_JOB_TYPE = "FUND_MATERIALS"
 FUND_NEWS_JOB_TYPE = "FUND_NEWS"
 FUND_INPUTS_JOB_TYPE = "FUND_INPUTS"
+FUND_RATINGS_JOB_TYPE = "FUND_RATINGS"
 _ALL_JOB_STAGES = (
     # SPX有早上08:00的观测边界，先取这一小份数据，避免被较长的全市场同步拖到截止后。
     (SPX_MANUAL_JOB_TYPE, "标普500"),
@@ -75,6 +76,7 @@ _ALL_JOB_STAGES = (
     (FUND_MATERIALS_JOB_TYPE, "基金持仓与公司资料更新"),
     # 等报告、行情和基金净值更新后再留存；仍检查真实取得时间，不能因后置而放宽截止规则。
     (FUND_INPUTS_JOB_TYPE, "002112 分析资料更新与留存"),
+    (FUND_RATINGS_JOB_TYPE, "基金八维评级检查与更新"),
     (MULTI_PREDICTION_JOB_TYPE, "全部关注多周期预测、综合建议与到期核验"),
 )
 _ACTIVE_STATUSES = frozenset({"QUEUED", "RUNNING"})
@@ -145,6 +147,7 @@ class LocalSyncJobManager:
         state_path: Path | None = None,
         news_synchronizer=None,
         input_synchronizer=None,
+        rating_updater=None,
     ) -> None:
         self._service_factory = service_factory
         self._feature_service_factory = feature_service_factory
@@ -156,6 +159,7 @@ class LocalSyncJobManager:
         self._materials_service_factory = materials_service_factory
         self._news_synchronizer = news_synchronizer
         self._input_synchronizer = input_synchronizer
+        self._rating_updater = rating_updater
         self._state_path = state_path
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fund-sync-job")
         # 原回执核对按查询请求排队，不设定时循环；独立线程避免慢响应阻塞同步状态接口。
@@ -219,6 +223,45 @@ class LocalSyncJobManager:
         if fund_code != "002112":
             raise ValueError("当前仅支持 002112 的持仓与公司资料更新。")
         return self._start_job(FUND_MATERIALS_JOB_TYPE, self._run_fund_materials)
+
+    def start_fund_ratings(self, fund_code: str | None = None) -> SyncJobSnapshot:
+        """手动任务只指定基金范围，不接收权重或文件路径；单只最终重算完整类别。"""
+        if fund_code is not None:
+            if len(fund_code) != 6 or not fund_code.isascii() or not fund_code.isdigit():
+                raise ValueError("RATING_FUND_CODE_INVALID")
+            from app.services.fund_catalog_read import get_fund
+            if get_fund(fund_code) is None:
+                raise LookupError("RATING_FUND_NOT_FOUND")
+        return self._start_job(FUND_RATINGS_JOB_TYPE, lambda job: self._run_fund_ratings(job, fund_code))
+
+    def _run_fund_ratings(self, job_id: UUID, fund_code: str | None = None) -> None:
+        """资料不足是业务结果；数据库或计算故障保持失败，不把故障记成未评级成功。"""
+        from app.services.fund_rating import update_ratings
+        self._replace_job(job_id, status="RUNNING", started_at=datetime.now(UTC),
+                          progress_message="正在核验完整类别的八维资料", fund_codes=(fund_code,) if fund_code else ())
+        try:
+            result = (self._rating_updater or update_ratings)(fund_code, progress_reporter=lambda c, t, f, m:
+                self._update_progress(job_id, c, t, f, m))
+            message = f"检查 {result['target']} 只，已评级 {result['rated']} 只，暂未评级 {result['notRated']} 只"
+            failures = result["failures"]
+            # 没有任何类别完成时必须失败；资料不足而检查成功则仍是成功的业务结果。
+            result_status = (
+                "PARTIAL_SUCCESS" if result["rated"] + result["notRated"] else "FAILED"
+            ) if failures else "SUCCEEDED"
+            self._replace_job(job_id, status=result_status,
+                              progress_current=result["rated"] + result["notRated"], progress_total=result["target"],
+                              progress_message=message, result_summary=result, finished_at=datetime.now(UTC),
+                              fetched_count=result["target"], created_count=result["rated"],
+                              skipped_count=result["notRated"],
+                              error_code="RATING_CATEGORY_FAILED" if failures else None,
+                              error_message="部分评级类别检查失败，请重试。" if failures else None)
+        except Exception:
+            logger.exception("sync_jobs._run_fund_ratings >>> rating task failed, job_id=%s", job_id)
+            self._fail_job(job_id, "RATING_FAILED", "评级检查未完成，请稍后重试。")
+        finally:
+            with self._lock:
+                if self._active_job_id == job_id:
+                    self._active_job_id = None
 
     def start_fund_news(self, fund_code: str) -> SyncJobSnapshot:
         """明确单基金范围，复用任务中心互斥队列；不与历史研究共用运行进度。"""
@@ -326,6 +369,7 @@ class LocalSyncJobManager:
             self._run_fund_news,
             self._run_fund_materials,
             self._run_fund_inputs,
+            self._run_fund_ratings,
             self._run_multi_predictions,
         )
         try:
@@ -491,6 +535,11 @@ class LocalSyncJobManager:
         self._status_executor.shutdown(wait=False, cancel_futures=False)
 
     def get_last_successful_time(self, job_type: str) -> datetime | None:
+        if job_type == FUND_RATINGS_JOB_TYPE:
+            with self._lock:
+                successes = [j.finished_at for j in self._jobs.values() if j.job_type == job_type
+                             and j.status == "SUCCEEDED" and j.finished_at]
+                return max(successes) if successes else None
         """从持久化运行记录读取指定任务最近一次完整成功时间。"""
         if job_type == FUND_NEWS_JOB_TYPE:
             from app.services.fund_exposure_common import read
