@@ -68,8 +68,9 @@ def job(job_id: UUID):
 
 
 @router.get("/labels/{job_id}")
-def read_label(job_id: UUID):
-    return labels(job_id)
+def read_label(job_id: UUID, fetch_missing: bool = True):
+    # 定时核对只消费手动同步后的数据，缺失时不得悄悄创建外部补拉任务。
+    return labels(job_id, fetch_missing=fetch_missing)
 
 
 @router.get("/forecast-jobs/{job_id}/evidence")

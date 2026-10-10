@@ -12,7 +12,7 @@ from typing import Protocol
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, func, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -548,6 +548,18 @@ class TushareFundSyncService:
                 with Session(self._engine) as session, session.begin():
                     for batch in _chunked(tuple(records), self._batch_size):
                         fund_stats = fund_stats.combine(write(session, source_id=source_id, records=batch))
+                    if sync_type == "MARKET_DETAIL_DIVIDEND":
+                        # 手动同步成功（包括明确无分红）才推进核验时刻，与分红写入同事务。
+                        # 模拟结算随后读取此证据，无需定时重复抓取；失败或回滚不推进水位。
+                        session.execute(text("""
+                            INSERT INTO simulation_market_refresh
+                                (fund_code,status,attempted_at,dividends_verified_at,message)
+                            SELECT fund_code,'SUCCEEDED',clock_timestamp(),clock_timestamp(),NULL
+                            FROM fund_share_class WHERE source_fund_code=:code
+                            ON CONFLICT(fund_code) DO UPDATE SET status='SUCCEEDED',
+                                attempted_at=EXCLUDED.attempted_at,
+                                dividends_verified_at=EXCLUDED.dividends_verified_at,message=NULL
+                        """), {"code": code})
                 stats = stats.combine(fund_stats)
                 completed += 1
             except Exception as error:

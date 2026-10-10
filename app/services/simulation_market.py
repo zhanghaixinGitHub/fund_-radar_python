@@ -8,6 +8,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
+from app.core.market_observability import market_stage, observe_market_connection, observe_market_read
 from app.db.session import get_engine
 from app.models.fund import FundDividend, FundShareClass, NavDaily, SourceRegistry
 from app.repositories.fund_sync import TUSHARE_SOURCE_CODE
@@ -30,47 +31,56 @@ def unsupported_reason(fund) -> str | None:
     return None
 
 
+@observe_market_read
 def read_market(fund_code: str, start: date, end: date) -> SimulationMarket | None:
     """查询来源原值及版本，不把旧缓存、演示行情或全市场同步状态作为结算凭证。"""
-    fund = get_fund(fund_code)
+    with market_stage("fund_detail"):
+        fund = get_fund(fund_code)
     if fund is None:
         return None
     with Session(get_engine()) as session:
-        source = session.scalar(
-            select(SourceRegistry.source_id).where(
-                SourceRegistry.source_code == TUSHARE_SOURCE_CODE,
+        # 提前借出本来首条查询就要使用的连接，把池等待/建连与查询耗时分开。
+        observe_market_connection(session, "market_connection")
+        with market_stage("source_registry"):
+            source = session.scalar(
+                select(SourceRegistry.source_id).where(
+                    SourceRegistry.source_code == TUSHARE_SOURCE_CODE,
+                )
             )
-        )
-        navs = session.scalars(
-            select(NavDaily)
-            .where(
-                NavDaily.fund_code == fund_code,
-                NavDaily.source_id == source,
-                NavDaily.nav_date >= start,
-                NavDaily.nav_date <= end,
-                NavDaily.unit_nav > 0,
+        with market_stage("nav_history"):
+            navs = session.scalars(
+                select(NavDaily)
+                .where(
+                    NavDaily.fund_code == fund_code,
+                    NavDaily.source_id == source,
+                    NavDaily.nav_date >= start,
+                    NavDaily.nav_date <= end,
+                    NavDaily.unit_nav > 0,
+                )
+                .order_by(NavDaily.nav_date)
+            ).all()
+        with market_stage("dividends"):
+            dividends = session.scalars(
+                select(FundDividend)
+                .where(
+                    FundDividend.fund_code == fund_code,
+                    FundDividend.source_id == source,
+                )
+                .order_by(FundDividend.ex_date, FundDividend.source_event_key)
+                .limit(1001)
+            ).all()
+        with market_stage("refresh_state"):
+            state = (
+                session.execute(
+                    text(
+                        "SELECT status, dividends_verified_at, message "
+                        "FROM simulation_market_refresh WHERE fund_code=:code"
+                    ),
+                    {"code": fund_code},
+                )
+                .mappings()
+                .first()
             )
-            .order_by(NavDaily.nav_date)
-        ).all()
-        dividends = session.scalars(
-            select(FundDividend)
-            .where(
-                FundDividend.fund_code == fund_code,
-                FundDividend.source_id == source,
-            )
-            .order_by(FundDividend.ex_date, FundDividend.source_event_key)
-            .limit(1001)
-        ).all()
-        state = (
-            session.execute(
-                text(
-                    "SELECT status, dividends_verified_at, message FROM simulation_market_refresh WHERE fund_code=:code"
-                ),
-                {"code": fund_code},
-            )
-            .mappings()
-            .first()
-        )
         if len(dividends) > 1000:
             raise ValueError("分红记录超过核验上限，需要分页核验后才能结算。")
         return SimulationMarket(

@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from app.api.router import api_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
+from app.core.market_observability import SimulationMarketLoggingMiddleware
 from app.core.middleware import TraceIdMiddleware
 from app.services.sync_jobs import close_sync_job_manager
 
@@ -41,6 +42,8 @@ def create_application() -> FastAPI:
         openapi_url=None,
         lifespan=lifespan,
     )
+    # 后添加的中间件在外层：先建立请求号，再观测行情请求，两个服务使用同一标识。
+    application.add_middleware(SimulationMarketLoggingMiddleware)
     application.add_middleware(TraceIdMiddleware)
     application.include_router(api_router, prefix="/internal/v1")
     return application

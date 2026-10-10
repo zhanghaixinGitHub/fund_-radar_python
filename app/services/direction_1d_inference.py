@@ -37,10 +37,16 @@ def load_model(row):
     if path.is_symlink() or path.resolve().parent != MODEL_ROOT.resolve():
         raise ValueError("MODEL_PATH_INVALID")
     with path.open("rb") as f:
-        raw = f.read(65537)
-    if len(raw) > 65536 or hashlib.sha256(raw).hexdigest() != row["content_hash"]:
+        raw = f.read(262145)
+    if len(raw) > 262144 or hashlib.sha256(raw).hexdigest() != row["content_hash"]:
         raise ValueError("MODEL_HASH_MISMATCH")
     model = json.loads(raw)
+    from app.services import direction_1d_information as information
+
+    if model.get("feature_version") in information.SUPPORTED_VERSIONS:
+        information.validate_model(model)
+    elif len(raw) > 65536:
+        raise ValueError("MODEL_HASH_MISMATCH")
     if (
         model != row["metadata"]
         or model.get("group_id") != row["group_id"]
@@ -84,6 +90,10 @@ def _infer(code: str, expected_target: str | None = None, *, protocol: str = PRO
         mapping = classify(ps[0], prediction=True)
         if not mapping["group_id"]:
             raise ValueError(mapping["classification_reason"])
+        from app.services import direction_1d_information as information
+
+        selected_information = information.selection(code, now) if ternary else None
+        mapping = information.apply_mapping(mapping, selected_information)
         # 缺净值时先等待，不能提前锁住模型；补齐后才选取当时已投入使用的模型。
         rows = repo.navs(c, code, source["source_id"], wanted[0], wanted[-1])
         by_date = {r["nav_date"]: r for r in rows if r["updated_at"] <= now}
@@ -94,7 +104,8 @@ def _infer(code: str, expected_target: str | None = None, *, protocol: str = PRO
         if any(d not in by_date for d in wanted):
             raise ValueError("NAV_GAP")
         all_models = [m for m in repo.models(c) if m["group_id"] == mapping["group_id"]
-                      and m["metadata"].get("protocol") == protocol]
+                      and m["metadata"].get("protocol") == protocol
+                      and (not selected_information or str(m["model_id"]) == selected_information["model_id"])]
         if not all_models:
             raise ValueError("MODEL_PENDING")
         # 初始cohort稳定；新增组/名单需要受控新cohort，不能按最新文件修改时间猜测。
@@ -142,6 +153,8 @@ def _infer(code: str, expected_target: str | None = None, *, protocol: str = PRO
             unavailable = False
             x = features([by_date[d]["unit_nav"] for d in wanted])
             observed = repo.observe(c, code, source, [by_date[d] for d in wanted], now)
+            full_input = information.build_input(x, w["base_nav_date"], now, c,
+                version=selected_information["feature_version"]) if selected_information else None
             events = [
                 dict(r)
                 for r in c.execute(
@@ -156,6 +169,9 @@ def _infer(code: str, expected_target: str | None = None, *, protocol: str = PRO
                 from app.services.direction_1d_revisions import identity, select_revision
 
                 frozen_identity = identity(code, w["target_nav_date"], protocol, mapping, observed, locked, events)
+                if full_input:
+                    # 真实消息与行情身份参与去重，不能新增内容后仍复用纯净值的旧结果。
+                    frozen_identity["information_hash"] = digest(full_input)
                 revision = select_revision(c, frozen_identity, w["deadline_at"])
                 if revision["result"]:
                     import json
@@ -170,7 +186,7 @@ def _infer(code: str, expected_target: str | None = None, *, protocol: str = PRO
                 # 保存当时准入依据；旧预测原文保持不变，不用后来规则重解释旧记录。
                 "group_evidence": mapping["group_evidence"],
                 "target_definition": target_definition,
-                "feature_version": FEATURE_VERSION,
+                "feature_version": full_input["version"] if full_input else FEATURE_VERSION,
                 "base_nav_date": w["base_nav_date"],
                 "target_nav_date": w["target_nav_date"],
                 "values": observed,
@@ -181,6 +197,8 @@ def _infer(code: str, expected_target: str | None = None, *, protocol: str = PRO
                 "events": events,
                 "event_limitations": "已查本地现金分红；未授权拆分完整源，无记录不能证明无所有事件。",
             }
+            if full_input:
+                snapshot["information"] = full_input
             expires = min(datetime.fromisoformat(v["expires_at"]) for v in observed)
             sid, ih = repo.save_snapshot(c, "INPUT", key, snapshot, now, expires)
     if unavailable:
@@ -209,12 +227,13 @@ def _infer(code: str, expected_target: str | None = None, *, protocol: str = PRO
             if not row["model_id"] or row["expires_at"] <= now:
                 raise ValueError("MODEL_UNAVAILABLE")
             model = load_model(row)
-            classification = three.predict(model, x) if ternary else None
+            classification = (information.predict(model, saved["payload"]["information"]) if selected_information
+                              else three.predict(model, x) if ternary else None)
             s = classification["score"] if classification else score(model, x)
             b.update(
                 score=s,
                 predicted_direction=classification["direction"] if classification else "UP" if s > 0.5 else "NON_UP",
-                status="AVAILABLE",
+                status=classification.get("status", "AVAILABLE") if classification else "AVAILABLE",
                 train_as_of=model["train_as_of"],
                 trained_at=row["trained_at"].isoformat(),
                 registered_at=row["registered_at"].isoformat(),
@@ -222,12 +241,14 @@ def _infer(code: str, expected_target: str | None = None, *, protocol: str = PRO
             )
             if classification:
                 b["class_scores"] = classification["class_scores"]
+                if "decision" in classification:
+                    b["decision"] = classification["decision"]
             if row["branch_id"] == "FIXED":
                 majority = model["majority"]
         except (ValueError, OSError, KeyError) as error:
             b["reason"] = str(error) if isinstance(error, ValueError) else "MODEL_UNAVAILABLE"
         branches.append(b)
-    if not any(b["status"] == "AVAILABLE" for b in branches):
+    if not any(b["status"] in ("AVAILABLE", "ABSTAINED") for b in branches):
         raise ValueError("MODEL_UNAVAILABLE")
     generated = repo.clock()
     if generated >= datetime.fromisoformat(w["deadline_at"]):
@@ -279,6 +300,8 @@ def _infer(code: str, expected_target: str | None = None, *, protocol: str = PRO
                                ("MOMENTUM", previous_direction)
                                )
         ]
+    if selected_information:
+        body["limitations"] += saved["payload"]["information"]["limitations"]
     if revision:
         body.update(revision_sequence=revision["revision_sequence"], input_identity=revision["input_identity"])
     payload = canonical(body)
@@ -290,7 +313,7 @@ def _infer(code: str, expected_target: str | None = None, *, protocol: str = PRO
     return result
 
 
-def labels(job_id: UUID):
+def labels(job_id: UUID, *, fetch_missing: bool = True):
     import json
 
     job = repo.get_job(job_id)
@@ -300,6 +323,11 @@ def labels(job_id: UUID):
     if hashlib.sha256(original_raw.encode("utf-8")).hexdigest() != job["result"]["content_hash"]:
         raise ValueError("FORECAST_HASH_MISMATCH")
     body = json.loads(original_raw)
+    from app.schemas.fund_information_analysis import PROTOCOL as analysis_protocol
+
+    if body.get("protocol") == analysis_protocol:
+        from app.services.fund_information_labels import labels as analysis_labels
+        return analysis_labels(body)
     now = repo.clock()
     if date.fromisoformat(body["target_nav_date"]) > now.astimezone(ZONE).date():
         return {"status": "PENDING_TARGET"}
@@ -311,7 +339,9 @@ def labels(job_id: UUID):
         rows = repo.navs(c, body["fund_code"], source["source_id"], day, day)
         if not rows:
             # 仅到期且公布时段已开始才请求公共答案；异步作业不会阻塞Java核对线程。
-            if now.astimezone(ZONE) >= datetime.combine(day, datetime.min.time().replace(hour=18), ZONE):
+            if fetch_missing and now.astimezone(ZONE) >= datetime.combine(
+                day, datetime.min.time().replace(hour=18), ZONE
+            ):
                 from app.services.direction_1d_jobs import submit
 
                 block = int(now.timestamp()) // 1800

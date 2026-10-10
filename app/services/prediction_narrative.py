@@ -72,6 +72,13 @@ def ensure(kind, source_id, fund_code, trace_id=""):
     started = time.monotonic()
     body, original_hash = source(kind, source_id, fund_code)
     envelope = {"fundCode": fund_code, "sourceId": str(source_id), "contentHash": original_hash}
+    from app.schemas.fund_information_analysis import PROTOCOL as analysis_protocol
+
+    if kind == "daily" and body.get("protocol") == analysis_protocol:
+        # 结论与说明已经一起形成；展开依据不再调用外部模型，也不吸收后来资料。
+        from app.services.fund_information_analysis import display_narrative
+
+        return {**envelope, "state": "READY", "narrative": display_narrative(body)}
     owner = None
     safe = None
 
@@ -81,6 +88,16 @@ def ensure(kind, source_id, fund_code, trace_id=""):
         return {**envelope, "state": state, **({"narrative": safe} if safe else {})}
 
     try:
+        from app.services import direction_1d_information as information
+
+        if kind == "daily" and body.get("input", {}).get("feature_version") in information.SUPPORTED_VERSIONS:
+            from app.services.direction_1d_business_explanation import narrative as business_narrative
+
+            restored = read_explanation(source_id)
+            if body["input"]["feature_version"] == information.event_model.VERSION:
+                from app.services.direction_1d_event_narrative import narrative as event_narrative
+                return {**envelope, "state": "READY", "narrative": event_narrative(body, restored)}
+            return {**envelope, "state": "READY", "narrative": business_narrative(body, restored)}
         row = store.read(kind, source_id, STYLE_VERSION)
         saved = cached(row, original_hash, fund_code)
         if saved:

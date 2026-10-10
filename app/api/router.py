@@ -16,6 +16,7 @@ from app.api.routes.historical_nav_calibration import router as historical_nav_c
 from app.api.routes.historical_nav_evaluation import router as historical_nav_evaluation_router
 from app.api.routes.historical_nav_storage import router as historical_nav_storage_router
 from app.api.routes.historical_nav_training import router as historical_nav_training_router
+from app.api.routes.market_revisions import router as market_revisions_router
 from app.api.routes.multi_predictions import router as multi_predictions_router
 from app.api.routes.nav_basis_audit import router as nav_basis_audit_router
 from app.api.routes.portfolio_advice import router as portfolio_advice_router
@@ -29,6 +30,7 @@ from app.api.routes.watchlist_prediction import router as watchlist_prediction_r
 
 """内部 API 根路由；由应用入口统一加上 `/internal/v1` 前缀。"""
 api_router = APIRouter()
+api_router.include_router(market_revisions_router, prefix="/market-revisions", tags=["market-revisions"])
 api_router.include_router(fund_materials_router, prefix="/funds", tags=["fund-materials"])
 api_router.include_router(multi_predictions_router, prefix="/multi-predictions", tags=["multi-predictions"])
 api_router.include_router(spx_manual_router, prefix="/spx-manual", tags=["spx-manual"])

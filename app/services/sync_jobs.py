@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from threading import Lock
+from time import monotonic
 from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
@@ -24,6 +25,8 @@ from app.repositories.market_reference_sync import SourceCapabilityError
 from app.services.direction_1d_spx_manual import synchronize as synchronize_spx
 from app.services.direction_1d_sync import Direction1dSyncService
 from app.services.multi_prediction_sync import MultiPredictionSyncService
+from app.services.prediction_sync_status import pending_daily, reconcile
+from app.services.prediction_sync_status import summary as prediction_summary
 from app.services.simulation_fee_sync import SimulationFeeSyncService
 from app.services.stock_feature_snapshot import (
     FeatureSnapshotBuildInProgressError,
@@ -67,12 +70,12 @@ _ALL_JOB_STAGES = (
     (STOCK_FEATURE_SNAPSHOT_JOB_TYPE, "历史指标计算"),
     # 预测使用前面已同步净值；独立校验输入完整性，来源失败时不能默认算作预测成功。
     (SIMULATION_FEE_JOB_TYPE, "模拟费率"),
-    (MULTI_PREDICTION_JOB_TYPE, "全部关注多周期预测、综合建议与到期核验"),
-    # 公告、持仓公司资料及试点输入尚未用于正式预测，后置以免长时间补齐阻挡净值和预测。
+    # 002112综合分析已读取公告、持仓行情和公司资料，必须先更新输入再生成本次预测。
     (FUND_NEWS_JOB_TYPE, "近期基金公告核验"),
     (FUND_MATERIALS_JOB_TYPE, "基金持仓与公司资料更新"),
     # 等报告、行情和基金净值更新后再留存；仍检查真实取得时间，不能因后置而放宽截止规则。
     (FUND_INPUTS_JOB_TYPE, "002112 分析资料更新与留存"),
+    (MULTI_PREDICTION_JOB_TYPE, "全部关注多周期预测、综合建议与到期核验"),
 )
 _ACTIVE_STATUSES = frozenset({"QUEUED", "RUNNING"})
 _SYNC_TYPES_BY_JOB_TYPE = {
@@ -155,12 +158,18 @@ class LocalSyncJobManager:
         self._input_synchronizer = input_synchronizer
         self._state_path = state_path
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fund-sync-job")
+        # 原回执核对按查询请求排队，不设定时循环；独立线程避免慢响应阻塞同步状态接口。
+        self._status_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="prediction-status")
         self._jobs: dict[UUID, SyncJobSnapshot] = {}
         self._latest_job_ids: dict[str, UUID] = {}
         self._batch_child_ids: dict[UUID, tuple[UUID, ...]] = {}
         self._active_job_id: UUID | None = None
         self._lock = Lock()
         self._closed = False
+        # 只由状态查询触发原任务核对，不启动采集/预测定时循环；并发查询共享五秒节流。
+        self._refreshing: set[UUID] = set()
+        self._refresh_after: dict[UUID, float] = {}
+        self._refresh_offset: dict[UUID, int] = {}
         self._restore()
 
     def _persist(self):
@@ -314,10 +323,10 @@ class LocalSyncJobManager:
             self._run_market_free_data_completion,
             self._run_stock_feature_snapshots,
             self._run_simulation_fees,
-            self._run_multi_predictions,
             self._run_fund_news,
             self._run_fund_materials,
             self._run_fund_inputs,
+            self._run_multi_predictions,
         )
         try:
             child_ids = self._batch_child_ids[job_id]
@@ -381,7 +390,8 @@ class LocalSyncJobManager:
         return snapshot
 
     def get_job(self, job_id: UUID) -> SyncJobSnapshot | None:
-        """按任务标识读取最新进度。"""
+        """按任务标识读取进度，并续查已提交的异步预测；不创建新预测或重新采集。"""
+        self._refresh_predictions(job_id)
         with self._lock:
             return self._snapshot(job_id)
 
@@ -389,7 +399,87 @@ class LocalSyncJobManager:
         """读取当前进程中指定类型最近一次创建的同步任务。"""
         with self._lock:
             job_id = self._latest_job_ids.get(job_type)
-            return self._snapshot(job_id)
+        return self.get_job(job_id) if job_id else None
+
+    def _refresh_predictions(self, job_id: UUID) -> None:
+        """网络调用在锁外执行；终态回填原批次，不能拿后来一次同步的成功覆盖旧批次。"""
+        with self._lock:
+            snapshot = self._jobs.get(job_id)
+            child_ids = self._batch_child_ids.get(job_id, ())
+        if not snapshot or snapshot.status in _ACTIVE_STATUSES:
+            return
+        if child_ids:
+            for child_id in child_ids:
+                self._refresh_predictions(child_id)
+            self._finish_batch(job_id)
+            return
+        if snapshot.job_type not in {MULTI_PREDICTION_JOB_TYPE, DIRECTION_1D_JOB_TYPE}:
+            return
+        if not any(pending_daily(i) for i in (snapshot.result_summary or {}).get("items", [])):
+            return
+        with self._lock:
+            if (
+                self._closed
+                or len(self._refreshing) >= 8
+                or job_id in self._refreshing
+                or monotonic() < self._refresh_after.get(job_id, 0)
+            ):
+                return
+            self._refreshing.add(job_id)
+            self._refresh_after[job_id] = monotonic() + 5
+            offset = self._refresh_offset.get(job_id, 0)
+            self._refresh_offset[job_id] = offset + 4
+            self._status_executor.submit(self._reconcile_prediction_snapshot, snapshot, offset)
+
+    def _reconcile_prediction_snapshot(self, snapshot: SyncJobSnapshot, offset: int) -> None:
+        """按查询需求核对一次回执；慢网络不阻塞状态读取，完成后同步更新所属父批次。"""
+        job_id = snapshot.job_id
+        service = None
+        try:
+            service = self._prediction_service_factory()
+            changes = reconcile(snapshot, service, offset=offset, recover_legacy=self._state_path is not None)
+            if changes:
+                self._replace_job(job_id, **changes)
+        except Exception:
+            logger.exception("sync_jobs._refresh_predictions >>> 原任务状态核对暂未完成, job_id=%s", job_id)
+        finally:
+            try:
+                if service is not None:
+                    service.close()
+            finally:
+                with self._lock:
+                    self._refreshing.discard(job_id)
+                    parents = [
+                        parent
+                        for parent, children in self._batch_child_ids.items()
+                        if job_id in children and self._jobs[parent].status not in _ACTIVE_STATUSES
+                    ]
+                for parent in parents:
+                    self._finish_batch(parent)
+
+    def _finish_batch(self, job_id: UUID) -> None:
+        """按子任务类型汇总，兼容执行顺序调整前已保存的任务树。"""
+        with self._lock:
+            parent = self._jobs[job_id]
+            children = [self._jobs[i] for i in self._batch_child_ids[job_id]]
+            if any(c.status in _ACTIVE_STATUSES for c in children):
+                return
+            titles = dict(_ALL_JOB_STAGES)
+            failed = [titles.get(c.job_type, c.job_type) for c in children if c.status != "SUCCEEDED"]
+            success = len(children) - len(failed)
+            changes = {
+                "status": "SUCCEEDED" if not failed else "PARTIAL_SUCCESS" if success else "FAILED",
+                "progress_message": f"一键同步已结束：成功 {success} 项，未完成 {len(failed)} 项",
+                "error_code": "SYNC_ALL_INCOMPLETE" if failed else None,
+                "error_message": (
+                    "未完成：" + "、".join(failed) + "。请检查结果后重试；分析资料留存可重新执行一键同步。"
+                    if failed
+                    else None
+                ),
+            }
+            if any(getattr(parent, key) != value for key, value in changes.items()):
+                self._jobs[job_id] = replace(parent, **changes)
+                self._persist()
 
     def close(self) -> None:
         """停止接受新任务；不阻断进行中的同步写库。"""
@@ -398,6 +488,7 @@ class LocalSyncJobManager:
                 return
             self._closed = True
         self._executor.shutdown(wait=False, cancel_futures=False)
+        self._status_executor.shutdown(wait=False, cancel_futures=False)
 
     def get_last_successful_time(self, job_type: str) -> datetime | None:
         """从持久化运行记录读取指定任务最近一次完整成功时间。"""
@@ -787,6 +878,7 @@ class LocalSyncJobManager:
                 job_id,
                 status=status,
                 requested_nav_date=result.target_date,
+                result_summary=prediction_summary(list(result.items)),
                 progress_current=result.total,
                 progress_total=result.total,
                 current_fund_code=None,
@@ -853,12 +945,13 @@ class LocalSyncJobManager:
                 state: sum(item["state"] == state for item in result.items)
                 for state in ("COMPLETED", "WAITING", "UNSUPPORTED", "ERROR")
             }
-            summary = {
-                "counts": states,
-                "items": list(result.items),
-                "savedResults": list(result.saved_results),
-                "followupIssues": list(result.followup_issues),
-            }
+            summary = prediction_summary(
+                list(result.items),
+                {
+                    "savedResults": list(result.saved_results),
+                    "followupIssues": list(result.followup_issues),
+                },
+            )
             all_issues = result.issues + result.followup_issues
             self._replace_job(
                 job_id,
@@ -875,7 +968,12 @@ class LocalSyncJobManager:
                 progress_message=(
                     f"一日、五日、二十日和半年共处理 {result.total} 个基金周期项，新生成 {result.created}，"
                     f"已有 {result.existing}，暂不支持 {len(result.unsupported)}，待完成 {len(result.issues)}"
-                    + (f"（等待资料 {states['WAITING']}，执行异常 {states['ERROR']}）" if result.items else "")
+                    + (
+                        f"（正在生成 {summary['pendingDailyCount']}，"
+                        f"等待资料 {states['WAITING'] - summary['pendingDailyCount']}，执行异常 {states['ERROR']}）"
+                        if result.items
+                        else ""
+                    )
                     + (f"；另有 {len(result.followup_issues)} 项收尾待处理" if result.followup_issues else "")
                 ),
                 error_code="PREDICTION_INCOMPLETE" if all_issues else None,
@@ -1054,7 +1152,9 @@ class LocalSyncJobManager:
         logger.warning("sync_jobs._fail_job >>> job_id=%s, code=%s", job_id, error_code)
 
     def _required_job(self, job_id: UUID) -> SyncJobSnapshot:
-        snapshot = self.get_job(job_id)
+        # 内部执行只读取本地状态；对外查询才核对异步回执，避免收尾时重入网络调用。
+        with self._lock:
+            snapshot = self._snapshot(job_id)
         if snapshot is None:
             raise LookupError(f"sync job does not exist: {job_id}")
         return snapshot

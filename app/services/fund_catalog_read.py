@@ -5,6 +5,7 @@ from datetime import date
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.market_observability import market_stage, observe_market_connection
 from app.db.session import get_engine
 from app.models.fund import FundShareClass, SourceSyncRun
 from app.repositories.fund_read import (
@@ -67,9 +68,13 @@ def list_funds(
 def get_fund(fund_code: str) -> InternalFundDetail | None:
     """读取一只真实目录样本，并显式返回净值同步状态。"""
     with Session(get_engine()) as session:
-        row = get_fund_summary(session, fund_code)
-        summary = list_fund_summaries_by_codes(session, (fund_code,))
-        profile = get_fund_profile_snapshot(session, fund_code)
+        observe_market_connection(session, "fund_connection")
+        with market_stage("fund_latest_nav"):
+            row = get_fund_summary(session, fund_code)
+        with market_stage("fund_summary_and_performance"):
+            summary = list_fund_summaries_by_codes(session, (fund_code,))
+        with market_stage("fund_profile"):
+            profile = get_fund_profile_snapshot(session, fund_code)
     if row is None or not summary:
         return None
     return _to_detail(summary[0], row, profile)

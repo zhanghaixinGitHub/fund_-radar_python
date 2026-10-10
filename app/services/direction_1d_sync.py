@@ -4,6 +4,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
+from uuid import UUID
 
 import httpx
 
@@ -28,7 +29,54 @@ _REASONS = {
     "NO_LONGER_FOLLOWED": "已不在有效关注范围",
     "QUEUED": "一日预测已排队，尚未确认留档，等待后续检查",
     "RUNNING": "一日预测仍在计算，尚未确认留档，等待后续检查",
+    "ANALYSIS_REVIEW_FAILED": "本次分析未通过内容核验，未生成新判断，已有预测保留，可重试",
+    "ANALYSIS_DOCUMENT_PARSE_FAILED": "部分资料未通过原文核验，未生成新判断，已有预测保留，可重试",
+    "ARCHIVE_DEADLINE_PASSED": "结果未在预测截止前确认保存，本次未生成有效判断",
+    "ARCHIVE_REJECTED": "本次结果未通过保存核验，已有预测保留，可重试",
+    "JOB_SCOPE_UNAVAILABLE": "原任务的有效关注范围已变化，本次结果未确认保存",
+    "STATUS_UNAVAILABLE": "暂时无法确认原任务结果，已有预测保留，恢复连接后继续核对",
 }
+
+
+def daily_item(code: str, target: str, result: dict, job_id: str | None = None) -> dict:
+    """异步计算与资料不足分别留存；任务编号只用于后台续查，不能作为成功凭据。"""
+    reason = result.get("reason") or result.get("status")
+    state = "ERROR"
+    if result.get("status") == "PREDICTED":
+        if not isinstance(result.get("reused"), bool):
+            raise ValueError("预测保存回执不完整")
+        state = "COMPLETED"
+    elif reason in {"SPECIAL_POLICY_REQUIRED", "NOT_APPLICABLE"}:
+        state = "UNSUPPORTED"
+    elif reason in {
+        "MISSED_DEADLINE",
+        "NAV_CURRENT_NOT_READY",
+        "NAV_LATEST_NOT_READY",
+        "NAV_GAP",
+        "WINDOW_CHANGED",
+        "WAITING_DATA",
+        "DATA_PENDING",
+        "DATA_INSUFFICIENT",
+        "QUEUED",
+        "RUNNING",
+        "STATUS_UNAVAILABLE",
+    }:
+        state = "WAITING"
+    item = {
+        "fundCode": code,
+        "horizonId": "T1",
+        "targetDate": target,
+        "state": state,
+        "reasonCode": reason,
+        "reason": None if state == "COMPLETED" else _REASONS.get(reason, "本次预测生成失败，已有预测保留，可重试"),
+    }
+    source_job = job_id or result.get("jobId")
+    if source_job:
+        item["sourceJobId"] = str(UUID(str(source_job)))
+    item["pending"] = reason in {"QUEUED", "RUNNING", "STATUS_UNAVAILABLE"} and bool(source_job)
+    if state == "COMPLETED":
+        item["reused"] = result["reused"]
+    return item
 
 
 @dataclass(frozen=True)
@@ -115,38 +163,18 @@ class Direction1dSyncService:
                 response = self._client.post(f"{_BASE}/{code}", json={"targetNavDate": str(target)})
                 response.raise_for_status()
                 result = response.json()
+                item = daily_item(code, str(target), result)
                 if result.get("status") == "PREDICTED":
                     if not isinstance(result.get("reused"), bool):
                         raise ValueError("预测保存回执不完整")
-                    item["state"] = "COMPLETED"
                     existing += int(result["reused"])
                     created += int(not result["reused"])
                 else:
-                    reason = result.get("reason") or result.get("status")
-                    message = f"{code}：{_REASONS.get(reason, '本期预测未生成，请查看预测覆盖详情')}"
-                    if reason in {"SPECIAL_POLICY_REQUIRED", "NOT_APPLICABLE"}:
-                        item["state"] = "UNSUPPORTED"
+                    message = f"{code}：{item['reason']}"
+                    if item["state"] == "UNSUPPORTED":
                         unsupported.append(message)
                     else:
-                        item["state"] = (
-                            "WAITING"
-                            if reason
-                            in {
-                                "MISSED_DEADLINE",
-                                "NAV_CURRENT_NOT_READY",
-                                "NAV_LATEST_NOT_READY",
-                                "NAV_GAP",
-                                "WINDOW_CHANGED",
-                                "WAITING_DATA",
-                                "DATA_PENDING",
-                                "DATA_INSUFFICIENT",
-                                "QUEUED",
-                                "RUNNING",
-                            }
-                            else "ERROR"
-                        )
                         issues.append(message)
-                    item["reason"] = _REASONS.get(reason, "本期预测未生成")
             except Exception:
                 issues.append(f"{code}：预测生成或留档未确认，请稍后检查或重试")
                 logger.exception("direction_1d_sync.sync >>> prediction failed, fund_code=%s", code)
@@ -159,3 +187,36 @@ class Direction1dSyncService:
                 f"暂不支持 {len(unsupported)}，待完成 {len(issues)}",
             )
         return Direction1dSyncResult(target, total, created, existing, tuple(issues), tuple(unsupported), tuple(items))
+
+    def reconcile_item(self, item: dict) -> dict:
+        """只核对原作业并确认留档；短超时不取消后台计算，也不重新提交生成请求。"""
+        code, target, job_id = item["fundCode"], item["targetDate"], str(UUID(item["sourceJobId"]))
+        try:
+            response = self._client.post(
+                f"{_BASE}/{code}/jobs/{job_id}/reconcile",
+                json={"targetNavDate": target},
+                timeout=httpx.Timeout(5, connect=1),
+            )
+            response.raise_for_status()
+            return daily_item(code, target, response.json(), job_id)
+        except Exception:
+            logger.exception(
+                "direction_1d_sync.reconcile_item >>> 原任务核对暂不可用, fund_code=%s job_id=%s",
+                code,
+                job_id,
+            )
+            return daily_item(code, target, {"status": "STATUS_UNAVAILABLE"}, job_id)
+
+    def saved_results(self) -> list[dict] | None:
+        """延迟留档成功后重新读取按日期汇总；读失败返回未知，不能继续展示旧统计为最新值。"""
+        try:
+            response = self._client.get(
+                "/internal/v1/multi-predictions/sync/saved-results",
+                timeout=httpx.Timeout(5, connect=1),
+            )
+            response.raise_for_status()
+            result = response.json()
+            return result if isinstance(result, list) else None
+        except Exception:
+            logger.warning("direction_1d_sync.saved_results >>> 已保存日期摘要暂不可读", exc_info=True)
+            return None

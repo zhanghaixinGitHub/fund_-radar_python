@@ -25,9 +25,34 @@ def explain_original(body, model_loader, *, include_reasoning=False):
         raise ValueError("FEATURES_MISSING")
     branches = []
     for branch in body["branches"]:
-        if branch.get("status") != "AVAILABLE":
+        if branch.get("status") not in ("AVAILABLE", "ABSTAINED"):
             continue
         model = model_loader(branch["model_id"], branch["model_hash"])
+        from app.services import direction_1d_information as information
+
+        if source.get("feature_version") in information.SUPPORTED_VERSIONS:
+            information.validate_model(model)
+            full_input = source.get("information", {})
+            if full_input.get("numeric", [])[:7] != values:
+                raise ValueError("INFORMATION_NAV_MISMATCH")
+            classification = information.predict(model, full_input)
+            if model.get("feature_version") == information.event_model.VERSION:
+                if (branch["status"] != classification["status"] or branch["score"] != classification["score"]
+                        or branch["predicted_direction"] != classification["direction"]
+                        or branch.get("class_scores") != classification["class_scores"]
+                        or branch.get("decision") != classification["decision"]):
+                    raise ValueError("PREDICTION_RESTORE_MISMATCH")
+                branches.append({"branchId": branch["branch_id"], "modelId": branch["model_id"],
+                                 "modelHash": branch["model_hash"], **information.explain(model, full_input)})
+                continue
+            if (classification["direction"] != branch["predicted_direction"]
+                    or abs(classification["score"] - branch["score"]) > 1e-12
+                    or any(abs(classification["class_scores"][key] - branch["class_scores"][key]) > 1e-12
+                           for key in three.CLASSES)):
+                raise ValueError("PREDICTION_RESTORE_MISMATCH")
+            branches.append({"branchId": branch["branch_id"], "modelId": branch["model_id"],
+                             "modelHash": branch["model_hash"], **information.explain(model, full_input)})
+            continue
         ternary = body.get("protocol") == three.PROTOCOL
         classification = three.predict(model, values) if ternary else None
         restored = classification["score"] if classification else score(model, values)
@@ -118,6 +143,11 @@ def read_explanation(job_id: UUID, *, include_reasoning=False):
     if content_hash != job["result"]["content_hash"]:
         raise ValueError("FORECAST_HASH_MISMATCH")
     body = json.loads(raw)
+    from app.schemas.fund_information_analysis import PROTOCOL as analysis_protocol
+
+    if body.get("protocol") == analysis_protocol:
+        from app.services.fund_information_analysis import evidence
+        return evidence(body, content_hash)
     if datetime.fromisoformat(body["expires_at"]) <= repo.clock():
         raise ValueError("EVIDENCE_EXPIRED")
 

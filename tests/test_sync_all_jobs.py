@@ -21,10 +21,10 @@ STAGES = (
     "MARKET_FREE_DATA_COMPLETION",
     "STOCK_FEATURE_SNAPSHOT",
     "SIMULATION_FEES",
-    "MULTI_PREDICTIONS",
     "FUND_NEWS",
     "FUND_MATERIALS",
     "FUND_INPUTS",
+    "MULTI_PREDICTIONS",
 )
 
 
@@ -154,7 +154,7 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
     try:
         started = manager.start_all()
         result = wait_finished(manager, started.job_id)
-        assert calls == list(STAGES)  # 净值与基础资料之后只计算一次指标，预测不等待后面的资料补齐。
+        assert calls == list(STAGES)  # 净值仍优先；公告、持仓行情与分析输入完成后才开始预测。
         assert result.status == (
             "SUCCEEDED" if not failures else "FAILED" if len(failures) == len(STAGES) else "PARTIAL_SUCCESS"
         )
@@ -231,7 +231,7 @@ def test_batch_holds_exclusion_across_every_stage_and_restores_live_progress():
             assert parent.current_fund_code == (None if stage == "SPX_MANUAL" else "000001.OF")
             assert ("0/1" if stage == "SPX_MANUAL" else "1/2") in parent.progress_message
             assert manager.get_latest_job(stage).status == "RUNNING"
-            # 后面的公告/持仓/留存仍在执行时，前面的净值和预测已经完成，批次互斥继续保持。
+            # 后续资料更新期间保留净值成果，预测必须等待输入步骤结束；批次互斥继续保持。
             for previous_stage in STAGES[:index]:
                 assert manager.get_latest_job(previous_stage).status == "SUCCEEDED"
             for next_stage in STAGES[index + 1 :]:

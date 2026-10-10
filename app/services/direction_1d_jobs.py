@@ -73,6 +73,9 @@ def sync_missing(codes):
 
 
 def submit_forecast(code, expected_target_date=None, request_id=None):
+    from app.schemas.fund_information_analysis import PROTOCOL as analysis_protocol
+    from app.services.fund_information_snapshot import enabled as analysis_enabled
+
     w = window(repo.clock())
     if (expected_target_date is None) != (request_id is None):
         raise ValueError("EXPECTED_TARGET_AND_REQUEST_REQUIRED")
@@ -80,11 +83,12 @@ def submit_forecast(code, expected_target_date=None, request_id=None):
         raise ValueError("WINDOW_CHANGED")
     if w["status"] != "OPEN":
         raise ValueError("MISSED_DEADLINE")
-    key = f"{ACTIVE_PROTOCOL}:{code}:{w['target_nav_date']}"
+    selected_protocol = analysis_protocol if analysis_enabled(code) else ACTIVE_PROTOCOL
+    key = f"{selected_protocol}:{code}:{w['target_nav_date']}"
     if request_id:
         key += f":request:{request_id}"
     return submit(
-        key, "FORECAST", {"fund_code": code, "target_nav_date": w["target_nav_date"], "protocol": ACTIVE_PROTOCOL,
+        key, "FORECAST", {"fund_code": code, "target_nav_date": w["target_nav_date"], "protocol": selected_protocol,
                           "revisions": request_id is not None}
     )
 
@@ -160,10 +164,16 @@ def _execute_locked(job_id, kind, payload):
                 return
             c.execute(text("UPDATE direction_1d_job SET state='RUNNING' WHERE job_id=:id"), {"id": job_id})
         if kind == "FORECAST":
-            sync_missing([payload["fund_code"]])
             target = payload.get("target_nav_date") or repo.get_job(job_id)["task_key"].rsplit(":", 1)[-1]
-            result = infer(payload["fund_code"], expected_target=target, protocol=payload.get("protocol", PROTOCOL),
-                           revisions=payload.get("revisions", False))
+            from app.schemas.fund_information_analysis import PROTOCOL as analysis_protocol
+
+            if payload.get("protocol") == analysis_protocol and payload["fund_code"] == "002112":
+                from app.services.fund_information_analysis import infer as analyze
+                result = analyze(target)
+            else:
+                sync_missing([payload["fund_code"]])
+                result = infer(payload["fund_code"], expected_target=target, protocol=payload.get("protocol", PROTOCOL),
+                               revisions=payload.get("revisions", False))
         elif kind == "LABEL_SYNC":
             result = sync_answer(payload)
         else:
