@@ -16,6 +16,30 @@ def worker(handler):
     return result
 
 
+def test_admin_prediction_only_requests_002112_without_enumerating_other_funds():
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        if request.url.path.endswith("/window"):
+            return httpx.Response(200, json={"targetNavDate": "2026-10-14"})
+        assert request.url.path.endswith("/002112")
+        assert json.loads(request.content) == {"targetNavDate": "2026-10-14"}
+        return httpx.Response(200, json={"status": "PREDICTED", "reused": False})
+
+    service = worker(handler)
+    try:
+        result = service.sync(progress_reporter=lambda *_: None)
+        assert result.total == result.created == 1
+        assert [(item["fundCode"], item["horizonId"]) for item in result.items] == [("002112", "T1")]
+        assert calls == [
+            ("GET", "/internal/v1/direction-1d/sync/window"),
+            ("POST", "/internal/v1/direction-1d/sync/002112"),
+        ]
+    finally:
+        service.close()
+
+
 def test_paged_funds_are_counted_once_and_failures_do_not_stop_later_funds():
     calls, progress = [], []
 
@@ -47,7 +71,11 @@ def test_paged_funds_are_counted_once_and_failures_do_not_stop_later_funds():
 
     service = worker(handle)
     try:
-        result = service.sync(progress_reporter=lambda *args: progress.append(args))
+        result = service.sync_codes(
+            service.read_fund_codes(),
+            target=service.read_target_date(),
+            progress_reporter=lambda *args: progress.append(args),
+        )
         assert (result.total, result.created, result.existing, len(result.issues)) == (5, 1, 1, 2)
         assert calls == ["000001", "000002", "000003", "000004", "000005"]
         assert result.unsupported == ("000004：该基金类型暂不支持",)
@@ -68,7 +96,7 @@ def test_invalid_or_non_advancing_page_fails_without_prediction(page):
     service = worker(handle)
     try:
         with pytest.raises(ValueError):
-            service.sync(progress_reporter=lambda *args: None)
+            service.read_fund_codes()
     finally:
         service.close()
 

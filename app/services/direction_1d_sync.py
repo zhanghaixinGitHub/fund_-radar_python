@@ -31,6 +31,11 @@ _REASONS = {
     "RUNNING": "一日预测仍在计算，尚未确认留档，等待后续检查",
     "ANALYSIS_REVIEW_FAILED": "本次分析未通过内容核验，未生成新判断，已有预测保留，可重试",
     "ANALYSIS_DOCUMENT_PARSE_FAILED": "部分资料未通过原文核验，未生成新判断，已有预测保留，可重试",
+    "ANALYSIS_DOCUMENT_CACHE_BLOCKED": "部分资料的原文或解析待核对，本次未生成新判断，已有预测保留",
+    "ANALYSIS_CALL_LIMIT": "本次新资料较多，已达到处理上限，已有预测保留",
+    "DEEPSEEK_DAILY_BUDGET": "今天的分析额度已用完，已有预测保留",
+    "DEEPSEEK_DISABLED": "付费分析已停用，本次未生成新预测",
+    "MANUAL_ANALYSIS_REQUIRED": "本期尚未完成资料分析，暂未生成预测",
     "ARCHIVE_DEADLINE_PASSED": "结果未在预测截止前确认保存，本次未生成有效判断",
     "ARCHIVE_REJECTED": "本次结果未通过保存核验，已有预测保留，可重试",
     "JOB_SCOPE_UNAVAILABLE": "原任务的有效关注范围已变化，本次结果未确认保存",
@@ -115,9 +120,9 @@ class Direction1dSyncService:
         self._client.close()
 
     def sync(self, *, progress_reporter: Callable[[int, int, str | None, str], None]) -> Direction1dSyncResult:
-        """冻结当前目标日，分页读取关注代码；跨期和数据不齐均保留原因，不伪造预测值。"""
+        """后台预测固定为 002112/T1；不枚举其他关注基金，不触发长周期预测。"""
         target = self.read_target_date()
-        return self.sync_codes(self.read_fund_codes(), target=target, progress_reporter=progress_reporter)
+        return self.sync_codes(["002112"], target=target, progress_reporter=progress_reporter)
 
     def read_target_date(self) -> date:
         """目标日取自核心服务核验过的一日窗口，不能用本机日期代替交易日。"""

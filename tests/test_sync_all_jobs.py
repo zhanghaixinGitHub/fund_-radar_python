@@ -25,7 +25,7 @@ STAGES = (
     "FUND_MATERIALS",
     "FUND_INPUTS",
     "FUND_RATINGS",
-    "MULTI_PREDICTIONS",
+    "DIRECTION_1D_PREDICTIONS",
 )
 
 
@@ -95,11 +95,11 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
 
     class PredictionService:
         def sync(self, *, progress_reporter):
-            run("MULTI_PREDICTIONS", progress_reporter)
+            run("DIRECTION_1D_PREDICTIONS", progress_reporter)
             return Direction1dSyncResult(date(2026, 9, 23), 2, 1, 1, ())
 
         def close(self):
-            close_hook("MULTI_PREDICTIONS")
+            close_hook("DIRECTION_1D_PREDICTIONS")
 
     class MaterialsService:
         def sync(self, code, *, progress_reporter):
@@ -133,7 +133,7 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
         FreeService,
         spx_sync,
         FeeService,
-        multi_prediction_service_factory=PredictionService,
+        prediction_service_factory=PredictionService,
         materials_service_factory=MaterialsService,
         news_synchronizer=news_sync,
         input_synchronizer=input_sync,
@@ -177,7 +177,7 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
             if stage not in failures and stage not in {
                 "SPX_MANUAL",
                 "SIMULATION_FEES",
-                "MULTI_PREDICTIONS",
+                "DIRECTION_1D_PREDICTIONS",
                 "FUND_MATERIALS",
                 "FUND_NEWS",
                 "FUND_INPUTS",

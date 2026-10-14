@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 
+import pytest
 from app.services.fund_information_archive import public_evidence
 
 
@@ -28,7 +29,8 @@ def test_public_projection_keeps_exact_quotes_and_every_source_without_mutating_
     assert len(display["Fexample"]["sources"]) == 2
 
 
-def test_infer_archives_large_receipts_without_bloating_or_changing_page_result(monkeypatch):
+@pytest.mark.parametrize("fact_repeats,accepted", [(1, True), (10000, True), (30000, False)])
+def test_infer_archives_large_receipts_without_bloating_or_changing_page_result(monkeypatch, fact_repeats, accepted):
     """通过整个保存调用链的替身检查，不连接真实数据库，也不覆盖任何预测。"""
     import json
     from contextlib import nullcontext
@@ -42,7 +44,7 @@ def test_infer_archives_large_receipts_without_bloating_or_changing_page_result(
     facts = {
         "Fexample": {
             "category": "持仓行情",
-            "text": "基准日股票下跌。",
+            "text": "基准日股票下跌。" * fact_repeats + "尚未完成，仍需审批。",
             "source": None,
             "quote_receipts": [{"quote": "原始审计字符" * 40000}],
         }
@@ -89,11 +91,16 @@ def test_infer_archives_large_receipts_without_bloating_or_changing_page_result(
     saved, completed = [], []
     monkeypatch.setattr(service.repo, "clock", lambda: at)
     monkeypatch.setattr(service, "prepare", lambda now: data)
-    monkeypatch.setattr(service, "get_settings", lambda: SimpleNamespace(deepseek_model="test"))
     monkeypatch.setattr(service, "scope_lock", lambda *args: nullcontext())
+    monkeypatch.setattr(service, "_ensure_input_current", lambda *args: None)
     monkeypatch.setattr(service, "get_engine", lambda: SimpleNamespace(begin=lambda: nullcontext(object())))
-    monkeypatch.setattr(service, "select_revision", lambda *args: {"revision_sequence": 1, "input_identity": "test"})
-    monkeypatch.setattr(service, "analyze", lambda *args: (analysis, facts, []))
+
+    def select_revision(connection, identity, deadline):
+        assert identity["model"] == "deepseek-flash"
+        return {"revision_sequence": 1, "input_identity": "test"}
+
+    monkeypatch.setattr(service, "select_revision", select_revision)
+    monkeypatch.setattr(service, "analyze", lambda *args, **kwargs: (analysis, facts, []))
 
     def save_snapshot(connection, kind, key, payload, now, expires):
         saved.append((kind, deepcopy(payload)))
@@ -101,6 +108,13 @@ def test_infer_archives_large_receipts_without_bloating_or_changing_page_result(
 
     monkeypatch.setattr(service.repo, "save_snapshot", save_snapshot)
     monkeypatch.setattr(service, "complete", lambda *args: completed.append(args))
+    if not accepted:
+        # 中文按UTF-8占用多字节；超过传输预算时保留审计快照，不能截原文后发布成功。
+        with pytest.raises(ValueError, match="^ANALYSIS_RESULT_LIMIT$"):
+            service.infer("2026-08-26")
+        assert saved[1][1]["facts"] == facts
+        assert completed == []
+        return
     result = service.infer("2026-08-26")
     body = json.loads(result["payload_json"])
     assert [kind for kind, _ in saved] == ["ANALYSIS", "ANALYSIS_FACTS"]
@@ -109,5 +123,9 @@ def test_infer_archives_large_receipts_without_bloating_or_changing_page_result(
     assert body["analysis"] == analysis
     assert body["evidence_snapshot_id"] == "ANALYSIS_FACTS-id"
     assert body["evidence_snapshot_hash"] == "ANALYSIS_FACTS-hash"
-    assert len(result["payload_json"]) < 150000
+    assert len(result["payload_json"].encode("utf-8")) <= service.MAX_RESULT_BYTES
+    assert body["evidence"]["Fexample"]["text"] == facts["Fexample"]["text"]
+    assert body["narrative"]["drivers"][0]["observation"].endswith("尚未完成，仍需审批。")
+    if fact_repeats > 1:
+        assert len(result["payload_json"]) > 150000
     assert len(completed) == 1

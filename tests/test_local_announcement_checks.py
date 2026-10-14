@@ -23,6 +23,20 @@ def test_direct_cause_and_correct_paraphrase_have_distinct_admission():
     assert final_checks("为何调整？", item("由于工作内容变动。", [source]))["safe_answer"] is None
 
 
+def test_cause_mentioned_in_treatment_question_is_not_a_cause_question():
+    source = "因考核原因不能归属的股票作废失效，不可递延至下一年度。"
+    result = final_checks("因考核原因未能归属的股票如何处理？", item("作废失效，不可递延。", [source]))
+    assert result["safe_answer"]
+
+
+def test_causal_question_prefix_does_not_require_literal_copy_of_question():
+    source = "因非关联董事不足三人，该议案提交股东会审议。"
+    result = final_checks("为何提交股东会？", item("提交股东会的原因是：因非关联董事不足三人。", [source]))
+    assert result["safe_answer"]
+    fabricated = final_checks("为何提交股东会？", item("提交股东会的原因是：分红导致人数不足。", [source]))
+    assert fabricated["safe_answer"] is None
+
+
 @pytest.mark.parametrize("amount", ["34.01", "89.72"])
 def test_upper_bound_must_not_become_actual_balance(amount):
     source = f"实际担保余额不超过人民币{amount}亿元。"

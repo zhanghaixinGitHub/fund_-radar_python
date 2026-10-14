@@ -77,7 +77,7 @@ _ALL_JOB_STAGES = (
     # 等报告、行情和基金净值更新后再留存；仍检查真实取得时间，不能因后置而放宽截止规则。
     (FUND_INPUTS_JOB_TYPE, "002112 分析资料更新与留存"),
     (FUND_RATINGS_JOB_TYPE, "基金八维评级检查与更新"),
-    (MULTI_PREDICTION_JOB_TYPE, "全部关注多周期预测、综合建议与到期核验"),
+    (DIRECTION_1D_JOB_TYPE, "002112 一日预测"),
 )
 _ACTIVE_STATUSES = frozenset({"QUEUED", "RUNNING"})
 _SYNC_TYPES_BY_JOB_TYPE = {
@@ -330,7 +330,7 @@ class LocalSyncJobManager:
             job_type=job_type,
             status="QUEUED",
             requested_nav_date=date.today(),
-            fund_codes=(),
+            fund_codes=("002112",) if job_type == DIRECTION_1D_JOB_TYPE else (),
             progress_current=0,
             progress_total=0,
             current_fund_code=None,
@@ -370,7 +370,7 @@ class LocalSyncJobManager:
             self._run_fund_materials,
             self._run_fund_inputs,
             self._run_fund_ratings,
-            self._run_multi_predictions,
+            self._run_direction_1d_predictions,
         )
         try:
             child_ids = self._batch_child_ids[job_id]
@@ -903,7 +903,8 @@ class LocalSyncJobManager:
             job_id,
             status="RUNNING",
             started_at=datetime.now(UTC),
-            progress_message="正在读取全部关注基金",
+            fund_codes=("002112",),
+            progress_message="正在准备 002112 一日预测",
         )
         try:
             service = self._prediction_service_factory()

@@ -1,5 +1,6 @@
 """002112综合判断的独立契约；事实引用与未来推断分开，分数不冒充概率。"""
 
+import json
 import re
 from copy import deepcopy
 from typing import Literal
@@ -9,6 +10,28 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 PROTOCOL = "DIRECTION_1D_ANALYSIS_V1"
 VERSION = "002112_INFORMATION_ANALYSIS_6"
 STYLE = "PREDICTION_INFORMATION_ZH_V4"
+# 引用数量是整理粒度，不是原文正确性的判据；超出时分组保留，不截掉条件或整项拒绝。
+EVENT_QUOTE_GROUP_SIZE = 10
+EVENT_ITEM_LIMIT = 10
+
+
+def organize_text(value: str, width: int) -> str:
+    """字数是单段整理目标：仅插入换行，保留全文，不能截掉末尾否定或审批条件。"""
+    output = []
+    for line in value.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        ending = line[len(content) :]
+        start = 0
+        while len(content) - start > width:
+            end = start + width
+            cuts = [content.rfind(mark, start, end) + 1 for mark in ("。", "；", "，")]
+            if max(cuts) > start:
+                end = max(cuts)
+            output.append(content[start:end])
+            output.append("\n")
+            start = end
+        output.append(content[start:] + ending)
+    return "".join(output)
 
 
 class StrictModel(BaseModel):
@@ -16,55 +39,57 @@ class StrictModel(BaseModel):
 
 
 class Event(StrictModel):
-    title: str = Field(min_length=1, max_length=120)
+    title: str = Field(min_length=1)
     assessment: Literal["POSITIVE", "NEGATIVE", "MIXED", "NEUTRAL", "UNKNOWN"]
     stage: Literal["拟议", "进行中", "已发生", "历史经营", "程序事项", "不明"]
-    quotes: list[str] = Field(min_length=1, max_length=3)
-    meaning: str = Field(min_length=1, max_length=250)
-    mechanism: str = Field(min_length=1, max_length=250)
-    caveat: str = Field(min_length=1, max_length=250)
+    # 十条为常规单组上限。模型确需更多同源证据时保留全部，后续按组核对和归档。
+    # 长引用按连续原文拆段，短的真实条款也保留；逐字来源及总请求预算继续严格核对。
+    quotes: list[str] = Field(min_length=1)
+    meaning: str = Field(min_length=1)
+    mechanism: str = Field(min_length=1)
+    caveat: str = Field(min_length=1)
 
     @field_validator("quotes")
     @classmethod
     def quote_size(cls, values):
-        if any(not 8 <= len(v) <= 350 for v in values):
+        if any(not v for v in values):
             raise ValueError("EVENT_QUOTE_LENGTH")
         return values
 
 
 class DocumentEvents(StrictModel):
     id: str
-    events: list[Event] = Field(min_length=1, max_length=4)
+    events: list[Event] = Field(min_length=1)
 
 
 class ParsedDocuments(StrictModel):
-    items: list[DocumentEvents] = Field(min_length=1, max_length=4)
+    items: list[DocumentEvents] = Field(min_length=1)
 
 
 class Reason(StrictModel):
-    title: str = Field(min_length=1, max_length=120)
-    refs: list[str] = Field(min_length=1, max_length=5)
+    title: str = Field(min_length=1)
+    refs: list[str] = Field(min_length=1)
     role: Literal["支持上涨", "支持下跌", "双向影响", "背景观察"]
-    meaning: str = Field(min_length=1, max_length=250)
-    implication: str = Field(min_length=1, max_length=250)
+    meaning: str = Field(min_length=1)
+    implication: str = Field(min_length=1)
 
 
 class Analysis(StrictModel):
     direction: Literal["UP", "DOWN"]
     confidence: Literal["LOW"]
-    summary: str = Field(min_length=1, max_length=250)
-    reasons: list[Reason] = Field(min_length=1, max_length=6)
-    counterpoints: list[Reason] = Field(max_length=4)
-    synthesis: str = Field(min_length=1, max_length=600)
-    change_conditions: list[str] = Field(max_length=3)
-    limitations: list[str] = Field(min_length=1, max_length=5)
+    summary: str = Field(min_length=1)
+    reasons: list[Reason] = Field(min_length=1)
+    counterpoints: list[Reason] = Field(default_factory=list)
+    synthesis: str = Field(min_length=1)
+    change_conditions: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(min_length=1)
     # 程序依据实际引用重新计算，不接受模型给出的数量作为权重。
     evidence_units: list[str] = Field(default_factory=list)
 
     @field_validator("change_conditions", "limitations")
     @classmethod
     def paragraph_size(cls, values):
-        if any(not 1 <= len(v) <= 250 for v in values):
+        if any(not v for v in values):
             raise ValueError("ANALYSIS_TEXT_LENGTH")
         return values
 
@@ -76,11 +101,12 @@ def normalize(value: str) -> str:
 def quote_catalog(body: str) -> dict[str, dict]:
     """给连续原文分配明确编号和字符区间；不去空格，不拼句，不改变任何字符。
 
-    优先在句号、分号或换行处结束，长段落才按上限切段。每段八至三百五十字；
+    优先在句号、分号或换行处结束，长段落才按上限切段。通常每段八至三百五十字；
+    短于八字的完整真实条款也保留，不以长度替代真实性。
     生成器可选相邻多个片段保留条件，不能通过自己抄写或省略号改变原文。
     """
     result, start = {}, 0
-    if len(body) < 8:
+    if not body:
         raise ValueError("ANALYSIS_SOURCE_TOO_SHORT")
     while start < len(body):
         end = min(start + 350, len(body))
@@ -95,22 +121,42 @@ def quote_catalog(body: str) -> dict[str, dict]:
     return result
 
 
+def quote_groups(count: int) -> list[list[int]]:
+    """每组最多十条，索引回指同一事项的完整引用列表，不拆分事项或制造额外权重。"""
+    return [
+        list(range(start, min(start + EVENT_QUOTE_GROUP_SIZE, count)))
+        for start in range(0, count, EVENT_QUOTE_GROUP_SIZE)
+    ]
+
+
 def validate_events(value: dict, documents: list[dict]) -> list[dict]:
-    """逐条引用须来自本次实际传入的正文，不接受拼接、改数或省略否定。"""
+    """数量超限先去重分组；逐条同源引用仍必需，不接受拼接、改数或省略否定。"""
     source = {d["id"]: d for d in documents}
     if len(source) != len(documents):
         raise ValueError("ANALYSIS_DOCUMENT_ID_DUPLICATE")
     resolved = deepcopy(value)
     if not isinstance(resolved, dict) or not isinstance(resolved.get("items"), list):
         raise ValueError("ANALYSIS_EVENT_FORMAT_INVALID")
+    selected_spans, supplied_counts, event_totals, omitted_counts = {}, {}, {}, {}
     # 新响应只能按显式编号取原文；旧缓存的文字引用仍须通过下面同样严格的逐字校验。
     for item in resolved.get("items", []):
         if not isinstance(item, dict) or not isinstance(item.get("events"), list):
             raise ValueError("ANALYSIS_EVENT_FORMAT_INVALID")
         if item.get("id") not in source:
             raise ValueError("ANALYSIS_DOCUMENT_MISMATCH")
+        event_totals[item["id"]] = len(item["events"])
+        # 模型按重要性给出事项。仅采用前十项，剩余仍存在不可变首次响应和原文中。
+        # 这里不改传入对象；未采用事项不是已验证成功的事项，不能冒称完整覆盖。
+        unique, seen = [], set()
+        for event in item["events"]:
+            signature = json.dumps(event, ensure_ascii=False, sort_keys=True)
+            if signature not in seen:
+                seen.add(signature)
+                unique.append(event)
+        item["events"] = unique[:EVENT_ITEM_LIMIT]
+        omitted_counts[item["id"]] = len(unique) - len(item["events"])
         catalog = quote_catalog(source[item["id"]]["body"])
-        for event in item.get("events", []):
+        for event_index, event in enumerate(item.get("events", [])):
             if not isinstance(event, dict):
                 raise ValueError("ANALYSIS_EVENT_FORMAT_INVALID")
             if "quote_ids" not in event:
@@ -119,12 +165,19 @@ def validate_events(value: dict, documents: list[dict]) -> list[dict]:
             if (
                 "quotes" in event
                 or not isinstance(ids, list)
-                or not 1 <= len(ids) <= 3
+                or not ids
                 or any(not isinstance(identity, str) or identity not in catalog for identity in ids)
-                or len(ids) != len(set(ids))
             ):
                 raise ValueError(f"ANALYSIS_QUOTE_ID_INVALID: 文档{item['id']}只能原样选择quote_catalogs中的编号。")
-            event["quotes"] = [catalog[identity]["text"] for identity in ids]
+            # 先核对所有编号再去重，不能取前十条而漏过尾部的虚构/异源引用。
+            # 按原文位置整理，完整保留多片段中的表头、审批条件与否定；原始回答不改写。
+            key = (item["id"], event_index)
+            supplied_counts[key] = len(ids)
+            selected = sorted(set(ids), key=lambda identity: catalog[identity]["start"])
+            event["quotes"] = [catalog[identity]["text"] for identity in selected]
+            selected_spans[key] = [
+                {field: catalog[identity][field] for field in ("start", "end")} for identity in selected
+            ]
     result = ParsedDocuments.model_validate(resolved)
     if len(result.items) != len(source) or {v.id for v in result.items} != set(source):
         raise ValueError("ANALYSIS_DOCUMENT_MISMATCH")
@@ -132,19 +185,43 @@ def validate_events(value: dict, documents: list[dict]) -> list[dict]:
     for item in result.items:
         doc = source[item.id]
         for i, event in enumerate(item.events):
+            full_spans = selected_spans.get((item.id, i)) or [
+                {"start": doc["body"].index(q), "end": doc["body"].index(q) + len(q)} if q in doc["body"] else {}
+                for q in event.quotes
+            ]
+            organized_quotes, organized_spans = [], []
             for quote_index, quote in enumerate(event.quotes):
                 if quote not in doc["body"]:
                     raise ValueError(
                         f"ANALYSIS_QUOTE_MISMATCH: items[{item.id}].events[{i}].quotes[{quote_index}]"
                         "必须逐字复制输入body中的连续原文，包括数字、空格、否定和条件；不得拼接或改写。"
                     )
+                # 长引用拆成连续原文片段，不剪字、不拼接；短引句只要同源真实也可使用。
+                base = full_spans[quote_index]["start"]
+                for piece in quote_catalog(quote).values():
+                    organized_quotes.append(piece["text"])
+                    organized_spans.append({"start": base + piece["start"], "end": base + piece["end"]})
+            body = event.model_dump()
+            body["quotes"] = organized_quotes
+            for field in ("title", "meaning", "mechanism", "caveat"):
+                body[field] = organize_text(body[field], 120 if field == "title" else 250)
             events.append(
                 {
-                    **event.model_dump(),
+                    **body,
                     "id": f"{item.id}:{i}",
-                    "quote_spans": [
-                        {"start": doc["body"].index(q), "end": doc["body"].index(q) + len(q)} for q in event.quotes
-                    ],
+                    "quote_spans": organized_spans,
+                    "quote_groups": quote_groups(len(organized_quotes)),
+                    "event_selection": {
+                        "supplied_count": event_totals[item.id],
+                        "retained_count": len(item.events),
+                        "limit": EVENT_ITEM_LIMIT,
+                        "omitted_count": omitted_counts[item.id],
+                    },
+                    "quote_normalization": {
+                        "supplied_count": supplied_counts.get((item.id, i), len(event.quotes)),
+                        "retained_count": len(organized_quotes),
+                        "group_size": EVENT_QUOTE_GROUP_SIZE,
+                    },
                     "document": {k: v for k, v in doc.items() if k != "body"},
                 }
             )
@@ -155,7 +232,8 @@ def validate_analysis(value: dict, facts: dict, time_contract: dict | None = Non
     """数字由程序的事实正文展示；综合文字不得新增数字、概率或确定性涨跌。"""
     result = Analysis.model_validate(value)
     for index, reason in enumerate([*result.reasons, *result.counterpoints]):
-        if not set(reason.refs) <= set(facts) or len(reason.refs) != len(set(reason.refs)):
+        reason.refs = list(dict.fromkeys(reason.refs))
+        if not set(reason.refs) <= set(facts):
             unknown = sorted(set(reason.refs) - set(facts))
             raise ValueError(
                 f"ANALYSIS_REFERENCE_INVALID: reason[{index}].refs未知编号={unknown}；"
@@ -247,8 +325,16 @@ def validate_analysis(value: dict, facts: dict, time_contract: dict | None = Non
     all_reasons = [*result.reasons, *result.counterpoints]
     result.reasons = [r for r in all_reasons if r.role != opposite]
     result.counterpoints = [r for r in all_reasons if r.role == opposite]
-    if len(result.reasons) > 6 or len(result.counterpoints) > 4:
-        raise ValueError("ANALYSIS_REASON_GROUP_LIMIT")
+    # 条数和字数仅作整理目标，全部真实依据和条件保留；审查先看完整原文，再调整排版。
+    # 超过六条理由、四条反证或五个事实编号不构成内容错误，不增加新请求来凑格式。
+    result.summary = organize_text(result.summary, 250)
+    result.synthesis = organize_text(result.synthesis, 600)
+    for reason in [*result.reasons, *result.counterpoints]:
+        reason.title = organize_text(reason.title, 120)
+        reason.meaning = organize_text(reason.meaning, 250)
+        reason.implication = organize_text(reason.implication, 250)
+    result.change_conditions = [organize_text(text, 250) for text in dict.fromkeys(result.change_conditions)]
+    result.limitations = [organize_text(text, 250) for text in dict.fromkeys(result.limitations)]
     # 允许分别解释不同事项或正反机制，实际依据集合只保留一次；没有条数分数。
     result.evidence_units = sorted({ref for r in [*result.reasons, *result.counterpoints] for ref in r.refs})
     return result.model_dump()

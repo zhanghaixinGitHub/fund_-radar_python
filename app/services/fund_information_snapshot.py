@@ -123,9 +123,8 @@ def prepare(now) -> dict:
         if not body.strip():
             excluded.append({"id": doc["id"], "reason": "BODY_MISSING"})
             continue
-        truncated = len(body) > 18000
-        if truncated:
-            body = body[:14000] + "\n【中间部分未纳入】\n" + body[-4000:]
+        # 原文完整性影响缓存身份和事实条件；预算不足时明确停止，不删除中间正文。
+        truncated = False
         documents.append(
             {
                 "id": doc["id"],
@@ -170,9 +169,9 @@ def prepare(now) -> dict:
                 "url": d["sourceUrl"],
                 "codes": [],
                 "relation": "原文明示本基金；目录日期未证实为首次公开时间",
-                "body": body[:18000],
+                "body": body,
                 "body_scope": "FULL_TEXT",
-                "body_truncated": len(body) > 18000,
+                "body_truncated": False,
             }
         )
     documents = unique_documents(documents)

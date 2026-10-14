@@ -5,6 +5,7 @@ from bisect import bisect_left
 from collections import Counter, defaultdict
 from datetime import datetime
 
+from app.schemas.fund_information_analysis import quote_groups
 from app.services.direction_1d_protocol import ZONE, calendar, digest
 
 
@@ -180,19 +181,24 @@ def event_facts(groups: list[dict], companies: list[dict]) -> dict:
         sources, lines, seen, receipts = [], [], set(), []
         for event in members:
             doc = event["document"]
-            for index, quote in enumerate(event["quotes"]):
-                if quote not in seen:
-                    lines.append(f"{doc['date']}《{doc['title']}》：{quote}")
-                    seen.add(quote)
-                receipts.append(
-                    {
-                        "event_id": event["id"],
-                        "document_id": doc["id"],
-                        "quote": quote,
-                        "source_hash": doc.get("source_hash"),
-                        **(event.get("quote_spans") or [{} for _ in event["quotes"]])[index],
-                    }
-                )
+            # 引用按十条一组组织，同一事项和公司仍只有原来的身份及判断权重。
+            # 不截取前十条；末组的审批、否定和其他条件也完整进入依据正文和核验档案。
+            for group_index, indices in enumerate(quote_groups(len(event["quotes"]))):
+                for index in indices:
+                    quote = event["quotes"][index]
+                    if quote not in seen:
+                        lines.append(f"{doc['date']}《{doc['title']}》：{quote}")
+                        seen.add(quote)
+                    receipts.append(
+                        {
+                            "event_id": event["id"],
+                            "document_id": doc["id"],
+                            "quote_group_index": group_index,
+                            "quote": quote,
+                            "source_hash": doc.get("source_hash"),
+                            **(event.get("quote_spans") or [{} for _ in event["quotes"]])[index],
+                        }
+                    )
             source = {"title": doc["title"], "url": doc.get("url"), "publishedDate": doc["date"]}
             if source not in sources:
                 sources.append(source)

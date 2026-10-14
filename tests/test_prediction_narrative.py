@@ -204,56 +204,12 @@ def test_linear_multi_restores_winner_and_opposing_contributions():
         multi_facts(p)
 
 
-@pytest.mark.parametrize(
-    "status,choice",
-    [
-        (429, None),
-        (200, {"finish_reason": "length", "message": {"content": "{}"}}),
-        (200, {"finish_reason": "stop", "message": {"content": ""}}),
-    ],
-)
-def test_provider_errors_empty_and_truncated_outputs_are_not_retried(monkeypatch, status, choice):
-    real_client = httpx.Client
-    calls = []
-
-    def handler(request):
-        calls.append(request)
-        return httpx.Response(status, json={"choices": [choice]})
-
-    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs))
+@pytest.mark.parametrize("fund_code", ["002112", "000001"])
+def test_legacy_narrative_provider_is_disabled_before_http(monkeypatch, fund_code):
+    monkeypatch.setattr(httpx, "Client", lambda **_: pytest.fail("说明润色不得创建付费客户端"))
     settings = Settings(_env_file=None, deepseek_api_key="test-key", deepseek_model="test-model")
-    with pytest.raises(ValueError):
-        generate(daily_facts(daily()), settings)
-    assert len(calls) == 1
-
-
-def test_http_contract_is_bounded_json_and_excludes_model_parameters(monkeypatch):
-    facts = daily_facts(daily())
-    calls = []
-    real_client = httpx.Client
-
-    def handler(request):
-        import json
-
-        body = json.loads(request.content)
-        calls.append(body)
-        assert body["thinking"] == {"type": "disabled"}
-        assert body["temperature"] == 0.2
-        assert body["response_format"] == {"type": "json_object"}
-        assert "contribution" not in body["messages"][1]["content"]
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {"finish_reason": "stop", "message": {"content": json.dumps(response(facts), ensure_ascii=False)}}
-                ]
-            },
-        )
-
-    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs))
-    settings = Settings(_env_file=None, deepseek_api_key="test-key", deepseek_model="test-model")
-    assert generate(facts, settings)["summary"] == facts["summary"]
-    assert len(calls) == 1
+    with pytest.raises(ValueError, match="DEEPSEEK_NARRATIVE_DISABLED"):
+        generate({"fundCode": fund_code}, settings)
 
 
 def prepare_service(monkeypatch, *, row=None):
@@ -287,14 +243,14 @@ def test_success_cache_does_not_call_deepseek_or_claim_again(monkeypatch):
     assert service.ensure("multi", source_id, "002112")["narrative"] == narrative
 
 
-def test_provider_failure_keeps_original_and_records_cooldown(monkeypatch):
+def test_narrative_fallback_does_not_claim_or_record_a_paid_attempt(monkeypatch):
     source_id, _ = prepare_service(monkeypatch)
     finished = []
     monkeypatch.setattr(service.store, "claim", lambda *_: uuid4())
     monkeypatch.setattr(service.store, "finish", lambda *args, **kwargs: finished.append(kwargs))
     monkeypatch.setattr(service, "generate", lambda *_: (_ for _ in ()).throw(ValueError("NARRATIVE_CONTENT_INVALID")))
     assert service.ensure("multi", source_id, "002112")["state"] == "FALLBACK"
-    assert finished == [{"failure": "NARRATIVE_CONTENT_INVALID"}]
+    assert finished == []
 
 
 def test_cooldown_and_missing_config_do_not_call_provider(monkeypatch):
@@ -345,7 +301,8 @@ def test_content_upgrade_preserves_old_row_but_never_displays_old_causal_text(mo
 
     monkeypatch.setattr(service, "generate", generate)
     result = service.ensure("multi", source_id, "002112")
-    assert result["narrative"] == new if outcome == "ready" else result["narrative"] != old
+    assert result["narrative"] != old
+    assert result["narrative"] != new
     assert result["narrative"]["styleVersion"] == STYLE_VERSION
-    assert result["state"] == {"pending": "PENDING", "failed": "FALLBACK", "ready": "READY"}[outcome]
+    assert result["state"] == "FALLBACK"
     assert prior["payload"] == old

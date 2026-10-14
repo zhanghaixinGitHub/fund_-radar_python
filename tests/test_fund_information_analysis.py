@@ -127,15 +127,24 @@ def test_announcement_company_follows_each_saved_fact_not_list_order():
     assert body == original
 
 
-@pytest.mark.parametrize("relation,category,expected", [
-    ("", "公告", "【关联公司待确认】原文"),
-    ("甲公司披露仓位1.00%；乙公司披露仓位2.00%", "公告", "【相关公司：甲公司、乙公司】原文"),
-    ("甲公司披露仓位1.00%", "新闻", "原文"),
-])
+@pytest.mark.parametrize(
+    "relation,category,expected",
+    [
+        ("", "公告", "【关联公司待确认】原文"),
+        ("甲公司披露仓位1.00%；乙公司披露仓位2.00%", "公告", "【相关公司：甲公司、乙公司】原文"),
+        ("甲公司披露仓位1.00%", "新闻", "原文"),
+    ],
+)
 def test_missing_or_multi_company_relation_does_not_guess_issuer(relation, category, expected):
     analysis = candidate()
-    facts = {"holdings": {"category": category, "text": "原文", "relation": relation,
-        "source": {"title": "标题", "url": "https://example.com/a", "publishedDate": "2026-10-08"}}}
+    facts = {
+        "holdings": {
+            "category": category,
+            "text": "原文",
+            "relation": relation,
+            "source": {"title": "标题", "url": "https://example.com/a", "publishedDate": "2026-10-08"},
+        }
+    }
     body = {"analysis": analysis, "evidence": facts, "narrative": narrative(analysis, facts, [], [])}
     assert display_narrative(body)["drivers"][0]["observation"] == expected
 
@@ -146,7 +155,7 @@ def test_duplicate_publication_does_not_add_input_evidence():
     assert len(unique_documents([doc, {**doc, "id": "b", "body": "同一计划的新进展"}])) == 2
 
 
-def test_bounded_repair_keeps_validation(monkeypatch):
+def test_invalid_first_synthesis_is_rejected_without_paid_repair(monkeypatch):
     from app.services import fund_information_analysis as service
 
     calls = []
@@ -174,9 +183,9 @@ def test_bounded_repair_keeps_validation(monkeypatch):
         "inventory": [],
         "overflow": 0,
     }
-    result, _, _ = service.analyze(data, None)
-    assert result["confidence"] == "LOW"
-    assert calls == ["SYNTHESIS", "SYNTHESIS_REPAIR", "AUDIT"]
+    with pytest.raises(ValueError, match="REVIEW_FAILED"):
+        service.analyze(data, None)
+    assert calls == ["SYNTHESIS"]
 
 
 def test_wrong_semantics_cannot_be_published_after_retry(monkeypatch):
@@ -205,7 +214,86 @@ def test_wrong_semantics_cannot_be_published_after_retry(monkeypatch):
     }
     with pytest.raises(ValueError, match="REVIEW_FAILED"):
         service.analyze(data, None)
-    assert calls.count("SYNTHESIS_REPAIR") == 2
+    assert calls == ["SYNTHESIS", "AUDIT"]
+
+
+def test_failed_document_still_allows_verified_market_facts_to_generate_direction(monkeypatch, tmp_path):
+    """公告响应不合格仅跳过该份；剩余真实行情仍进入综合与核验，风险说明不能丢失。"""
+    from app.services import fund_information_analysis as service
+    from app.services.fund_document_parse_cache import digest
+
+    body = "本公司公告尚需批准，不能视为已经实施。"
+    doc = {
+        "id": "bad-document",
+        "kind": "ANNOUNCEMENT",
+        "title": "待批准公告",
+        "body": body,
+        "source_hash": digest(body),
+        "body_scope": "FULL_TEXT",
+        "body_truncated": False,
+        "date": "2026-10-12",
+        "available_at": "2026-10-12T10:00:00+08:00",
+        "codes": [],
+    }
+    data = {
+        "fund_code": "002112",
+        "documents": [doc],
+        "companies": [],
+        "facts": {"holdings": {"category": "持仓行情", "text": "已保存的行情事实。", "source": None}},
+        "window": {"target_nav_date": "2026-10-14"},
+        "as_of": "2026-10-13T19:00:00+08:00",
+        "latest_nav_date": "2026-10-13",
+        "inventory": [],
+        "overflow": 0,
+    }
+    monkeypatch.setattr(service, "time_context", lambda data: {})
+    monkeypatch.setattr(
+        "app.services.fund_material_parsing.get_settings",
+        lambda: SimpleNamespace(fund_parse_cache_path=str(tmp_path / "parses.sqlite3")),
+    )
+    calls = []
+
+    def request(prompt, value, stage, budget):
+        calls.append(stage)
+        if stage == "EVENT":
+            return {"items": []}
+        assert value["skipped_documents"][0]["documentId"] == doc["id"]
+        assert len(value["facts"]) == 1 and value["gaps"]
+        if stage == "AUDIT":
+            return {"valid": True, "issues": []}
+        result = candidate()
+        result["reasons"][0]["refs"] = list(value["facts"])
+        result["limitations"] = ["披露持仓不是实时仓位。"]
+        return result
+
+    monkeypatch.setattr(service, "request", request)
+    analysis, used_facts, gaps = service.analyze(data, None)
+    assert analysis["direction"] == "DOWN" and calls == ["EVENT", "SYNTHESIS", "AUDIT"]
+    assert not any(fact["category"] == "公告" for fact in used_facts.values())
+    display = narrative(analysis, used_facts, data["inventory"], gaps)
+    assert any("1份" in item and "未用于判断" in item for item in display["limitations"])
+
+
+@pytest.mark.parametrize("newer", [False, True])
+def test_slow_material_parse_cannot_register_older_input_over_newer_snapshot(newer):
+    """外部解析耗时不能颠倒输入版本顺序；只比较同一目标日的冻结时刻。"""
+    from app.services.fund_information_analysis import _ensure_input_current
+
+    data = {"as_of": "2026-10-13T19:00:00+08:00", "window": {"target_nav_date": "2026-10-14"}}
+    received = []
+
+    def execute(statement, params):
+        received.append((str(statement), params))
+        return SimpleNamespace(scalar_one=lambda: newer)
+
+    connection = SimpleNamespace(execute=execute)
+    if newer:
+        with pytest.raises(ValueError, match="WINDOW_CHANGED"):
+            _ensure_input_current(connection, data)
+    else:
+        _ensure_input_current(connection, data)
+    assert received[0][1] == {"target": "2026-10-14", "cutoff": data["as_of"]}
+    assert "payload->'window'->>'target_nav_date'=:target" in received[0][0]
 
 
 @pytest.mark.parametrize("target_nav,expected", [("0.9", "DOWN"), ("1", "FLAT"), ("1.1", "UP")])
@@ -216,21 +304,27 @@ def test_later_published_base_keeps_original_comparison_date(monkeypatch, target
 
     now = datetime(2026, 10, 12, 21, tzinfo=ZONE)
     body = {
-        "target_nav_date": "2026-10-12", "base_nav_date": "2026-10-09",
+        "target_nav_date": "2026-10-12",
+        "base_nav_date": "2026-10-09",
         "input": {"source_id": "same-source", "values": [{"nav_date": "2026-10-08"}]},
-        "task_key": "002112-test", "input_snapshot_id": "input",
-        "target_definition": "UNIT_NAV_DIRECTION", "expires_at": "2026-11-12T00:00:00+08:00",
+        "task_key": "002112-test",
+        "input_snapshot_id": "input",
+        "target_definition": "UNIT_NAV_DIRECTION",
+        "expires_at": "2026-11-12T00:00:00+08:00",
     }
-    connection = SimpleNamespace(execute=lambda *args: SimpleNamespace(
-        mappings=lambda: SimpleNamespace(first=lambda: None)))
+    connection = SimpleNamespace(
+        execute=lambda *args: SimpleNamespace(mappings=lambda: SimpleNamespace(first=lambda: None))
+    )
     monkeypatch.setattr(service, "get_engine", lambda: SimpleNamespace(begin=lambda: nullcontext(connection)))
     monkeypatch.setattr(service.repo, "clock", lambda: now)
     monkeypatch.setattr(service.repo, "source", lambda c: {"source_id": "same-source"})
 
     def navs(c, code, source, base, target):
         assert code == "002112" and base == date(2026, 10, 9) and target == date(2026, 10, 12)
-        return [{"nav_date": base, "unit_nav": "1", "content_hash": "base"},
-                {"nav_date": target, "unit_nav": target_nav, "content_hash": "target"}]
+        return [
+            {"nav_date": base, "unit_nav": "1", "content_hash": "base"},
+            {"nav_date": target, "unit_nav": target_nav, "content_hash": "target"},
+        ]
 
     monkeypatch.setattr(service.repo, "navs", navs)
     monkeypatch.setattr(service.repo, "observe", lambda c, code, source, rows, at: rows)

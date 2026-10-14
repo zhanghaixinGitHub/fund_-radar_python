@@ -127,12 +127,12 @@ def test_parent_reconciles_original_children_even_after_order_changes():
     manager = make_manager([])
     try:
         parent = wait_finished(manager, manager.start_all().job_id)
-        child = manager.get_latest_job("MULTI_PREDICTIONS")
+        child = manager.get_latest_job("DIRECTION_1D_PREDICTIONS")
         manager._jobs[child.job_id] = replace(child, status="FAILED")
         manager._batch_child_ids[parent.job_id] = tuple(reversed(manager._batch_child_ids[parent.job_id]))
         refreshed = manager.get_job(parent.job_id)
         assert refreshed.status == "PARTIAL_SUCCESS"
-        assert "全部关注多周期预测" in refreshed.error_message
+        assert "002112 一日预测" in refreshed.error_message
         assert "基金持仓与公司资料更新" not in refreshed.error_message
         manager._jobs[child.job_id] = replace(child, status="SUCCEEDED")
         assert manager.get_job(parent.job_id).status == "SUCCEEDED"

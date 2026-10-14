@@ -88,8 +88,14 @@ def submit_forecast(code, expected_target_date=None, request_id=None):
     if request_id:
         key += f":request:{request_id}"
     return submit(
-        key, "FORECAST", {"fund_code": code, "target_nav_date": w["target_nav_date"], "protocol": selected_protocol,
-                          "revisions": request_id is not None}
+        key,
+        "FORECAST",
+        {
+            "fund_code": code,
+            "target_nav_date": w["target_nav_date"],
+            "protocol": selected_protocol,
+            "revisions": request_id is not None,
+        },
     )
 
 
@@ -168,12 +174,24 @@ def _execute_locked(job_id, kind, payload):
             from app.schemas.fund_information_analysis import PROTOCOL as analysis_protocol
 
             if payload.get("protocol") == analysis_protocol and payload["fund_code"] == "002112":
-                from app.services.fund_information_analysis import infer as analyze
-                result = analyze(target)
+                from app.core.config import get_settings
+
+                if get_settings().fund_002112_analysis_mode == "CODEX_MANUAL":
+                    from app.services.fund_codex_analysis import ready_result
+
+                    result = ready_result(target)
+                else:
+                    from app.services.fund_information_analysis import infer as analyze
+
+                    result = analyze(target)
             else:
                 sync_missing([payload["fund_code"]])
-                result = infer(payload["fund_code"], expected_target=target, protocol=payload.get("protocol", PROTOCOL),
-                               revisions=payload.get("revisions", False))
+                result = infer(
+                    payload["fund_code"],
+                    expected_target=target,
+                    protocol=payload.get("protocol", PROTOCOL),
+                    revisions=payload.get("revisions", False),
+                )
         elif kind == "LABEL_SYNC":
             result = sync_answer(payload)
         else:

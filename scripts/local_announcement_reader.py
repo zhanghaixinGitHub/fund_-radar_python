@@ -158,14 +158,22 @@ def inspect_answer(question: str, answer: str, quotes: list[str]) -> list[str]:
     positive_submitted = re.search(r"(?<!未)(?<!非)(?<!不)(?:已经|已)提交", value)
     if positive_submitted and not re.search(r"(?<!未)(?<!非)(?<!不)(?:已经|已)提交", evidence):
         flags.append("SUBMISSION_STAGE_NOT_SUPPORTED")
-    if re.search(r"股票代码|股票代号|股票编码", query) and not re.search(r"\b\d{5,6}\b", value):
+    # 中文也属于正则的“单词字符”，不能用 \b 判断“代码为03757”的数字边界。
+    if re.search(r"股票代码|股票代号|股票编码", query) and not re.search(r"(?<!\d)\d{5,6}(?!\d)", value):
         flags.append("REQUESTED_STOCK_CODE_MISSING")
-    if value.endswith(("为", "是", "：", ":", "分别")):
+    simple_polar = "是否" in query and not re.search(r"多少|哪些|何时|为何|为什么|原因|[，；、]|以及|并且", query)
+    if value.endswith(("为", "是", "：", ":", "分别")) and not (value == "是" and simple_polar):
         flags.append("ANSWER_UNFINISHED")
     asks_price_value = "价格" in query and re.search(r"多少|如何调整|怎样调整|调整前后|扣减", query)
     if asks_price_value and "元/股" in evidence and not re.search(r"\d(?:[\d.]*)(?:元/股)", value):
         flags.append("REQUESTED_ADJUSTED_PRICE_MISSING")
-    if "候选人" in query and "审核" in value and "独立董事" in evidence and "独立董事" not in value:
+    if (
+        "候选人" in query
+        and re.search(r"任职资格|审核条件|独立性|关联关系", query)
+        and "审核" in value
+        and "独立董事" in evidence
+        and "独立董事" not in value
+    ):
         flags.append("CANDIDATE_SCOPE_MISSING")
     if "备案" in query and "批准" in value and "批准" not in evidence:
         flags.append("FILING_REPHRASED_AS_APPROVAL")

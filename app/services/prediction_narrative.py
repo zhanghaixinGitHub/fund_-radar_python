@@ -110,6 +110,10 @@ def ensure(kind, source_id, fund_code, trace_id=""):
             else multi_facts(body)
         )
         safe = safe_narrative(facts)
+        # 私人DeepSeek只供002112/T1综合预测，说明润色入口一律使用本地事实回退。
+        # 已保存正文在上方仍可读取；不得为其他基金、其他周期或旧说明申请新额度。
+        if kind != "daily" or fund_code != "002112" or body.get("protocol") != analysis_protocol:
+            return fallback()
         settings = get_settings()
         if not settings.deepseek_api_key.get_secret_value() or not settings.deepseek_model:
             return fallback()

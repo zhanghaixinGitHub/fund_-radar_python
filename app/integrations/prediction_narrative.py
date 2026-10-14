@@ -1,11 +1,6 @@
 """DeepSeek 仅负责原预测事实的中文组织；固定结构、低随机性、有限输出、无自动重试。"""
 
-import json
 import re
-import time
-from urllib.parse import urlparse
-
-import httpx
 
 SYSTEM_PROMPT = """你是基金预测说明的中文编辑。请用 json 输出一段连贯的综合分析。
 输入 facts 是从原预测核对的观察与局限；summary、日期、周期和 limitations 由程序展示。
@@ -115,43 +110,5 @@ def validate_response(value, facts):
 
 
 def generate(facts, settings):
-    """单次有界请求；仅发送事实白名单，不发账户、密钥以外配置、原模型参数或原始响应日志。"""
-    endpoint = settings.deepseek_base_url.rstrip("/")
-    parsed = urlparse(endpoint)
-    if parsed.scheme != "https" or parsed.hostname != "api.deepseek.com" or parsed.username or parsed.query:
-        raise ValueError("DEEPSEEK_ENDPOINT_INVALID")
-    # 日期、周期和结论在固定摘要中展示，不重复发给编辑，避免被自由文字再次改写。
-    prompt = {key: facts[key] for key in ("facts", "requiredRefs", "optionalRefs")}
-    started = time.monotonic()
-    with httpx.Client(
-        timeout=httpx.Timeout(settings.deepseek_timeout_seconds, connect=3, write=3, pool=1), follow_redirects=False
-    ) as client:
-        with client.stream(
-            "POST",
-            endpoint + "/chat/completions",
-            headers={"Authorization": "Bearer " + settings.deepseek_api_key.get_secret_value()},
-            json={
-                "model": settings.deepseek_model,
-                "stream": False,
-                "thinking": {"type": "disabled"},
-                "temperature": 0.2,
-                "max_tokens": 1800,
-                "response_format": {"type": "json_object"},
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
-                ],
-            },
-        ) as response:
-            if response.status_code != 200:
-                raise ValueError(f"DEEPSEEK_HTTP_{response.status_code}")
-            body = bytearray()
-            for part in response.iter_bytes():
-                body.extend(part)
-                if len(body) > 100_000 or time.monotonic() - started > settings.deepseek_timeout_seconds + 3:
-                    raise ValueError("DEEPSEEK_RESPONSE_LIMIT")
-    data = json.loads(body)
-    choice = data["choices"][0]
-    if choice.get("finish_reason") != "stop":
-        raise ValueError("DEEPSEEK_OUTPUT_INCOMPLETE")
-    return validate_response(json.loads(choice["message"]["content"]), facts)
+    """旧润色集成已禁用；直接调用也在创建客户端之前拒绝，避免绕过业务入口。"""
+    raise ValueError("DEEPSEEK_NARRATIVE_DISABLED")
