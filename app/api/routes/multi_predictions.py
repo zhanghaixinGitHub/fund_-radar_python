@@ -112,6 +112,17 @@ def read_history(
     return {"items": history(fund_code, limit=limit, before=before, before_id=beforeId)}
 
 
+@router.get("/funds/{fund_code}/analysis-reviews")
+def analysis_reviews(fund_code: FundCode, before: datetime | None = None, beforeId: UUID | None = None):
+    """事后回看独立读取，不放入正式预测、当前结果或准确率查询。"""
+    from app.services.analysis_reviews import list_reviews
+
+    try:
+        return list_reviews(fund_code, before=before, before_id=beforeId)
+    except ValueError as error:
+        raise HTTPException(409, "综合回看暂时无法读取。") from error
+
+
 @router.post("/funds/{fund_code}/predictions/{prediction_id}/narrative")
 def prediction_narrative(fund_code: FundCode, prediction_id: UUID, x_trace_id: str = Header(default="")):
     """按原预测整理解释；不接收客户端事实、未来信息或自定义提示词。"""

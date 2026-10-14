@@ -1,4 +1,4 @@
-"""002112 聊天分析的本机导入：完整输入留存、原文引用核对、追加结果、不调用模型。"""
+"""全基金聊天分析的本机导入：完整输入留存、原文引用核对、追加结果、不调用模型。"""
 
 from copy import deepcopy
 from datetime import datetime
@@ -20,7 +20,7 @@ from app.services.fund_information_snapshot import prepare
 SOURCE = "CODEX_ASSISTED_REVIEW"
 
 
-def freeze_packet(directory: Path) -> dict:
+def freeze_packet(directory: Path, fund_code="002112", materials_path=None) -> dict:
     """冻结数据库时钟对应的完整公共输入；分段仅方便读取，正文不截断、不改写。
 
     本函数不采集数据、不调用供应商、不生成预测。目录必须全新，防止覆盖已有
@@ -28,10 +28,10 @@ def freeze_packet(directory: Path) -> dict:
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=False)
-    data = prepare(repo.clock())
+    data = prepare(repo.clock(), fund_code, materials_path)
     if data["window"]["status"] != "OPEN":
         raise ValueError("MISSED_DEADLINE")
-    packet = {"format": "CODEX_002112_INPUT_V1", "input_hash": digest(data), "input": data}
+    packet = {"format": "CODEX_FUND_INPUT_V1", "input_hash": digest(data), "input": data}
     save(directory / "input.json", packet)
     documents = directory / "documents"
     documents.mkdir()
@@ -62,11 +62,15 @@ def freeze_packet(directory: Path) -> dict:
 def checked_packet(path: Path) -> dict:
     """核对文件摘要和完整输入身份；原文全文及资料清单始终保留在冻结包中。"""
     packet = read(Path(path))
-    if packet.get("format") != "CODEX_002112_INPUT_V1" or digest(packet.get("input")) != packet.get("input_hash"):
+    if packet.get("format") not in {"CODEX_002112_INPUT_V1", "CODEX_FUND_INPUT_V1"} or digest(
+        packet.get("input")
+    ) != packet.get("input_hash"):
         raise ValueError("MANUAL_INPUT_HASH_MISMATCH")
     data = packet["input"]
     if (
-        data.get("fund_code") != "002112"
+        not str(data.get("fund_code", "")).isascii()
+        or not str(data.get("fund_code", "")).isdigit()
+        or len(data["fund_code"]) != 6
         or data["window"]["target_nav_date"] != window(repo.clock())["target_nav_date"]
     ):
         raise ValueError("WINDOW_CHANGED")
@@ -164,9 +168,13 @@ def import_review(packet_path: Path, review_path: Path) -> dict:
     if cutoff > now or now >= datetime.fromisoformat(data["window"]["deadline_at"]):
         raise ValueError("MISSED_DEADLINE")
     # 重新按原冻结时刻读取已保存来源，阻止源文件或目录被替换后仍沿用原判断。
-    if digest(prepare(cutoff)) != packet["input_hash"]:
+    original = prepare(cutoff, data["fund_code"], data.get("materials_path"))
+    if digest(original) != packet["input_hash"]:
         raise ValueError("MANUAL_FROZEN_SOURCE_CHANGED")
     facts, events, coverage = catalog(data, review)
+    from app.services.comprehensive_prediction_policy import validate_review
+
+    validate_review(data, review, facts)
     result = validate_analysis(review["analysis"], facts, time_context(data))
     if review.get("audit") != {"valid": True, "issues": []}:
         raise ValueError("MANUAL_REVIEW_FAILED")
@@ -195,9 +203,9 @@ def import_review(packet_path: Path, review_path: Path) -> dict:
         generation_source=SOURCE,
         review_hash=review_hash,
     )
-    key = f"CODEX_MANUAL:002112:{data['window']['target_nav_date']}:{review_hash}"
+    key = f"CODEX_MANUAL:{data['fund_code']}:{data['window']['target_nav_date']}:{review_hash}"
     payload = {
-        "fund_code": "002112",
+        "fund_code": data["fund_code"],
         "target_nav_date": data["window"]["target_nav_date"],
         "protocol": PROTOCOL,
         "generation_source": SOURCE,
@@ -230,15 +238,15 @@ def import_review(packet_path: Path, review_path: Path) -> dict:
     }
 
 
-def ready_result(target: str) -> dict:
+def ready_result(target: str, fund_code="002112") -> dict:
     """网页生成仅读取本期已导入判断；未导入时说明缺口，绝不回退调用付费供应商。"""
     with get_engine().connect() as connection:
         row = (
             connection.execute(
                 text("""SELECT result FROM direction_1d_job WHERE kind='FORECAST' AND state='SUCCEEDED'
-            AND payload->>'fund_code'='002112' AND payload->>'target_nav_date'=:target
+            AND payload->>'fund_code'=:code AND payload->>'target_nav_date'=:target
             AND payload->>'generation_source'=:source ORDER BY created_at DESC,job_id DESC LIMIT 1"""),
-                {"target": target, "source": SOURCE},
+                {"target": target, "source": SOURCE, "code": fund_code},
             )
             .mappings()
             .first()
@@ -252,8 +260,12 @@ def ready_result(target: str) -> dict:
         digest(value) != row["result"]["content_hash"]
         or value.get("generation_source") != SOURCE
         or value.get("target_nav_date") != target
-        or value.get("fund_code") != "002112"
+        or value.get("fund_code") != fund_code
         or repo.clock() >= datetime.fromisoformat(value["deadline_at"])
     ):
         raise ValueError("MANUAL_RESULT_INVALID")
+    from app.services.comprehensive_prediction_policy import identity
+
+    if any(value.get(key) != expected for key, expected in identity().items()):
+        raise ValueError("MANUAL_ANALYSIS_REQUIRED")
     return row["result"]

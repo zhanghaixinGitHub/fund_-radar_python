@@ -174,6 +174,7 @@ def test_invalid_first_synthesis_is_rejected_without_paid_repair(monkeypatch):
     monkeypatch.setattr(service, "request", request)
     monkeypatch.setattr(service, "time_context", lambda data: {})
     data = {
+        "fund_code": "002112",
         "documents": [],
         "companies": [],
         "facts": {"holdings": {}},
@@ -203,6 +204,7 @@ def test_wrong_semantics_cannot_be_published_after_retry(monkeypatch):
     monkeypatch.setattr(service, "request", request)
     monkeypatch.setattr(service, "time_context", lambda data: {})
     data = {
+        "fund_code": "002112",
         "documents": [],
         "companies": [],
         "facts": {"holdings": {}},
@@ -215,6 +217,50 @@ def test_wrong_semantics_cannot_be_published_after_retry(monkeypatch):
     with pytest.raises(ValueError, match="REVIEW_FAILED"):
         service.analyze(data, None)
     assert calls == ["SYNTHESIS", "AUDIT"]
+
+
+@pytest.mark.parametrize("code", ["002112", "016008", "006730", "000001"])
+def test_analysis_uses_actual_fund_identity_in_synthesis_and_audit(code, monkeypatch):
+    """已核验的自身资料可进入同一综合逻辑；不调用供应商或创建真实预测。"""
+    from app.services import fund_information_analysis as service
+
+    calls = []
+
+    def request(prompt, value, stage, budget):
+        assert value["fund_code"] == code
+        assert "对002112" not in prompt
+        calls.append(stage)
+        if stage == "AUDIT":
+            return {"valid": True, "issues": []}
+        result = candidate()
+        result["reasons"][0]["refs"] = list(value["facts"])
+        result["limitations"] = ["披露持仓不是实时仓位。"]
+        return result
+
+    monkeypatch.setattr(service, "request", request)
+    monkeypatch.setattr(service, "time_context", lambda data: {})
+    analysis, _, _ = service.analyze(
+        {
+            "fund_code": code,
+            "companies": [],
+            "facts": {"holdings": {"category": "持仓行情", "text": "自身持仓行情事实。", "source": None}},
+            "window": {},
+            "as_of": "2026-10-14T09:35:00+08:00",
+            "latest_nav_date": None,
+            "inventory": [],
+        },
+        None,
+        parsed_documents=[],
+    )
+    assert calls == ["SYNTHESIS", "AUDIT"] and analysis["direction"] == "DOWN"
+
+
+@pytest.mark.parametrize("code", [None, "", "01600", "016008.OF", "０１６００８"])
+def test_analysis_cannot_default_missing_or_invalid_identity_to_pilot(code):
+    from app.services import fund_information_analysis as service
+
+    with pytest.raises(ValueError, match="ANALYSIS_FUND_SCOPE_INVALID"):
+        service.analyze({"fund_code": code}, None, parsed_documents=[])
 
 
 def test_failed_document_still_allows_verified_market_facts_to_generate_direction(monkeypatch, tmp_path):
@@ -279,7 +325,7 @@ def test_slow_material_parse_cannot_register_older_input_over_newer_snapshot(new
     """外部解析耗时不能颠倒输入版本顺序；只比较同一目标日的冻结时刻。"""
     from app.services.fund_information_analysis import _ensure_input_current
 
-    data = {"as_of": "2026-10-13T19:00:00+08:00", "window": {"target_nav_date": "2026-10-14"}}
+    data = {"fund_code": "016008", "as_of": "2026-10-13T19:00:00+08:00", "window": {"target_nav_date": "2026-10-14"}}
     received = []
 
     def execute(statement, params):
@@ -292,7 +338,7 @@ def test_slow_material_parse_cannot_register_older_input_over_newer_snapshot(new
             _ensure_input_current(connection, data)
     else:
         _ensure_input_current(connection, data)
-    assert received[0][1] == {"target": "2026-10-14", "cutoff": data["as_of"]}
+    assert received[0][1] == {"code": "016008", "target": "2026-10-14", "cutoff": data["as_of"]}
     assert "payload->'window'->>'target_nav_date'=:target" in received[0][0]
 
 

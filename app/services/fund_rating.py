@@ -77,6 +77,12 @@ EXPLANATIONS = {
 
 
 def _public(member: dict, computed: dict | None, config: dict, product_count: int, as_of: date) -> dict:
+    from app.services.fund_rating_public_policy import BASIS
+
+    if config.get("basis") == BASIS:
+        from app.services.fund_rating_public_view import public_evidence
+
+        return public_evidence(member, computed, as_of)
     sources = [
         {"title": r["title"], "url": r["url"], "publishedOn": r["published_on"]} for r in member["bundle"]["sources"]
     ]
@@ -255,7 +261,12 @@ def _category(engine, root, category, members, as_of, frozen) -> dict:
     family = members[0]["family"]
     if any(m["family"] != family for m in members):
         raise ValueError("RATING_MIXED_CATEGORY")
-    config = candidate(family) if family != "OTHER" else None
+    from app.services.fund_rating_public_policy import BASIS, calculate_public, policy
+
+    public_basis = any(m.get("bundle", {}).get("basis") == BASIS for m in members)
+    if public_basis and any(m["admitted"] and m.get("bundle", {}).get("basis") != BASIS for m in members):
+        raise ValueError("RATING_MIXED_METHODS")
+    config = policy() if public_basis else candidate(family) if family != "OTHER" else None
     method_id = digest(config) if config else None
     admitted = [m for m in members if m["admitted"]]
     product_count = sum(m["representative"] for m in admitted)
@@ -281,11 +292,18 @@ def _category(engine, root, category, members, as_of, frozen) -> dict:
         ready = method and method.active and category in validated_categories
         computed = {}
         if ready and product_count >= config["minimum_products"]:
-            stability(admitted)
-            computed = {r["fund_code"]: r for r in calculate(admitted, config)}
+            if public_basis:
+                computed = {m["fund_code"]: calculate_public(m["metrics"], config=config) for m in admitted}
+            else:
+                stability(admitted)
+                computed = {r["fund_code"]: r for r in calculate(admitted, config)}
         for m in members:
             if m["fund_code"] not in computed and not m["reasons"]:
                 m["reasons"] = ["METHOD_NOT_VALIDATED" if not ready else "INSUFFICIENT_PRODUCTS"]
+            if m.get("preparation"):
+                from app.services.fund_rating_materials import archive_materials
+
+                m["preparation"]["raw_archive"] = archive_materials(m["preparation"], root, frozen)
         # 冻结实际数值、来源版本、方法、目录与样本；同一输入重复任务复用批次。
         snapshot = json.loads(
             canonical(

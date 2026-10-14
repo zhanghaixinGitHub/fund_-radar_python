@@ -79,6 +79,15 @@ def ensure(kind, source_id, fund_code, trace_id=""):
         from app.services.fund_information_analysis import display_narrative
 
         return {**envelope, "state": "READY", "narrative": display_narrative(body)}
+    if kind == "multi" and body.get("generationMethod") == "COMPREHENSIVE":
+        # 多周期与一日相同，直接恢复当时一起留存的说明，不能再用净值参数重新归因。
+        saved = body["narrative"]
+        if (
+            saved.get("styleVersion") != "PREDICTION_INFORMATION_ZH_V4"
+            or saved.get("summary") != body["analysis"]["summary"]
+        ):
+            raise ValueError("COMPREHENSIVE_RESULT_INVALID")
+        return {**envelope, "state": "READY", "narrative": saved}
     owner = None
     safe = None
 
@@ -96,6 +105,7 @@ def ensure(kind, source_id, fund_code, trace_id=""):
             restored = read_explanation(source_id)
             if body["input"]["feature_version"] == information.event_model.VERSION:
                 from app.services.direction_1d_event_narrative import narrative as event_narrative
+
                 return {**envelope, "state": "READY", "narrative": event_narrative(body, restored)}
             return {**envelope, "state": "READY", "narrative": business_narrative(body, restored)}
         row = store.read(kind, source_id, STYLE_VERSION)

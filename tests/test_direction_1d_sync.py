@@ -16,25 +16,30 @@ def worker(handler):
     return result
 
 
-def test_admin_prediction_only_requests_002112_without_enumerating_other_funds():
+def test_admin_prediction_uses_authorized_fund_pages_for_comprehensive_review():
     calls = []
 
     def handler(request):
         calls.append((request.method, request.url.path))
+        if request.url.path.endswith("/fund-codes"):
+            return httpx.Response(200, json=["002112", "016008"] if not request.url.params["after"] else [])
         if request.url.path.endswith("/window"):
             return httpx.Response(200, json={"targetNavDate": "2026-10-14"})
-        assert request.url.path.endswith("/002112")
+        assert request.url.path.rsplit("/", 1)[-1] in {"002112", "016008"}
         assert json.loads(request.content) == {"targetNavDate": "2026-10-14"}
         return httpx.Response(200, json={"status": "PREDICTED", "reused": False})
 
     service = worker(handler)
     try:
         result = service.sync(progress_reporter=lambda *_: None)
-        assert result.total == result.created == 1
-        assert [(item["fundCode"], item["horizonId"]) for item in result.items] == [("002112", "T1")]
+        assert result.total == result.created == 2
+        assert [(item["fundCode"], item["horizonId"]) for item in result.items] == [("002112", "T1"), ("016008", "T1")]
         assert calls == [
             ("GET", "/internal/v1/direction-1d/sync/window"),
+            ("GET", "/internal/v1/direction-1d/sync/fund-codes"),
+            ("GET", "/internal/v1/direction-1d/sync/fund-codes"),
             ("POST", "/internal/v1/direction-1d/sync/002112"),
+            ("POST", "/internal/v1/direction-1d/sync/016008"),
         ]
     finally:
         service.close()

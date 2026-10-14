@@ -94,7 +94,8 @@ def candidate(family: str) -> dict:
         weights = (15, 20, 15, 10, 15, 10, 10, 5)
     return {
         "family": family,
-        "revision": "candidate-2026-10-10",
+        "revision": "candidate-2026-10-14",
+        "cost_basis": "verified_total_operating_cost_plus_applicable_transaction_cost",
         "weights": dict(zip(DIMENSIONS, weights, strict=True)),
         "formula": formula,
         "minimum_products": 30,

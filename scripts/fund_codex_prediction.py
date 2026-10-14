@@ -25,9 +25,24 @@ def main():
     parser.add_argument("operation", choices=["export", "catalog", "import"])
     parser.add_argument("path", type=Path)
     parser.add_argument("--review", type=Path)
+    parser.add_argument("--fund", default="002112", help="六位基金代码；默认兼容原002112入口")
+    parser.add_argument("--materials", type=Path, help="该基金已整理且保留原文的公共综合资料包")
+    parser.add_argument("--horizon", default="T1", choices=["T1", "T5_V1", "T20_V1", "M6_V1"])
     args = parser.parse_args()
+    if args.horizon != "T1":
+        from app.services import comprehensive_multi_prediction as multi
+
+        if args.operation == "export":
+            result = multi.freeze_packet(args.path, args.fund, args.horizon, args.materials)
+        elif args.operation == "import" and args.review:
+            result = multi.import_review(args.path, args.review)
+            save_once(args.path.parent / "import-receipt.json", result)
+        else:
+            parser.error("多周期使用 export/import；import 必须指定 --review，并由审阅明确 horizon_id")
+        print(json.dumps(result, ensure_ascii=True))
+        return
     if args.operation == "export":
-        result = freeze_packet(args.path)
+        result = freeze_packet(args.path, args.fund, args.materials)
     elif not args.review:
         parser.error("catalog/import 必须指定 --review；不接受缺少原始审阅的判断")
     elif args.operation == "catalog":

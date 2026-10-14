@@ -146,15 +146,15 @@ def test_http_requires_token_and_rejects_browser_and_bad_fund(client, monkeypatc
 def test_missing_file_outside_scope_and_calendar_never_touch_database(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "MODEL_FILE", tmp_path / "absent.json")
     monkeypatch.setattr(service, "get_nav_preview_engine", lambda: pytest.fail("must not read database"))
-    assert service.get_direction_experiment("000001").status == "NOT_APPLICABLE"
-    assert service.get_direction_experiment("008888").reason_codes == ("EXPERIMENT_MODEL_UNAVAILABLE",)
+    assert service.get_direction_experiment("000001").status == "UNAVAILABLE"
+    assert service.get_direction_experiment("008888").reason_codes == ("NAV_ONLY_PREDICTION_DISABLED",)
     monkeypatch.setattr(service, "load_experiment_models", synthetic_models)
     monkeypatch.setattr(service, "utc_now", lambda: datetime(2027, 2, 10, tzinfo=UTC))
-    assert service.get_direction_experiment("008888").reason_codes == ("CALENDAR_COVERAGE_INSUFFICIENT",)
+    assert service.get_direction_experiment("008888").reason_codes == ("NAV_ONLY_PREDICTION_DISABLED",)
 
 
 @pytest.mark.parametrize("revision", [None, "ready"])
-def test_service_read_only_no_training_and_stable_result(monkeypatch, revision):
+def test_disabled_legacy_service_never_reads_samples_even_if_ready(monkeypatch, revision):
     now = datetime(2026, 9, 10, 8, tzinfo=UTC)
     calendar = load_current_calendar()
     dates, nav = history(calendar, date(2026, 9, 9))
@@ -193,12 +193,6 @@ def test_service_read_only_no_training_and_stable_result(monkeypatch, revision):
     first = service.get_direction_experiment("008888")
     second = service.get_direction_experiment("008888")
     assert first == second
-    assert all(s == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY" for s in executed)
-    if revision:
-        assert first.status == "EXPERIMENTAL" and first.target_end_date == date(2026, 10, 15)
-        assert first.latest_nav_date == date(2026, 9, 8)
-        for update in ({"model_released": True}, {"status": "UNAVAILABLE"}, {"models": ()}):
-            with pytest.raises(ValidationError):
-                DirectionExperiment.model_validate({**first.model_dump(), **update})
-    else:
-        assert first.status == "DATA_INSUFFICIENT" and not first.models
+    assert executed == []
+    assert first.status == "UNAVAILABLE" and not first.models
+    assert first.reason_codes == ("NAV_ONLY_PREDICTION_DISABLED",)

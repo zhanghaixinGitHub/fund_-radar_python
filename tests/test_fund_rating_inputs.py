@@ -122,6 +122,7 @@ def bundle(family="ACTIVE_EQUITY"):
             "trading_form": "OTC",
             "redemption_holding_days": 365,
             "management": ".01",
+            "operating_cost": ".011",
             "custody": ".001",
             "sales": 0,
             "subscription": 0,
@@ -205,6 +206,13 @@ def test_missing_required_verification_blocks(key):
     value = bundle()
     value[key] = False
     with pytest.raises(ValueError, match="REQUIRED_VERIFICATION"):
+        build_metrics(value, AS_OF, NOW)
+
+
+def test_full_fee_flag_does_not_replace_total_operating_cost():
+    value = bundle()
+    del value["fees"]["operating_cost"]
+    with pytest.raises(ValueError, match="TOTAL_OPERATING_COST_REQUIRED"):
         build_metrics(value, AS_OF, NOW)
 
 

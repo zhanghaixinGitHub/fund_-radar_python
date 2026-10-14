@@ -77,7 +77,7 @@ _ALL_JOB_STAGES = (
     # 等报告、行情和基金净值更新后再留存；仍检查真实取得时间，不能因后置而放宽截止规则。
     (FUND_INPUTS_JOB_TYPE, "002112 分析资料更新与留存"),
     (FUND_RATINGS_JOB_TYPE, "基金八维评级检查与更新"),
-    (DIRECTION_1D_JOB_TYPE, "002112 一日预测"),
+    (DIRECTION_1D_JOB_TYPE, "关注基金一日综合预测"),
 )
 _ACTIVE_STATUSES = frozenset({"QUEUED", "RUNNING"})
 _SYNC_TYPES_BY_JOB_TYPE = {
@@ -230,6 +230,7 @@ class LocalSyncJobManager:
             if len(fund_code) != 6 or not fund_code.isascii() or not fund_code.isdigit():
                 raise ValueError("RATING_FUND_CODE_INVALID")
             from app.services.fund_catalog_read import get_fund
+
             if get_fund(fund_code) is None:
                 raise LookupError("RATING_FUND_NOT_FOUND")
         return self._start_job(FUND_RATINGS_JOB_TYPE, lambda job: self._run_fund_ratings(job, fund_code))
@@ -237,24 +238,38 @@ class LocalSyncJobManager:
     def _run_fund_ratings(self, job_id: UUID, fund_code: str | None = None) -> None:
         """资料不足是业务结果；数据库或计算故障保持失败，不把故障记成未评级成功。"""
         from app.services.fund_rating import update_ratings
-        self._replace_job(job_id, status="RUNNING", started_at=datetime.now(UTC),
-                          progress_message="正在核验完整类别的八维资料", fund_codes=(fund_code,) if fund_code else ())
+
+        self._replace_job(
+            job_id,
+            status="RUNNING",
+            started_at=datetime.now(UTC),
+            progress_message="正在核验完整类别的八维资料",
+            fund_codes=(fund_code,) if fund_code else (),
+        )
         try:
-            result = (self._rating_updater or update_ratings)(fund_code, progress_reporter=lambda c, t, f, m:
-                self._update_progress(job_id, c, t, f, m))
+            result = (self._rating_updater or update_ratings)(
+                fund_code, progress_reporter=lambda c, t, f, m: self._update_progress(job_id, c, t, f, m)
+            )
             message = f"检查 {result['target']} 只，已评级 {result['rated']} 只，暂未评级 {result['notRated']} 只"
             failures = result["failures"]
             # 没有任何类别完成时必须失败；资料不足而检查成功则仍是成功的业务结果。
             result_status = (
-                "PARTIAL_SUCCESS" if result["rated"] + result["notRated"] else "FAILED"
-            ) if failures else "SUCCEEDED"
-            self._replace_job(job_id, status=result_status,
-                              progress_current=result["rated"] + result["notRated"], progress_total=result["target"],
-                              progress_message=message, result_summary=result, finished_at=datetime.now(UTC),
-                              fetched_count=result["target"], created_count=result["rated"],
-                              skipped_count=result["notRated"],
-                              error_code="RATING_CATEGORY_FAILED" if failures else None,
-                              error_message="部分评级类别检查失败，请重试。" if failures else None)
+                ("PARTIAL_SUCCESS" if result["rated"] + result["notRated"] else "FAILED") if failures else "SUCCEEDED"
+            )
+            self._replace_job(
+                job_id,
+                status=result_status,
+                progress_current=result["rated"] + result["notRated"],
+                progress_total=result["target"],
+                progress_message=message,
+                result_summary=result,
+                finished_at=datetime.now(UTC),
+                fetched_count=result["target"],
+                created_count=result["rated"],
+                skipped_count=result["notRated"],
+                error_code="RATING_CATEGORY_FAILED" if failures else None,
+                error_message="部分评级类别检查失败，请重试。" if failures else None,
+            )
         except Exception:
             logger.exception("sync_jobs._run_fund_ratings >>> rating task failed, job_id=%s", job_id)
             self._fail_job(job_id, "RATING_FAILED", "评级检查未完成，请稍后重试。")
@@ -330,7 +345,7 @@ class LocalSyncJobManager:
             job_type=job_type,
             status="QUEUED",
             requested_nav_date=date.today(),
-            fund_codes=("002112",) if job_type == DIRECTION_1D_JOB_TYPE else (),
+            fund_codes=(),
             progress_current=0,
             progress_total=0,
             current_fund_code=None,
@@ -537,8 +552,11 @@ class LocalSyncJobManager:
     def get_last_successful_time(self, job_type: str) -> datetime | None:
         if job_type == FUND_RATINGS_JOB_TYPE:
             with self._lock:
-                successes = [j.finished_at for j in self._jobs.values() if j.job_type == job_type
-                             and j.status == "SUCCEEDED" and j.finished_at]
+                successes = [
+                    j.finished_at
+                    for j in self._jobs.values()
+                    if j.job_type == job_type and j.status == "SUCCEEDED" and j.finished_at
+                ]
                 return max(successes) if successes else None
         """从持久化运行记录读取指定任务最近一次完整成功时间。"""
         if job_type == FUND_NEWS_JOB_TYPE:
@@ -903,8 +921,8 @@ class LocalSyncJobManager:
             job_id,
             status="RUNNING",
             started_at=datetime.now(UTC),
-            fund_codes=("002112",),
-            progress_message="正在准备 002112 一日预测",
+            fund_codes=(),
+            progress_message="正在核对关注基金的一日综合预测",
         )
         try:
             service = self._prediction_service_factory()

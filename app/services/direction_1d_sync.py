@@ -36,6 +36,7 @@ _REASONS = {
     "DEEPSEEK_DAILY_BUDGET": "今天的分析额度已用完，已有预测保留",
     "DEEPSEEK_DISABLED": "付费分析已停用，本次未生成新预测",
     "MANUAL_ANALYSIS_REQUIRED": "本期尚未完成资料分析，暂未生成预测",
+    "COMPREHENSIVE_MATERIALS_REQUIRED": "本期综合资料尚未齐备，暂未生成预测",
     "ARCHIVE_DEADLINE_PASSED": "结果未在预测截止前确认保存，本次未生成有效判断",
     "ARCHIVE_REJECTED": "本次结果未通过保存核验，已有预测保留，可重试",
     "JOB_SCOPE_UNAVAILABLE": "原任务的有效关注范围已变化，本次结果未确认保存",
@@ -65,6 +66,8 @@ def daily_item(code: str, target: str, result: dict, job_id: str | None = None) 
         "QUEUED",
         "RUNNING",
         "STATUS_UNAVAILABLE",
+        "MANUAL_ANALYSIS_REQUIRED",
+        "COMPREHENSIVE_MATERIALS_REQUIRED",
     }:
         state = "WAITING"
     item = {
@@ -120,9 +123,9 @@ class Direction1dSyncService:
         self._client.close()
 
     def sync(self, *, progress_reporter: Callable[[int, int, str | None, str], None]) -> Direction1dSyncResult:
-        """后台预测固定为 002112/T1；不枚举其他关注基金，不触发长周期预测。"""
+        """按已有授权分页核对有效关注基金；各基金仅消费其自身的一日综合审阅。"""
         target = self.read_target_date()
-        return self.sync_codes(["002112"], target=target, progress_reporter=progress_reporter)
+        return self.sync_codes(self.read_fund_codes(), target=target, progress_reporter=progress_reporter)
 
     def read_target_date(self) -> date:
         """目标日取自核心服务核验过的一日窗口，不能用本机日期代替交易日。"""

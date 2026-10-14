@@ -135,14 +135,17 @@ def create_task(codes, *, request_key=None, horizons=None, retry_items=None):
                     "REQUEST_KEY_SCOPE_MISMATCH", "VALIDATION", "该请求对应其他预测范围，请重新发起"
                 )
             return previous
-        routes = freeze_routes()
-        if not routes:
+        from app.services.comprehensive_prediction_policy import comprehensive_only, identity
+
+        routes = {} if comprehensive_only() else freeze_routes()
+        if not routes and not comprehensive_only():
             from app.services.prediction_models import bootstrap_models
 
             bootstrap_models()
             routes = freeze_routes()
         task_id = uuid4()
         payload = {
+            **identity(),
             "fundCodes": sorted({code for code, _ in wanted}),
             "horizonIds": sorted({horizon for _, horizon in wanted}),
             "blockedItems": blocked_items,
@@ -239,6 +242,10 @@ def task_status(task_id):
 
 
 def prediction_payload(data, features, horizon, now, route, *, mode="LIVE", task_id=None):
+    from app.services.comprehensive_prediction_policy import comprehensive_only
+
+    if mode == "LIVE" and comprehensive_only():
+        raise PredictionFailure("NAV_ONLY_PREDICTION_DISABLED", "GENERATE", "本期需完成综合资料分析后生成预测")
     dates = target_dates(data["calendar"], now, horizon["horizon_id"])
     if nav_anchored() and dates["baseNavDate"] != features["dataAsOf"]:
         raise PredictionFailure("BASE_NAV_MISMATCH", "GENERATE", "预测日期与实际净值基准不一致，停止生成")
@@ -310,6 +317,12 @@ def prediction_period_key(result):
 
 def _run_task(task_id):
     """持久检查点按项提交；进程中断后只恢复未提交项，租约避免多服务同时运行。"""
+    from app.services.comprehensive_prediction_policy import comprehensive_only
+
+    if comprehensive_only():
+        from app.services.comprehensive_multi_prediction import run_task as run_comprehensive
+
+        return run_comprehensive(task_id)
     with get_engine().begin() as c:
         task = one(c, "SELECT * FROM prediction_generation_task WHERE task_id=:id FOR UPDATE", id=task_id)
         if not task or task["status"] in {"SUCCEEDED", "PARTIAL_SUCCESS", "FAILED", "CANCELLED"}:
@@ -520,6 +533,9 @@ def retry_failed(task_id):
 
 
 def current_predictions(fund_code):
+    from app.services.comprehensive_prediction_policy import identity
+
+    analysis_hash = identity()["analysisPolicyHash"]
     target = prediction_policy()["target_definition_id"]
     rule = direction_fields("T5_V1").get("directionPolicyHash", "")
     with get_engine().connect() as c:
@@ -528,20 +544,26 @@ def current_predictions(fund_code):
             """SELECT DISTINCT ON(horizon_id) payload FROM fund_prediction_record
           WHERE fund_code=:code AND mode='LIVE' AND payload->>'role'='PRIMARY'
           AND payload->>'targetDefinitionId'=:target AND COALESCE(payload->>'directionPolicyHash','')=:rule
+          AND payload->>'generationMethod'='COMPREHENSIVE'
+          AND payload->>'analysisPolicyHash'=:analysis_hash
           ORDER BY horizon_id,generated_at DESC""",
             code=fund_code,
             target=target,
             rule=rule,
+            analysis_hash=analysis_hash,
         )
         attempts = rows(
             c,
             """SELECT DISTINCT ON(horizon_id) horizon_id,payload,created_at
           FROM prediction_attempt WHERE fund_code=:code
           AND payload->>'targetDefinitionId'=:target AND COALESCE(payload->>'directionPolicyHash','')=:rule
+          AND payload->>'generationMethod'='COMPREHENSIVE'
+          AND payload->>'analysisPolicyHash'=:analysis_hash
           ORDER BY horizon_id,created_at DESC""",
             code=fund_code,
             target=target,
             rule=rule,
+            analysis_hash=analysis_hash,
         )
         resolutions = rows(
             c,

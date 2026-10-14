@@ -79,7 +79,40 @@ def stability(members: list[dict]) -> None:
             m["metrics"]["distribution_stability"] = str(sum(wins) / 25)
 
 
-def holdings_metrics(positions: list[dict], net_assets, cash, payable, largest_holder) -> dict:
+def equity_structure(positions: list[dict]) -> dict:
+    """持仓结构独立于流动性计算；缺少成交额不应抹掉已核验的完整集中度事实。"""
+    issuers, industries = {}, {}
+    for p in positions:
+        amount = decimal(p["amount"])
+        if amount <= 0 or not p["issuer"] or not p["industry"]:
+            raise ValueError("RATING_HOLDING_IDENTITY")
+        issuers[p["issuer"]] = issuers.get(p["issuer"], Decimal(0)) + amount
+        industries[p["industry"]] = industries.get(p["industry"], Decimal(0)) + amount
+    total = sum(issuers.values())
+    if total <= 0:
+        raise ValueError("RATING_HOLDING_RANGE")
+    return {
+        "issuer_hhi": sum((x / total) ** 2 for x in issuers.values()),
+        "industry_hhi": sum((x / total) ** 2 for x in industries.values()),
+    }
+
+
+def reconcile_equity_assets(positions: list[dict], net_assets, balance: dict) -> None:
+    """按资产负债表逐元核对；保证金、备付金、应收款不自动计入可变现现金。
+
+    balance 中的 other_assets 是完整且互斥的非股票资产项目，liabilities 是负债总额。
+    流动性另外提供已核验的现金和五日应付款，不将会计总额当作到期证明。
+    """
+    assets = [decimal(v) for v in balance["other_assets"].values()]
+    liabilities, total, net = map(decimal, (balance["liabilities"], balance["total_assets"], net_assets))
+    stocks = sum(decimal(p["amount"]) for p in positions)
+    if not assets or min(assets) < 0 or liabilities < 0 or net <= 0:
+        raise ValueError("RATING_BALANCE_RANGE")
+    if abs(stocks + sum(assets) - total) > Decimal("0.01") or abs(total - liabilities - net) > Decimal("0.01"):
+        raise ValueError("RATING_ASSETS_NOT_RECONCILED")
+
+
+def holdings_metrics(positions: list[dict], net_assets, cash, payable, largest_holder, *, balance=None) -> dict:
     """完整股票持仓：发行人合并；同口径行业、20 日成交額、已知可售金额缺一不可。"""
     net, cash, payable, holder = map(decimal, (net_assets, cash, payable, largest_holder))
     if net <= 0 or cash < 0 or payable < 0 or not 0 <= holder <= 1 or not positions:
@@ -99,8 +132,15 @@ def holdings_metrics(positions: list[dict], net_assets, cash, payable, largest_h
         industries[p["industry"]] = industries.get(p["industry"], Decimal(0)) + amount
         liquid += min(amount, saleable, Decimal("0.5") * median(turnovers))
     # 没有其他已支持资产的首批权益情景必须逐元对账，不能把未知资产视为现金。
-    if abs(total + cash - payable - net) > Decimal("0.01"):
-        raise ValueError("RATING_ASSETS_NOT_RECONCILED")
+    if balance is None:
+        if abs(total + cash - payable - net) > Decimal("0.01"):
+            raise ValueError("RATING_ASSETS_NOT_RECONCILED")
+    else:
+        reconcile_equity_assets(positions, net, balance)
+        if cash > sum(decimal(v) for v in balance["other_assets"].values()) or payable > decimal(
+            balance["liabilities"]
+        ):
+            raise ValueError("RATING_LIQUIDITY_BALANCE_CONFLICT")
     return {
         "issuer_hhi": sum((x / total) ** 2 for x in issuers.values()),
         "industry_hhi": sum((x / total) ** 2 for x in industries.values()),
@@ -109,10 +149,14 @@ def holdings_metrics(positions: list[dict], net_assets, cash, payable, largest_h
     }
 
 
-def standard_cost(management, custody, sales, subscription, redemption, *, mode: str) -> Decimal:
+def standard_cost(management, custody, sales, subscription, redemption, *, mode: str, operating_cost=None) -> Decimal:
     """一万元、365 日、无涨跌、场外标准费率情景；外扣按实际申购本金基数计算。"""
     m, c, s, buy, sell = map(decimal, (management, custody, sales, subscription, redemption))
     if any(not 0 <= x <= 1 for x in (m, c, s, buy, sell)) or mode not in {"EXTERNAL", "INTERNAL"}:
         raise ValueError("RATING_FEE_RANGE")
     purchase = buy / (1 + buy) if mode == "EXTERNAL" else buy
-    return purchase + (1 - purchase) * sell + m + c + s
+    operating = m + c + s if operating_cost is None else decimal(operating_cost)
+    if not m + c + s <= operating <= 1:
+        raise ValueError("RATING_OPERATING_COST_RANGE")
+    # 公开资料概要的运作综合费率已经包含三项基本费用，不重复相加。
+    return purchase + (1 - purchase) * sell + operating

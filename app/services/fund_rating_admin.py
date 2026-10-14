@@ -15,6 +15,10 @@ from app.services.fund_rating_rules import DIMENSIONS, calculate, candidate
 
 def ingest(session: Session, bundle: dict) -> str:
     """导入实际规范化原件；分类必须有官方产品关系来源，缺少核验不生成分类或证据。"""
+    from app.services.fund_rating_public_policy import BASIS
+
+    if bundle.get("basis") == BASIS:
+        return ingest_public(session, bundle)
     now = datetime.now(UTC)
     code = bundle["fund_code"]
     if len(code) != 6 or not code.isascii() or not code.isdigit():
@@ -100,6 +104,74 @@ def ingest(session: Session, bundle: dict) -> str:
     return key
 
 
+def ingest_public(session: Session, bundle: dict) -> str:
+    """本机公开资料绝对评价采用适用范围，不伪造同类比较键或来源商业授权。"""
+    from app.services.fund_rating_public_inputs import verify_public_originals
+    from app.services.fund_rating_public_policy import BASIS
+
+    now = datetime.now(UTC)
+    validate_sources(session, bundle, now)
+    as_of = date.fromisoformat(bundle["as_of_date"])
+    build_metrics(bundle, as_of, now)
+    verify_public_originals(bundle)
+    classification = bundle["classification"]
+    expected = {"basis": BASIS, "asset": "DOMESTIC_ACTIVE_MIXED", "currency": "CNY"}
+    if (
+        classification["scope"] != expected
+        or classification["product_id"] != bundle["key_information"]["product_id"]
+        or not classification["relationship_verified"]
+    ):
+        raise ValueError("RATING_PUBLIC_CLASSIFICATION")
+    if not session.scalar(text("SELECT 1 FROM fund_share_class WHERE fund_code=:code"), {"code": bundle["fund_code"]}):
+        raise ValueError("RATING_UNKNOWN_FUND")
+    cid = digest({"fund_code": bundle["fund_code"], "classification": classification})
+    c = session.get(RatingClassification, cid)
+    if c and c.revoked:
+        raise ValueError("RATING_CLASSIFICATION_REVOKED")
+    if not c:
+        session.add(
+            RatingClassification(
+                classification_id=cid,
+                fund_code=bundle["fund_code"],
+                product_id=classification["product_id"],
+                category_code=digest(expected),
+                family="ACTIVE_EQUITY",
+                currency="CNY",
+                eligibility="PUBLIC_LOCAL_ANALYSIS",
+                effective_from=date.fromisoformat(classification["effective_from"]),
+                source_refs=classification["source_refs"],
+                verified_at=now,
+                revoked=False,
+            )
+        )
+        session.flush()
+    key = digest(bundle)
+    existing = session.get(RatingEvidence, key)
+    if existing and existing.revoked:
+        raise ValueError("RATING_EVIDENCE_REVOKED")
+    if not existing:
+        for old in session.scalars(
+            select(RatingEvidence).where(
+                RatingEvidence.fund_code == bundle["fund_code"],
+                RatingEvidence.as_of_date == as_of,
+                ~RatingEvidence.revoked,
+            )
+        ):
+            old.revoked = True
+        session.add(
+            RatingEvidence(
+                evidence_hash=key,
+                fund_code=bundle["fund_code"],
+                classification_id=cid,
+                as_of_date=as_of,
+                payload=bundle,
+                acquired_at=now,
+                revoked=False,
+            )
+        )
+    return key
+
+
 def trial(session: Session, as_of: date) -> dict:
     """真实资料试算，不发布；保留覆盖、四级自然分布及逐维权重扰动敏感性。
 
@@ -124,9 +196,26 @@ def trial(session: Session, as_of: date) -> dict:
             "distribution": {},
             "input_hash": digest(members),
             "blockers": sorted({r for m in members for r in m["reasons"]}),
+            "preparations": {
+                m["fund_code"]: {
+                    "facts": m["preparation"]["facts"],
+                    "diagnostics": m["preparation"]["diagnostics"],
+                    "blockers": m["preparation"]["blockers"],
+                }
+                for m in members
+                if m.get("preparation")
+            },
             "sensitivity": [],
             "dimension_correlations": [],
         }
+        from app.services.fund_rating_public_policy import BASIS
+
+        if any(m.get("bundle", {}).get("basis") == BASIS for m in members):
+            from app.services.fund_rating_public_validation import validate_category
+
+            entry.update(validate_category(members))
+            report["categories"].append(entry)
+            continue
         if family != "OTHER" and products >= 30:
             config = candidate(family)
             stability(admitted)

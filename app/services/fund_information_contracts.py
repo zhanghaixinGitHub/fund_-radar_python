@@ -46,8 +46,8 @@ def time_context(data: dict, sessions: list[str] | None = None) -> dict:
 
     stocks = {c["code"]: {"date": (c.get("quote") or {}).get("date")} for c in data["companies"]}
     markets = {code: {"date": q["date"]} for code, q in data["market"].items()}
-    # 指数是项目已固定的两个对照，完全未取得也必须留下缺口。
-    for code in ("000300.SH", "000905.SH"):
+    # 原试点固定两个对照；其他基金使用其实际资料中的市场，不能套用股票指数。
+    for code in ("000300.SH", "000905.SH") if data.get("fund_code", "002112") == "002112" else ():
         markets.setdefault(code, {"date": None})
     for value in [*stocks.values(), *markets.values()]:
         value["status"] = state(value["date"])

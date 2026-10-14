@@ -1,0 +1,37 @@
+{
+  "version": "FUND_COMPREHENSIVE_REVIEW_V1",
+  "generation_method": "COMPREHENSIVE",
+  "generation_source": "CODEX_ASSISTED_REVIEW",
+  "scope": "ALL_FUNDS_ALL_PRODUCT_HORIZONS",
+  "legacy_nav_prediction_enabled": false,
+  "automatic_legacy_training_enabled": false,
+  "automatic_paid_provider_enabled": false,
+  "required_dimensions": ["EXPOSURE", "MARKET", "DISCLOSURES"],
+  "optional_dimensions": ["FINANCIALS", "NEWS", "POLICY", "MANAGER", "FLOWS", "NAV"],
+  "coverage_states": ["AVAILABLE", "VERIFIED_EMPTY", "MISSING", "NOT_APPLICABLE"],
+  "required_output": ["direction", "confidence", "summary", "reasons", "counterpoints", "synthesis", "change_conditions", "limitations"],
+  "confidence": "LOW",
+  "up_probability": null,
+  "validation_status": "UNVALIDATED",
+  "direction_weighting": "QUALITATIVE_REVIEW_NO_VALIDATED_FIXED_WEIGHTS",
+  "horizon_rules": {
+    "T1": "一交易日：优先分析本期新增事项、实际投向及相关市场表现；经营与经理历史只作背景。",
+    "T5_V1": "五交易日：分析短期催化、事件进度与行业走势；不得把一日判断机械延长。",
+    "T20_V1": "二十交易日：分析经营、行业与政策落地及其与既有预期的关系；区分事实与预期。",
+    "M6_V1": "六个月：分析经营趋势、估值与风险、政策持续性和组合暴露；不能仅凭近期价格外推。"
+  },
+  "principles": [
+    "北京时间15点切换预测目标；目标、比较基准、资料截止及实际生成时间分别保存。",
+    "只使用截止前实际取得且公开时间可核实的来源；历史回看不能冒充事前预测。",
+    "核实基金身份和实际投向；ETF联接基金穿透目标ETF，披露仓位不得冒充实时仓位。",
+    "新增事实、已执行事项、计划、程序进展、历史背景和未经证实的推断必须区分。",
+    "原文逐字引用并保留实际阅读范围；只读片段和未取得正文不得写成全文审阅。",
+    "同一事件及其进展合并；净值、持仓和指数反映同一行情时不作为独立证据叠加。",
+    "来源数量、篇幅、正负条数、资料缺失和持仓集中度本身不得决定方向。",
+    "主方向至少有一项与基金暴露和预测周期相关的非净值证据，并明确事实到判断的影响路径。",
+    "反证检查必须完成；没有可核实反证时说明检索范围，不能把未检索写成不存在。",
+    "说明权衡、可观察的改变条件和关键缺口；资料或来源冲突不足以支持方向时暂不判断。",
+    "不设置未经验证的固定权重，不把内部评分写成概率、胜率或确定收益。",
+    "每份结果冻结资料、审阅、规则版本和摘要；同一输入复用，变更追加，旧结果不覆盖。"
+  ]
+}

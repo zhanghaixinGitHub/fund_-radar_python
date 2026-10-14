@@ -1,4 +1,4 @@
-"""从现有留档冻结002112资料；不采集，不读取目标日答案，不导入单次报告结果。"""
+"""按基金身份冻结综合资料；不采集，不读取目标日答案，不导入单次报告结果。"""
 
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -20,10 +20,47 @@ ACTIVE_FILE = ROOT.parent / "direction-1d-information/analysis-active.json"
 
 
 def enabled(code: str) -> bool:
-    return code == "002112" and ACTIVE_FILE.exists() and read(ACTIVE_FILE).get("enabled") is True
+    """所有正常基金代码统一走综合预测；原统计准入不再控制产品生成。"""
+    return isinstance(code, str) and len(code) == 6 and code.isascii() and code.isdigit()
 
 
-def prepare(now) -> dict:
+def prepare(now, fund_code="002112", materials_path=None) -> dict:
+    """所有基金共用资料契约；仅兼容原试点已有的来源格式，不设置分析白名单。
+
+    显式提供的资料包优先，默认按基金代码查找自己的资料包。002112 的旧采集档案
+    只是已有来源适配：有通用包时也走通用流程，其他基金不能误用它的持仓或公告。
+    """
+    if not enabled(fund_code):
+        raise ValueError("INVALID_SCOPE")
+    path = (
+        Path(materials_path)
+        if materials_path is not None
+        else (Path(get_settings().fund_material_directory) / "comprehensive" / f"{fund_code}.json")
+    )
+    if materials_path is not None or path.is_file() or fund_code != "002112":
+        from app.services.fund_comprehensive_materials import prepare as prepare_general
+
+        return prepare_general(now, fund_code, path)
+    data = _prepare_002112(now)
+    from app.services.comprehensive_prediction_policy import policy
+
+    data["analysis_policy_version"] = policy()["version"]
+    current_market = bool(data["time_context"]["markets"]) and all(
+        row["status"] == "READY" for row in data["time_context"]["markets"].values()
+    )
+    announcements = [document["id"] for document in data["documents"] if document["kind"] == "ANNOUNCEMENT"]
+    data["comprehensive_coverage"] = {
+        "EXPOSURE": {"status": "AVAILABLE", "source_refs": [data["report"]["sourceUrl"]]},
+        "MARKET": {
+            "status": "AVAILABLE" if current_market else "MISSING",
+            "source_refs": ["market:" + code for code in data["market"]],
+        },
+        "DISCLOSURES": {"status": "AVAILABLE" if announcements else "MISSING", "source_refs": announcements},
+    }
+    return data
+
+
+def _prepare_002112(now) -> dict:
     """快照时间取数据库；各类日期独立保留。缺最新净值不改变预测比较基准。"""
     now = now.astimezone(ZONE)
     w = window(now)
@@ -349,14 +386,18 @@ def inventory(data: dict) -> list[dict]:
         names = "、".join(m["name"] for m in manager["managers"])
         rows[0].update(
             status="PARTIAL",
-            detail=(f"已核对当前经理{names}的任职及可用区间表现；同类和基准比较尚缺。"
-                    if manager["current_verified"] else "当前经理及任职表现尚未完整核实。")
+            detail=(
+                f"已核对当前经理{names}的任职及可用区间表现；同类和基准比较尚缺。"
+                if manager["current_verified"]
+                else "当前经理及任职表现尚未完整核实。"
+            )
             + "".join(manager["gaps"])[:180],
         )
         change = manager.get("latest_change")
         rows[11]["detail"] += (
             f"另保留{change['published_date']}经理变更公告及公开原因，不受两周限制。"
-            if change and change["parsed"] else "经理变更及公开原因尚未完整核实。"
+            if change and change["parsed"]
+            else "经理变更及公开原因尚未完整核实。"
         )
     for kind, index in [("POLICY", 12), ("NEWS", 13)]:
         if any(d["kind"] == kind for d in data["documents"]):

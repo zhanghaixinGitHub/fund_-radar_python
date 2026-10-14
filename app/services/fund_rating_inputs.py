@@ -134,6 +134,13 @@ def empty_evidence(row: dict, family: str, as_of: date) -> dict:
 
 def validate_sources(session: Session, bundle: dict, frozen: datetime) -> None:
     """每一包均需可追溯官方引用、真实取得时间和来源授权；仅日期精度不伪造发布时刻。"""
+    from app.services.fund_rating_public_policy import BASIS
+
+    if bundle.get("basis") == BASIS:
+        from app.services.fund_rating_public_inputs import validate_public_sources
+
+        validate_public_sources(bundle, frozen)
+        return
     refs = bundle["sources"]
     if not refs or len(refs) > 100:
         raise ValueError("RATING_SOURCE_REQUIRED")
@@ -169,6 +176,12 @@ def build_metrics(bundle: dict, as_of: date, frozen: datetime) -> tuple[dict, di
 
     其他类别的专用原件尚无真实覆盖，保持未开放；不接受直接填写分项分数来绕过公式。
     """
+    from app.services.fund_rating_public_policy import BASIS
+
+    if bundle.get("basis") == BASIS:
+        from app.services.fund_rating_public_inputs import build_public_metrics
+
+        return build_public_metrics(bundle, as_of, frozen)
     family = bundle["family"]
     if family not in CATEGORY_LABELS or family == "OTHER":
         raise ValueError("RATING_SPECIALIZED_INPUTS_UNVERIFIED")
@@ -230,7 +243,14 @@ def build_metrics(bundle: dict, as_of: date, frozen: datetime) -> tuple[dict, di
     extra = bundle.get("specialized", {})
     if family in {"ACTIVE_EQUITY", "QDII_EQUITY"}:
         metrics.update(
-            holdings_metrics(h["positions"], h["net_assets"], h["cash"], h["payable_5d"], h["largest_holder"])
+            holdings_metrics(
+                h["positions"],
+                h["net_assets"],
+                h["cash"],
+                h["payable_5d"],
+                h["largest_holder"],
+                balance=h.get("balance_sheet"),
+            )
         )
         if family == "QDII_EQUITY":
             metrics["overseas_liquid_5d"] = metrics["liquid_5d"]
@@ -287,18 +307,27 @@ def build_metrics(bundle: dict, as_of: date, frozen: datetime) -> tuple[dict, di
     metrics["team_changes"] = sum(d > dates[0] for d in changes)
     if fees["redemption_holding_days"] != 365:
         raise ValueError("RATING_FEE_SCENARIO")
+    if fees.get("operating_cost") is None:
+        raise ValueError("RATING_TOTAL_OPERATING_COST_REQUIRED")
     if fees["trading_form"] == "OTC":
         metrics["cost_1y"] = standard_cost(
             *(fees[k] for k in ("management", "custody", "sales", "subscription", "redemption")),
             mode=fees["subscription_mode"],
+            operating_cost=fees["operating_cost"],
         )
     elif fees["trading_form"] == "EXCHANGE":
-        metrics["cost_1y"] = sum(
+        operating = standard_cost(
+            fees["management"],
+            fees["custody"],
+            fees["sales"],
+            0,
+            0,
+            mode="EXTERNAL",
+            operating_cost=fees["operating_cost"],
+        )
+        metrics["cost_1y"] = operating + sum(
             ratio(fees[k])
             for k in (
-                "management",
-                "custody",
-                "sales",
                 "roundtrip_commission",
                 "roundtrip_spread",
                 "other_trading_cost",
@@ -408,6 +437,13 @@ def prepare(session: Session, rows: list[dict], as_of: date, frozen: datetime) -
             except (KeyError, ValueError) as error:
                 member["reasons"] = [str(error) if isinstance(error, ValueError) else "REQUIRED_INPUT_MISSING"]
                 member["public"]["limitations"] = ["必要资料未通过完整性、日期或来源核验，暂未评级。"]
+        elif row["fund_code"] == "002112":
+            # 仅手动任务/试算会走此路径；已导入完整原件时仍走上面的严格准入。
+            from app.services.fund_rating_materials import attach_materials, inspect_case
+
+            material = inspect_case(session, as_of, frozen)
+            if material:
+                attach_materials(member, material)
         groups[category].append(member)
     for members in groups.values():
         cutoffs = {m["valuation_date"] for m in members if m["admitted"]}

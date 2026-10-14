@@ -70,7 +70,21 @@ def inputs_valid(session: Session, batch: RatingBatch) -> bool:
         return False
     if not all(not e.revoked and not c.revoked and digest(e.payload) == e.evidence_hash for e, c in rows):
         return False
-    codes = {ref["source_code"] for e, _ in rows for ref in e.payload["sources"]}
+    from app.services.fund_rating_public_inputs import validate_public_sources
+    from app.services.fund_rating_public_policy import BASIS
+
+    legacy_rows = []
+    for e, c in rows:
+        if e.payload.get("basis") == BASIS:
+            try:
+                validate_public_sources(e.payload, datetime.now(UTC))
+            except ValueError:
+                return False
+        else:
+            legacy_rows.append((e, c))
+    codes = {ref["source_code"] for e, _ in legacy_rows for ref in e.payload["sources"]}
+    if not codes:
+        return True
     enabled = set(
         session.execute(
             text(

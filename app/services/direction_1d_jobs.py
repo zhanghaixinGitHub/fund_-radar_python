@@ -12,7 +12,7 @@ from sqlalchemy import text
 from app.db.session import get_engine
 from app.repositories import direction_1d as repo
 from app.services.direction_1d_data import inventory
-from app.services.direction_1d_protocol import PROTOCOL, canonical, window
+from app.services.direction_1d_protocol import canonical, window
 from app.services.direction_1d_three_state import PROTOCOL as ACTIVE_PROTOCOL
 
 logger = logging.getLogger(__name__)
@@ -160,8 +160,6 @@ def execute(job_id, kind, payload):
 
 
 def _execute_locked(job_id, kind, payload):
-    from app.services.direction_1d_inference import infer
-
     try:
         with get_engine().begin() as c:
             # 租约恢复后排队的旧worker也可能晚到；拿到执行锁后再核对成功状态。
@@ -173,29 +171,22 @@ def _execute_locked(job_id, kind, payload):
             target = payload.get("target_nav_date") or repo.get_job(job_id)["task_key"].rsplit(":", 1)[-1]
             from app.schemas.fund_information_analysis import PROTOCOL as analysis_protocol
 
-            if payload.get("protocol") == analysis_protocol and payload["fund_code"] == "002112":
+            if payload.get("protocol") == analysis_protocol:
                 from app.core.config import get_settings
 
                 if get_settings().fund_002112_analysis_mode == "CODEX_MANUAL":
                     from app.services.fund_codex_analysis import ready_result
 
-                    result = ready_result(target)
+                    result = ready_result(target, payload["fund_code"])
                 else:
-                    from app.services.fund_information_analysis import infer as analyze
-
-                    result = analyze(target)
+                    raise ValueError("MANUAL_MODE_REQUIRED")
             else:
-                sync_missing([payload["fund_code"]])
-                result = infer(
-                    payload["fund_code"],
-                    expected_target=target,
-                    protocol=payload.get("protocol", PROTOCOL),
-                    revisions=payload.get("revisions", False),
-                )
+                # 已排队的旧统计任务也不得在政策切换后继续生成方向。
+                raise ValueError("NAV_ONLY_PREDICTION_DISABLED")
         elif kind == "LABEL_SYNC":
             result = sync_answer(payload)
         else:
-            result = weekly_train()
+            raise ValueError("LEGACY_AUTOMATIC_TRAINING_DISABLED")
         state = "FAILED" if kind == "TRAINING" and result.get("status") == "FAILED" else "SUCCEEDED"
     except Exception as error:
         # 预期拒绝只返回有限原因码；栈放服务日志，不把SQL参数或来源响应外传。

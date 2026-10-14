@@ -10,6 +10,7 @@ from app.api.dependencies import require_service_token
 from app.db.session import get_engine
 from app.repositories import direction_1d as repo
 from app.schemas.direction_1d import AssessmentAck, ForecastRequest, Scope, TrainingRequest
+from app.services.comprehensive_prediction_policy import policy as analysis_policy
 from app.services.direction_1d_data import inventory
 from app.services.direction_1d_explanation import read_explanation
 from app.services.direction_1d_inference import labels
@@ -25,8 +26,10 @@ def status():
     now = repo.clock()
     with get_engine().connect() as c:
         latest = (
-            c.execute(text("""SELECT kind,state,finished_at,result->>'status' AS result_status,
-                result->>'reason' AS reason FROM direction_1d_job ORDER BY created_at DESC LIMIT 5"""))
+            c.execute(
+                text("""SELECT kind,state,finished_at,result->>'status' AS result_status,
+                result->>'reason' AS reason FROM direction_1d_job ORDER BY created_at DESC LIMIT 5""")
+            )
             .mappings()
             .all()
         )
@@ -38,10 +41,8 @@ def status():
         "model_released": False,
         "up_probability": None,
         "recent_jobs": [dict(r) for r in latest],
-        "training_policy_note": (
-            "每周日12点检查一次；无新增已核对样本则跳过。2025受保护，2026只纳入启动后已核对样本，"
-            "近504交易日不足252个基准日时沿用旧模型。"
-        ),
+        "training_policy_note": "已统一采用综合资料审阅，旧净值方法的自动训练已停用。",
+        "analysis_policy": analysis_policy(),
     }
 
 
@@ -122,6 +123,10 @@ def assessed(job_id: UUID, request: AssessmentAck):
 
 @router.post("/training-jobs", status_code=202)
 def training(_: TrainingRequest):
+    from app.services.comprehensive_prediction_policy import comprehensive_only
+
+    if comprehensive_only():
+        return {"state": "NOT_DUE", "reason": "LEGACY_AUTOMATIC_TRAINING_DISABLED"}
     now = repo.clock().astimezone(ZONE)
     sunday = now.date() - timedelta(days=(now.weekday() + 1) % 7)
     opened = datetime.combine(sunday, time(12), ZONE)

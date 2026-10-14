@@ -52,6 +52,14 @@ def data_version(codes):
 
 def check_auto(codes, source="MAINTENANCE", now=None):
     """检查仅排队，不在HTTP线程训练；同范围活跃周期唯一，重复心跳返回原任务。"""
+    from app.services.comprehensive_prediction_policy import comprehensive_only
+
+    if comprehensive_only():
+        return {
+            "status": "DISABLED_COMPREHENSIVE_POLICY",
+            "reason": "已统一采用综合资料分析，旧净值方法的自动训练已停用。",
+            "fundCount": len(set(codes)),
+        }
     codes, now = sorted(set(codes)), now or datetime.now(UTC)
     if not codes:
         return {"status": "WAITING_DATA", "reason": "尚无关注基金", "fundCount": 0}
@@ -182,6 +190,10 @@ def summary(value):
 
 
 def recover_auto():
+    from app.services.comprehensive_prediction_policy import comprehensive_only
+
+    if comprehensive_only():
+        return 0
     with get_engine().connect() as c:
         pending = rows(
             c,
@@ -197,6 +209,10 @@ def recover_auto():
 
 def run_auto(cycle_id):
     """会话锁跨线程/进程共享；恢复固定输入和已完成周期，不抢正在工作的旧进程。"""
+    from app.services.comprehensive_prediction_policy import comprehensive_only
+
+    if comprehensive_only():
+        return
     with get_engine().connect() as lock:
         if not lock.execute(text("SELECT pg_try_advisory_lock(721109,4)")).scalar():
             return
@@ -449,6 +465,10 @@ def mature_evaluation(codes, bundles):
 
 
 def claim_replay():
+    from app.services.comprehensive_prediction_policy import comprehensive_only
+
+    if comprehensive_only():
+        return None
     with get_engine().begin() as c:
         item = one(
             c,

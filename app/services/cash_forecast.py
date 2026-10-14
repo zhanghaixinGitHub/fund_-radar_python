@@ -178,6 +178,13 @@ def get_cash_forecast(forecast_id: UUID) -> CashForecastView:
 
 def generate_cash_forecast(request: CashForecastRequest) -> CashForecastView:
     """失败关闭；当前真实授权解析器只会拒绝，因此不会在真实资料上先算分数再隐藏。"""
+    from app.services.comprehensive_prediction_policy import comprehensive_only
+
+    if comprehensive_only():
+        raise HistoricalNavStorageError(
+            "NAV_ONLY_PREDICTION_DISABLED", "预测已统一采用综合资料分析，旧净值方法已停用。", 409
+        )
+
     request = CashForecastRequest.model_validate(request.model_dump())
     prepare_cash_feature_read(request.feature_request())  # 日期不合法/2025保护在任何数据库访问前拒绝。
     request_hash = forecast_request_hash(request)

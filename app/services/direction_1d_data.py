@@ -146,12 +146,26 @@ def inventory(codes: list[str], now: datetime | None = None) -> dict:
 
             if analysis_enabled(code):
                 # 综合分析独立检查实际资料，不借用旧模型或61条净值的发布条件。
-                result.append({"fund_code": code, "fund_name": p["fund_name"], "fund_type": p["fund_type"],
-                    "group_id": "CN_002112_ANALYSIS", "status": "READY_EXPERIMENTAL", "reason_codes": [],
-                    "model_ids": [], "missing_dates": [], "missing_count": 0, "history_count": 0,
-                    "required_nav_date": w["base_nav_date"], "target_nav_date": w["target_nav_date"],
-                    "current_input_complete": False, "next_window_model_available": False,
-                    "prediction_status": w["status"], "observed_at": now.isoformat()})
+                result.append(
+                    {
+                        "fund_code": code,
+                        "fund_name": p["fund_name"],
+                        "fund_type": p["fund_type"],
+                        "group_id": "PUBLIC_INFORMATION_ANALYSIS",
+                        "status": "READY_EXPERIMENTAL",
+                        "reason_codes": [],
+                        "model_ids": [],
+                        "missing_dates": [],
+                        "missing_count": 0,
+                        "history_count": 0,
+                        "required_nav_date": w["base_nav_date"],
+                        "target_nav_date": w["target_nav_date"],
+                        "current_input_complete": False,
+                        "next_window_model_available": False,
+                        "prediction_status": w["status"],
+                        "observed_at": now.isoformat(),
+                    }
+                )
                 continue
             mapping = classify(p, prediction=True)
             from app.services import direction_1d_information as information
@@ -191,9 +205,14 @@ def inventory(codes: list[str], now: datetime | None = None) -> dict:
             from app.services.direction_1d_three_state import PROTOCOL as active_protocol
             from app.services.direction_1d_three_state import predict
 
-            eligible = [m for m in registry if m["group_id"] == mapping["group_id"] and m["expires_at"] > now
-                        and m["metadata"].get("protocol") == active_protocol
-                        and (not selected_information or str(m["model_id"]) == selected_information["model_id"])]
+            eligible = [
+                m
+                for m in registry
+                if m["group_id"] == mapping["group_id"]
+                and m["expires_at"] > now
+                and m["metadata"].get("protocol") == active_protocol
+                and (not selected_information or str(m["model_id"]) == selected_information["model_id"])
+            ]
             active = [m for m in eligible if available_at_prediction(m, now)]
             if mapping["group_id"] and not eligible:
                 reasons.append("MODEL_PENDING")

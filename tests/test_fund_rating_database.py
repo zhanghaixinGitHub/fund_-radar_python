@@ -167,6 +167,70 @@ def test_candidate_rule_cannot_publish_a_grade(db, tmp_path):
     assert "原件已核验" in value["summary"]
 
 
+def test_prepared_facts_publish_without_admitting_or_read_time_collection(db, tmp_path, monkeypatch):
+    """部分原件会进入完整批次且可读回，但普通查询不触发资料检查或制造分数。"""
+    from app.services import fund_rating_materials as materials
+
+    data = members()[:1]
+    data[0].update(admitted=False, representative=False, metrics={}, reasons=["HOLDER_MISSING"])
+    material = {
+        "facts": {},
+        "diagnostics": {"unapproved_trial": "1.25"},
+        "blockers": [{"code": "HOLDER_MISSING", "dimension": "liquidity", "message": "持有人资料未披露完整"}],
+        "dimensions": {
+            "cost": {
+                "explanation": "官方费用事实",
+                "metrics": [{"name": "运作综合费率", "value": "0.96", "unit": "%", "period": "测试"}],
+                "sources": [],
+            }
+        },
+    }
+    materials.attach_materials(data[0], material)
+    result = _category(db, tmp_path, "prepared", data, date(2026, 9, 30), datetime.now(UTC))
+    monkeypatch.setattr(materials, "inspect_case", lambda *_: pytest.fail("GET must not inspect materials"))
+    value = read(["002112"], detail=True, engine=db)
+    assert result["rated"] == 0 and value["status"] == "NOT_RATED" and value["grade"] is None
+    assert len(value["dimensions"]) == 8 and value["dimensions"][-1]["metrics"][0]["value"] == "0.96"
+    assert "unapproved_trial" not in str(value)
+    with Session(db) as session:
+        stored = session.get(RatingBatch, result["batch"])
+        assert stored.input_snapshot["members"][0]["preparation"]["diagnostics"]["unapproved_trial"] == "1.25"
+
+
+def test_public_policy_full_publication_idempotence_failure_and_deactivation(db, tmp_path, monkeypatch):
+    from app.services.fund_rating_public_inputs import build_public_metrics
+    from app.services.fund_rating_public_policy import policy
+
+    from test_fund_rating_public import public_bundle
+
+    b = public_bundle(monkeypatch)
+    metrics, facts, expiry = build_public_metrics(b, date(2026, 9, 30), datetime(2026, 10, 10, tzinfo=UTC))
+    m = members()[0]
+    m.update(bundle=b, metrics=metrics, facts=facts, valid_until=expiry)
+    first = _category(db, tmp_path, "public-test", [m], date(2026, 9, 30), datetime.now(UTC))
+    assert first["rated"] == 0
+    with Session(db) as s, s.begin():
+        method = s.get(RatingMethodology, digest(policy()))
+        method.active = True
+        method.validation = {"report": {"categories": [{"category": "public-test", "eligible": True}]}}
+    m["reasons"] = []
+    published = _category(db, tmp_path, "public-test", [m], date(2026, 9, 30), datetime.now(UTC))
+    assert published["rated"] == 1
+    assert (
+        _category(db, tmp_path, "public-test", [m], date(2026, 9, 30), datetime.now(UTC))["batch"] == published["batch"]
+    )
+    result = read(["002112"], detail=True, engine=db)
+    assert result["status"] == "RATED" and len(result["dimensions"]) == 8 and "score" not in result
+    bad = deepcopy(m)
+    bad["metrics"]["drawdown"] = None
+    with pytest.raises(ValueError):
+        _category(db, tmp_path, "public-test", [bad], date(2026, 9, 30), datetime.now(UTC))
+    with Session(db) as s, s.begin():
+        assert s.get(RatingCurrent, "public-test").batch_id == published["batch"]
+        s.get(RatingMethodology, digest(policy())).active = False
+    assert read(["002112"], detail=True, engine=db)["status"] == "WITHDRAWN"
+
+
 def test_input_corruption_is_service_failure_not_not_rated(db, tmp_path):
     activate_fixture(db)
     result = _category(db, tmp_path, "test", members(), date(2026, 9, 30), datetime.now(UTC))

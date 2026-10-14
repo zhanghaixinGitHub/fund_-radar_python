@@ -95,6 +95,13 @@ def get_direction_experiment(fund_code: str) -> DirectionExperiment:
     def unavailable(status, code, message):
         return DirectionExperiment(**fields, status=status, reason_codes=(code,), message=message)
 
+    from app.services.comprehensive_prediction_policy import comprehensive_only
+
+    if comprehensive_only():
+        return unavailable(
+            "UNAVAILABLE", "NAV_ONLY_PREDICTION_DISABLED", "预测已统一采用综合资料分析，旧净值方法已停用。"
+        )
+
     if fund_code not in FUNDS:
         return unavailable(
             "NOT_APPLICABLE", "OUTSIDE_EXPERIMENT_SCOPE", "目前仅支持001632、006730、008888三只研究基金。"
