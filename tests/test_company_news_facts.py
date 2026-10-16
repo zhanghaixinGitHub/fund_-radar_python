@@ -122,3 +122,44 @@ def test_legacy_catalog_requires_original_response_and_exact_metadata(tmp_path, 
     monkeypatch.setattr(service, "verified_bytes", lambda receipt: (_ for _ in ()).throw(ValueError("HASH_MISMATCH")))
     with pytest.raises(ValueError, match="HASH_MISMATCH"):
         service.legacy_catalog_evidence(item, doc, holding["stockCode"])
+
+
+def test_legal_name_expansion_requires_verified_security_identity():
+    item, doc, holding, report = inputs()
+    item["title_plain"] = "律师事务所关于公司2026年限制性股票激励计划（草案）的法律意见书"
+    doc["pages"] = [
+        "证券代码000988律师事务所关于华工科技产业股份有限公司2026年限制性股票激励计划（草案）的法律意见书"
+        + "尚待审议。" * 30
+    ]
+    identity = {"row": {"ts_code": "000988.SZ", "symbol": "000988", "fullname": "华工科技产业股份有限公司"}}
+    assert service.inspect_company(item, doc, holding, report, AT, identity_evidence=identity)["business_eligible"]
+    identity["row"]["ts_code"] = "999999.SZ"
+    with pytest.raises(ValueError, match="TITLE_ANCHOR_MISSING"):
+        service.inspect_company(item, doc, holding, report, AT, identity_evidence=identity)
+
+
+def test_hk_monthly_form_preserves_month_and_legal_identity():
+    item = {"secName": "中际旭创", "title_plain": "H股公告（截至2026年9月30日止股份发行人的证券变动月报表）"}
+    body = (
+        "股份發行人及根據《上市規則》第十九B章上市的香港預託證券發行人的證券變動月報表"
+        "截至月份:2026年9月30日公司名稱:中際旭創股份有限公司"
+    )
+    assert service.publication_title_anchor(item, body, legal_name="中际旭创股份有限公司")
+    assert not service.publication_title_anchor(
+        item, body.replace("9月30日", "8月31日"), legal_name="中际旭创股份有限公司"
+    )
+    assert not service.publication_title_anchor(item, body, legal_name="另一家股份有限公司")
+
+
+def test_declaration_person_must_be_named_in_body():
+    item = {"secName": "德科立", "title_plain": "科创板上市公司独立董事候选人声明与承诺（张三）"}
+    body = "科创板上市公司独立董事候选人声明与承诺本人李四，已充分了解。"
+    assert not service.publication_title_anchor(item, body, legal_name="测试股份有限公司")
+    assert service.publication_title_anchor(item, body.replace("李四", "张三"), legal_name="测试股份有限公司")
+
+
+def test_substantive_catalog_title_difference_still_requires_original_review():
+    item = {"secName": "光库科技", "title_plain": "关于审核问询函回复的提示性公告"}
+    assert not service.publication_title_anchor(
+        item, "关于审核问询函回复更新的提示性公告", legal_name="珠海光库科技股份有限公司"
+    )

@@ -100,6 +100,11 @@ def current(code):
     """公共页面只读；失败或范围未覆盖不得变成“没有风险”。"""
     if not re.fullmatch(r"\d{6}", code):
         raise ValueError("NEWS_FUND_INVALID")
+    if code != FUND:
+        # 其他基金只读其自身已发布的资料要点；002112既有采集、摘要和资格规则保持不变。
+        from app.services.fund_material_news import current as material_news
+
+        return material_news(code)
     empty = {
         "fundCode": code,
         "checkedAt": None,
@@ -108,7 +113,7 @@ def current(code):
         "limitations": ["尚未完成该基金的近期消息核验，不能据此判断没有重要事项。"],
     }
     pointer = directory() / "current.json"
-    if code != FUND or not pointer.exists():
+    if not pointer.exists():
         return empty
     ref = read(pointer)
     if not re.fullmatch(r"[a-f0-9]{64}", ref["hash"]):

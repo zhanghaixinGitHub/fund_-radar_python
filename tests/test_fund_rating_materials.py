@@ -131,13 +131,14 @@ def test_formal_appointments_reconstruct_changes_and_do_not_count_current_start_
     assert value["teams"][-1] == {"effective_date": "2024-02-01", "members": ["丙丁"]}
 
 
-def test_archived_sources_are_immutable_and_survive_research_source_removal(tmp_path):
+@pytest.mark.parametrize("suffix", [".pdf", ".docx"])
+def test_archived_sources_are_immutable_and_survive_research_source_removal(tmp_path, suffix):
     origin, target = tmp_path / "case", tmp_path / "ratings"
     origin.mkdir()
-    source = origin / "report.pdf"
+    source = origin / ("report" + suffix)
     source.write_bytes(b"official raw bytes")
     receipt = {
-        "file": "report.pdf",
+        "file": source.name,
         "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
         "received_at": "2026-10-10T00:00:00+00:00",
     }

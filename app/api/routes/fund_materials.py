@@ -10,6 +10,9 @@ from app.services.fund_catalog_read import get_fund
 
 router = APIRouter(dependencies=[Depends(require_service_token)])
 Code = Annotated[str, Path(pattern=r"^\d{6}$")]
+# 保留沪深北六位代码，增加港股五位代码；原报告交易市场未核实的历史证券只保留原六位代码。
+# 这里仅校验格式，公司身份随后仍须属于所查基金的资料集，不能把无后缀代码自动当作A股。
+MATERIAL_STOCK_CODE_PATTERN = r"^(?:\d{6}(?:\.(?:SH|SZ|BJ))?|\d{5}\.HK)$"
 
 
 def require_fund(code: str):
@@ -51,7 +54,7 @@ def get_news_facts(fund_code: Code):
 def get_materials(
     fund_code: Code,
     report_id: Annotated[str | None, Query(alias="reportId", pattern=r"^[a-f0-9]{64}$")] = None,
-    stock_code: Annotated[str | None, Query(alias="stockCode", pattern=r"^\d{6}\.(SH|SZ|BJ)$")] = None,
+    stock_code: Annotated[str | None, Query(alias="stockCode", pattern=MATERIAL_STOCK_CODE_PATTERN)] = None,
 ):
     require_fund(fund_code)
     try:
@@ -66,7 +69,7 @@ def get_documents(
     page: Annotated[int, Query(ge=1, le=10000)] = 1,
     page_size: Annotated[int, Query(alias="pageSize", ge=1, le=50)] = 20,
     kind: Literal["all", "fund", "company", "news"] = "all",
-    stock_code: Annotated[str | None, Query(alias="stockCode", pattern=r"^\d{6}\.(SH|SZ|BJ)$")] = None,
+    stock_code: Annotated[str | None, Query(alias="stockCode", pattern=MATERIAL_STOCK_CODE_PATTERN)] = None,
     keyword: Annotated[str, Query(max_length=80)] = "",
     latest_only: Annotated[bool, Query(alias="latestOnly")] = False,
 ):

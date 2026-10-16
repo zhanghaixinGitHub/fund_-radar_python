@@ -254,6 +254,53 @@ def load_reports():
     return reports
 
 
+def split_quote_issues(issues):
+    """重验空行情及上市边界原文，将已证实不适用日期与待补缺口分开。
+
+    兼容旧检查点仍把退市后日期记入 errors 的情况。不能只相信 retryable=False；
+    证券代码、全部请求日期、原始空响应和证券状态必须相符，过期或损坏证据继续报错。
+    这只是停止无效重试，不补零、不替换证券、不让缺行情样本进入训练。
+    """
+    from app.services.historical_security_quotes import security_absence
+
+    errors, not_applicable = [], []
+    for issue in issues:
+        if issue.get("reason") != "REPORT_SECURITY_OUTSIDE_LISTING":
+            errors.append(issue)
+            continue
+        try:
+            days = issue["requested_dates"]
+            if (
+                not days
+                or len(set(days)) != len(days)
+                or issue.get("retryable") is not False
+                or issue.get("unresolved_dates") != []
+                or set(issue["explained_dates"]) != set(days)
+            ):
+                raise ValueError("READINESS_ABSENCE_DATES_UNVERIFIED")
+            quote = json.loads(checked_raw(issue["quote_receipt"]))
+            if quote.get("code") != 0 or quote["data"]["fields"] != FIELDS or quote["data"]["items"] != []:
+                raise ValueError("READINESS_ABSENCE_QUOTE_NOT_EMPTY")
+            basics = []
+            for receipt in issue["security_receipts"]:
+                raw = json.loads(checked_raw(receipt))
+                if raw.get("code") != 0 or raw["data"]["fields"] != ["ts_code", "list_date", "delist_date"]:
+                    raise ValueError("READINESS_ABSENCE_SECURITY_SCHEMA")
+                basics.extend(dict(zip(raw["data"]["fields"], row, strict=True)) for row in raw["data"]["items"])
+            if not basics or any(row["ts_code"] != issue["stock_code"] for row in basics):
+                raise ValueError("READINESS_ABSENCE_SECURITY_MISMATCH")
+            if any(
+                security_absence(basics, day) != issue["explained_dates"][day]
+                or issue["explained_dates"][day] not in ("BEFORE_LISTING", "AFTER_DELISTING")
+                for day in days
+            ):
+                raise ValueError("READINESS_ABSENCE_BOUNDARY_MISMATCH")
+            not_applicable.append(issue)
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            errors.append({**issue, "proof_error": safe_error(exc)})
+    return errors, not_applicable
+
+
 def acquire_older_quotes(rows, reports, trading_days, provider, progress):
     """只拉本基金历史正权重持仓股票的所需区间；已有 2021 起原文直接复用。"""
     needed = defaultdict(set)
@@ -324,10 +371,12 @@ def acquire_older_quotes(rows, reports, trading_days, provider, progress):
             "pct_precision_counts": dict(precision),
             "maximum_pct_formula_error": maximum_error,
         }
+    errors, not_applicable = split_quote_issues(errors)
     value = {
         "days": output,
         "receipts": receipts,
         "errors": errors,
+        "not_applicable": not_applicable,
         "requested": {c: sorted(v) for c, v in needed.items()},
     }
     versioned_save(STORE / "older-quotes.json", value)
@@ -412,6 +461,7 @@ def build(progress=lambda *args: None):
         "quote_gaps": {c: sorted(v) for c, v in gaps.items()},
         "new_requests": provider.count,
         "acquisition_errors": old_quotes["errors"],
+        "not_applicable": old_quotes.get("not_applicable", []),
         "training_ready": False,
         "training_runs": 0,
     }
@@ -425,6 +475,7 @@ def build(progress=lambda *args: None):
         "file": f"datasets/{key}.json",
         "counts": result["counts"],
         "errors": old_quotes["errors"],
+        "not_applicable": old_quotes.get("not_applicable", []),
         "quote_gaps": len(gaps),
         "new_requests": provider.count,
     }

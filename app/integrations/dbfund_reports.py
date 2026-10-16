@@ -354,7 +354,7 @@ def acquire(*, incremental=False, extended_history=False, progress=lambda *args:
     initialize()
     directory = ROOT / "readiness-extended" if extended_history else ROOT
     parser_version = EXTENDED_PARSER_VERSION if extended_history else PARSER_VERSION
-    results, errors = [], []
+    results, errors, recovered = [], [], []
     previous = read(directory / "report-result.json") if (directory / "report-result.json").exists() else {}
     headers = {"User-Agent": "Mozilla/5.0", "Referer": PRODUCT}
     with httpx.Client(timeout=httpx.Timeout(25, connect=5), headers=headers, follow_redirects=False) as client:
@@ -370,6 +370,7 @@ def acquire(*, incremental=False, extended_history=False, progress=lambda *args:
             receipt_source = receipt
             if extended_history and not receipt.exists():
                 receipt_source = ROOT / "report-receipts" / f"{key}.json"
+            catalog_key = {k: v for k, v in entry.items() if k != "catalog_received_at"}
             try:
                 if receipt_source.exists():
                     saved = read(receipt_source)
@@ -377,7 +378,6 @@ def acquire(*, incremental=False, extended_history=False, progress=lambda *args:
                     if hashlib.sha256(raw).hexdigest() != saved["sha256"]:
                         raise ValueError("REPORT_CACHED_PDF_CHANGED")
                     last_check = datetime.fromisoformat(saved.get("checked_at", saved["received_at"]))
-                    catalog_key = {k: v for k, v in entry.items() if k != "catalog_received_at"}
                     changed = saved.get("catalog_hash") and saved["catalog_hash"] != digest(catalog_key)
                     if changed or (not incremental and now() - last_check >= timedelta(days=7)):
                         # 官网可能在原链接替换修订版；每周重新核验，旧版本和原首次取得时间均保留。
@@ -440,21 +440,36 @@ def acquire(*, incremental=False, extended_history=False, progress=lambda *args:
 
                 reason = safe_error(exc)
                 period = report_period(entry["title"])
-                errors.append(
-                    {
-                        "title": entry["title"],
-                        "url": entry["url"],
-                        "reason": reason,
-                        "report_end": period[0] if period else None,
-                        "report_type": period[1] if period else None,
-                        "http_status": exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None,
-                    }
-                )
+                failure = {
+                    "title": entry["title"],
+                    "url": entry["url"],
+                    "reason": reason,
+                    "report_end": period[0] if period else None,
+                    "report_type": period[1] if period else None,
+                    "http_status": exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None,
+                }
+                if extended_history and failure["http_status"] == 404:
+                    from app.integrations.dbfund_report_recovery import PRIMARY, recover_report
+
+                    if entry["url"] == PRIMARY:
+                        try:
+                            parsed = recover_report(client, entry, failure)
+                            path = directory / "reports" / f"{parsed['raw']['sha256']}-{parser_version}.json"
+                            if not path.exists():
+                                save(path, parsed)
+                            results.append(read(path))
+                            recovered.append({"primary_failure": failure, "receipt": parsed["raw"]})
+                            continue
+                        except Exception as recovery_error:
+                            # 备用来源失效或核验不通过仍是缺口，不能靠缓存成功状态消除失败。
+                            failure["recovery_reason"] = safe_error(recovery_error)
+                errors.append(failure)
                 print(f"REPORT_ERROR {entry['title']} {reason}", flush=True)
     result = {
         "at": now().isoformat(),
         "reports": len(results),
         "errors": errors,
+        "recovered": recovered,
         "report_files": [f"{r['raw']['sha256']}-{parser_version}" for r in results],
         "new_purchase_cny": 0,
     }
@@ -472,7 +487,7 @@ def acquire(*, incremental=False, extended_history=False, progress=lambda *args:
     result["not_listed_on_recheck"] = [
         name
         for name in result["report_files"]
-        if read(directory / "reports" / (name + ".json"))["raw"]["url"] not in listed_urls
+        if read(directory / "reports" / (name + ".json"))["source"]["url"] not in listed_urls
     ]
     versioned_save(directory / "report-result.json", result)
     return result

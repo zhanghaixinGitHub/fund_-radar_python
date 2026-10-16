@@ -109,3 +109,30 @@ def test_training_loader_keeps_three_classes_and_common_rows_for_all_variants(tm
     assert calls == [{"pointer": "ready.json", "publish": False}] * 3
     with pytest.raises(ValueError, match="VARIANT_INVALID"):
         package.training_inputs("UNKNOWN")
+
+
+def test_proven_delisting_issue_does_not_rebuild_successful_market_cache(tmp_path, monkeypatch):
+    """旧检查点只有已核验的不适用日期时复用行情；真正缺口仍由独立证据测试拒绝。"""
+    from app.integrations import dbfund_reports
+
+    own_store = tmp_path / "own"
+    own_store.mkdir()
+    monkeypatch.setattr(package, "STORE", tmp_path)
+    monkeypatch.setattr(package.own, "STORE", own_store)
+    nav, reports = {"rows": []}, []
+    signature = digest({"nav_rows": [], "reports": [], "calendar": "calendar"})
+    issue = {"reason": "REPORT_SECURITY_OUTSIDE_LISTING"}
+    save(tmp_path / "own-input-checkpoint.json", {"signature": signature, "result": {"errors": [issue]}})
+    save(own_store / "older-quotes.json", {})
+    save(own_store / "indices.json", {})
+    monkeypatch.setattr(dbfund_reports, "acquire", lambda **_: {"errors": [], "reports": 1})
+    monkeypatch.setattr(package.own, "load_nav", lambda: nav)
+    monkeypatch.setattr(package.own, "load_reports", lambda: reports)
+    monkeypatch.setattr(package.own, "sessions", lambda: ([], "calendar"))
+    monkeypatch.setattr(package.own, "split_quote_issues", lambda _: ([], [issue]))
+    monkeypatch.setattr(package.own, "verify_derived_market", lambda *_: None)
+    monkeypatch.setattr(package.own, "build", lambda *_: pytest.fail("不得重建已核验行情"))
+    monkeypatch.setattr(package, "build", lambda *_: {"training_ready": True})
+    result = package.supplement()
+    assert result["errors"] == [] and result["not_applicable"] == [issue] and result["new_requests"] == 0
+    assert read(tmp_path / "own-input-checkpoint.json")["result"]["errors"] == []

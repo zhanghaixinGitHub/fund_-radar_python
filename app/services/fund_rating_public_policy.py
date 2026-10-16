@@ -9,6 +9,14 @@ from decimal import Decimal, localcontext
 from app.services.fund_rating_rules import DIMENSIONS, WEIGHTS, decimal, grade, stored_score
 
 BASIS = "PUBLIC_DISCLOSURE_EQUITY_V1"
+ETF_BASIS = "PUBLIC_DISCLOSURE_ETF_LINK_V1"
+MARKET_BASIS = "PUBLIC_DISCLOSURE_DOMESTIC_EQUITY_V1"
+INDEX_BASIS = "PUBLIC_DISCLOSURE_DOMESTIC_INDEX_V1"
+RECONCILED_BASIS = "PUBLIC_DISCLOSURE_DOMESTIC_INDEX_RECONCILED_V1"
+GLOBAL_BASIS = "PUBLIC_DISCLOSURE_GLOBAL_EQUITY_CNY_V1"
+MARKET_BASES = frozenset((MARKET_BASIS, GLOBAL_BASIS))
+INDEX_BASES = frozenset((INDEX_BASIS, RECONCILED_BASIS))
+PUBLIC_BASES = frozenset((BASIS, ETF_BASIS, *MARKET_BASES, *INDEX_BASES))
 ANCHORS = {
     "return_1y": [(-0.20, 0), (-0.05, 30), (0, 50), (0.05, 70), (0.10, 90), (0.20, 100)],
     "return_3y": [(-0.20, 0), (-0.05, 30), (0, 50), (0.05, 70), (0.10, 90), (0.20, 100)],
@@ -42,8 +50,30 @@ TERMS = {
 }
 
 
-def policy() -> dict:
+def policy(basis: str = BASIS) -> dict:
+    if basis == GLOBAL_BASIS:
+        from app.services.fund_rating_public_global import global_policy
+
+        return global_policy()
+    if basis == RECONCILED_BASIS:
+        from app.services.fund_rating_public_reconciled import reconciled_policy
+
+        return reconciled_policy()
+    if basis == INDEX_BASIS:
+        from app.services.fund_rating_public_index import index_policy
+
+        return index_policy()
     """完整可哈希政策；local 限制避免将公开读取事实冒充已取得商业再发布许可。"""
+    if basis == MARKET_BASIS:
+        from app.services.fund_rating_public_market import market_policy
+
+        return market_policy()
+    if basis == ETF_BASIS:
+        from app.services.fund_rating_public_etf import etf_policy
+
+        return etf_policy()
+    if basis != BASIS:
+        raise ValueError("RATING_PUBLIC_BASIS_UNSUPPORTED")
     return {
         "basis": BASIS,
         "family": "ACTIVE_EQUITY",

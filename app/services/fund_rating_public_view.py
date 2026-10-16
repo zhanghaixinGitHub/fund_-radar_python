@@ -1,6 +1,13 @@
 """公开资料评级的用户依据：显示事实、日期及限制，绝不透出分数、权重和验证任务。"""
 
-from app.services.fund_rating_public_policy import TERMS
+from app.services.fund_rating_public_policy import (
+    ETF_BASIS,
+    GLOBAL_BASIS,
+    INDEX_BASES,
+    MARKET_BASES,
+    MARKET_BASIS,
+    policy,
+)
 from app.services.fund_rating_rules import DIMENSIONS, GRADES, decimal, grade
 
 LABELS = {
@@ -39,18 +46,52 @@ NOTES = {
 
 def public_evidence(member: dict, computed: dict | None, as_of) -> dict:
     bundle, metrics = member["bundle"], member["metrics"]
+    etf = bundle.get("basis") == ETF_BASIS
+    index = bundle.get("basis") in INDEX_BASES
+    config = policy(bundle["basis"])
+    labels = dict(LABELS)
+    notes = dict(NOTES)
+    if bundle.get("basis") in {*MARKET_BASES, *INDEX_BASES}:
+        labels["strategy_continuity"] = ("报告期重大投资策略变化", "")
+        notes["return"] = "根据已核验的复权单位净值计算历史总回报，分红折算已包含，不作同类排名。"
+        notes["management"] = (
+            "经理任职资料与管理人原件核对，并结合报告披露的重大策略变化和监管事项；不等同于经理能力判断。"
+        )
+    if etf or index:
+        labels.update(
+            tracking_error_ratio=("三年年化跟踪误差", "%"),
+            tracking_bias_ratio=("三年日均绝对跟踪偏离", "%"),
+            net_assets=("基金产品净资产（A/C合计）", "亿元"),
+            restricted_ratio=("穿透受限股票占联接基金净资产", "%"),
+        )
+        notes.update(
+            management="按官方业绩基准核对跟踪表现，并结合报告策略和管理人监管披露；合同跟踪目标不是收益保证。",
+            holdings="穿透目标ETF的完整股票和报告行业结构；主题行业集中是实际风险，报告持仓不代表实时持仓。",
+            liquidity="依据报告货币资金、穿透受限股票和产品规模；未公开最大个人持有人比例，不能据此判断为零或承诺赎回到账。",
+        )
+        if index:
+            labels["net_assets"] = ("基金产品净资产（各类份额合计）", "亿元")
+            labels["restricted_ratio"] = ("报告期末受限资产占净资产", "%")
+            notes["holdings"] = "根据完整股票持仓与行业表衡量实际集中风险；指数的主题集中不代表管理人偏离目标。"
+            notes["liquidity"] = (
+                "依据报告期末受限资产、货币资金和产品规模；未公开最大持有人精确比例，不承诺赎回到账时间。"
+            )
     sources = [{"title": s["title"], "url": s["url"], "publishedOn": s["published_on"]} for s in bundle["sources"]]
     period = f"{bundle['history']['dates'][0]} 至 {as_of}"
     dimensions = []
     for key, name in DIMENSIONS.items():
         g = grade(computed["dimensions"][key]) if computed else None
         values = []
-        for metric, _ in TERMS[key]:
-            label, unit = LABELS[metric]
-            n = decimal(metrics[metric])
+        for metric, _ in config["terms"][key]:
+            label, unit = labels[metric]
+            n = decimal(metrics[metric.removesuffix("_ratio")] if metric.startswith("tracking_") else metrics[metric])
             value = f"{n * 100 if unit == '%' else n / 100_000_000 if unit == '亿元' else n:.2f}"
             if metric == "strategy_continuity":
-                value = "未发生改变" if n == 1 else "发生改变"
+                value = (
+                    ("未发生重大改变" if bundle.get("basis") in {*MARKET_BASES, *INDEX_BASES} else "未发生改变")
+                    if n == 1
+                    else "发生改变"
+                )
             if metric == "governance_state":
                 value = {0: "有事项，整改未完成", 1: "报告披露受到监管措施，已整改", 2: "报告明确无事项"}[int(n)]
             if metric == "holder_risk_band":
@@ -77,7 +118,7 @@ def public_evidence(member: dict, computed: dict | None, as_of) -> dict:
                 "name": name,
                 "grade": g,
                 "gradeLabel": GRADES[g] if g else None,
-                "explanation": NOTES[key],
+                "explanation": notes[key],
                 "metrics": values,
                 "sources": sources,
             }
@@ -93,13 +134,15 @@ def public_evidence(member: dict, computed: dict | None, as_of) -> dict:
     limitations = [
         "本评级衡量历史表现与公开披露，不预测未来收益；不同类型的同名等级不能直接比较。",
         f"持仓、现金和受限情况截至 {member['facts']['holdings']}，不代表评价日实时资产或五日收付款。",
-        "最大持有人精确比例未公开，持有人评价采用报告披露的区间信息。",
+        "联接基金最大个人持有人精确比例未公开，不能从个人持有100%推断为零或低于20%。"
+        if etf or index
+        else "最大持有人精确比例未公开，持有人评价采用报告披露的区间信息。",
         "该评价口径尚未完成大范围同类及未来表现验证。",
     ]
     if computed:
         from app.services.fund_rating_public_validation import sensitivity
 
-        if sensitivity(metrics, computed)["changed_grades"]:
+        if sensitivity(metrics, computed, config=config)["changed_grades"]:
             limitations.insert(
                 0, "综合评价接近相邻等级分界；收益表现与风险、分散程度存在明显差异，需结合八维依据理解。"
             )
@@ -111,7 +154,13 @@ def public_evidence(member: dict, computed: dict | None, as_of) -> dict:
             "category": bundle["category_label"],
             "currency": "CNY",
             "productCount": 0,
-            "scope": "境内主动混合基金的公开资料评价，采用统一评价区间，不作同类排名",
+            "scope": "境内ETF联接基金的公开资料评价，采用统一评价区间，不作同类排名"
+            if etf
+            else "人民币境外主动股票基金的公开资料评价，采用统一评价区间，不作同类排名"
+            if bundle.get("basis") == GLOBAL_BASIS
+            else "境内主动权益基金的公开资料评价，采用统一评价区间，不作同类排名"
+            if bundle.get("basis") == MARKET_BASIS
+            else "境内主动混合基金的公开资料评价，采用统一评价区间，不作同类排名",
             "period": period,
         },
         "dimensions": dimensions,

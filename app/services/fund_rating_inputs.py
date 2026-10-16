@@ -5,11 +5,13 @@ import json
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.models.fund_rating import RatingClassification, RatingEvidence
 from app.services.fund_rating_metrics import history_metrics, holdings_metrics, standard_cost, total_return
 from app.services.fund_rating_rules import CATEGORY_LABELS, DIMENSIONS
@@ -134,12 +136,24 @@ def empty_evidence(row: dict, family: str, as_of: date) -> dict:
 
 def validate_sources(session: Session, bundle: dict, frozen: datetime) -> None:
     """每一包均需可追溯官方引用、真实取得时间和来源授权；仅日期精度不伪造发布时刻。"""
-    from app.services.fund_rating_public_policy import BASIS
+    from app.services.fund_rating_public_policy import PUBLIC_BASES
 
-    if bundle.get("basis") == BASIS:
+    if bundle.get("basis") in PUBLIC_BASES:
         from app.services.fund_rating_public_inputs import validate_public_sources
+        from app.services.fund_rating_public_policy import ETF_BASIS, INDEX_BASES, MARKET_BASES
 
         validate_public_sources(bundle, frozen)
+        uses_provider = any(r.get("label") == "provider" for r in bundle.get("raw_archive", []))
+        if (
+            bundle.get("basis") in {*MARKET_BASES, *INDEX_BASES}
+            or (bundle.get("basis") == ETF_BASIS and uses_provider)
+        ) and not session.scalar(
+            text(
+                "SELECT 1 FROM source_registry WHERE source_code='TUSHARE_PRO_FUND' "
+                "AND enabled AND authorization_verified_at IS NOT NULL"
+            )
+        ):
+            raise ValueError("RATING_MARKET_PROVIDER_NOT_AUTHORIZED")
         return
     refs = bundle["sources"]
     if not refs or len(refs) > 100:
@@ -176,9 +190,9 @@ def build_metrics(bundle: dict, as_of: date, frozen: datetime) -> tuple[dict, di
 
     其他类别的专用原件尚无真实覆盖，保持未开放；不接受直接填写分项分数来绕过公式。
     """
-    from app.services.fund_rating_public_policy import BASIS
+    from app.services.fund_rating_public_policy import PUBLIC_BASES
 
-    if bundle.get("basis") == BASIS:
+    if bundle.get("basis") in PUBLIC_BASES:
         from app.services.fund_rating_public_inputs import build_public_metrics
 
         return build_public_metrics(bundle, as_of, frozen)
@@ -392,6 +406,11 @@ def prepare(session: Session, rows: list[dict], as_of: date, frozen: datetime) -
         )
     }
     groups = defaultdict(list)
+    # 部分资料只在手动更新或试算时加载，随后与批次一起冻结；GET 不触发资料补充。
+    from app.services.fund_rating_market_materials import attach as attach_market
+    from app.services.fund_rating_market_materials import load as load_market
+
+    market_materials = load_market(Path(get_settings().fund_insight_directory) / "ratings", as_of, frozen)
     for row in rows:
         family = provisional_family(row)
         member = {
@@ -444,6 +463,8 @@ def prepare(session: Session, rows: list[dict], as_of: date, frozen: datetime) -
             material = inspect_case(session, as_of, frozen)
             if material:
                 attach_materials(member, material)
+        if not member["admitted"] and row["fund_code"] in market_materials:
+            attach_market(member, market_materials[row["fund_code"]])
         groups[category].append(member)
     for members in groups.values():
         cutoffs = {m["valuation_date"] for m in members if m["admitted"]}

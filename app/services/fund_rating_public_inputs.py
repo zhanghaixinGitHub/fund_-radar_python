@@ -21,7 +21,16 @@ from app.services.fund_rating_metrics import (
     standard_cost,
     total_return,
 )
-from app.services.fund_rating_public_policy import BASIS
+from app.services.fund_rating_public_policy import (
+    BASIS,
+    ETF_BASIS,
+    GLOBAL_BASIS,
+    INDEX_BASES,
+    INDEX_BASIS,
+    MARKET_BASES,
+    MARKET_BASIS,
+    RECONCILED_BASIS,
+)
 from app.services.fund_rating_rules import decimal
 
 
@@ -68,40 +77,81 @@ def validate_public_sources(bundle: dict, frozen: datetime, *, root: Path | None
     """
     if get_settings().app_environment != "local" or bundle.get("source_scope") != "PUBLIC_DISCLOSURE_LOCAL_ANALYSIS":
         raise ValueError("RATING_PUBLIC_LOCAL_SCOPE_REQUIRED")
-    if bundle.get("basis") != BASIS or bundle.get("fund_code") != "002112":
+    etf = bundle.get("basis") == ETF_BASIS
+    market = bundle.get("basis") in {*MARKET_BASES, *INDEX_BASES}
+    if not (
+        (market and re_market_code(bundle.get("fund_code")))
+        or (etf and re_market_code(bundle.get("fund_code")))
+        or (bundle.get("basis") == BASIS and bundle.get("fund_code") == "002112")
+    ):
         raise ValueError("RATING_PUBLIC_CASE_UNSUPPORTED")
-    root = root or Path(get_settings().fund_insight_directory) / "ratings"
+    # 同一资料包共用已经解析的根目录，避免每个原件都重复遍历 Windows 路径。
+    # 原件路径仍逐件 resolve，并检查目录范围、大小和真实内容哈希。
+    root = (root or Path(get_settings().fund_insight_directory) / "ratings").resolve()
+    sources_directory = root / "sources"
     refs = bundle["raw_archive"]
     if not 1 <= len(refs) <= 200 or len({r["sha256"] for r in refs}) != len(refs):
         raise ValueError("RATING_PUBLIC_SOURCE_COUNT")
-    for ref in refs:
+    expanded = [v for r in refs for v in (r, *r.get("aliases", []))]
+    if len(expanded) > 200 or any(
+        a["sha256"] != r["sha256"] or a["file"] != r["file"] for r in refs for a in r.get("aliases", [])
+    ):
+        raise ValueError("RATING_PUBLIC_SOURCE_ALIAS")
+    from app.services.fund_rating_public_market import HOSTS
+
+    allowed_hosts = HOSTS if market or etf else {"www.dbfund.com.cn", "dbfund.com.cn"}
+
+    for ref in expanded:
         url = urlsplit(ref["url"])
-        if (
-            url.scheme != "https"
-            or url.hostname not in {"www.dbfund.com.cn", "dbfund.com.cn"}
-            or url.username
-            or url.password
-        ):
+        if url.scheme != "https" or url.hostname not in allowed_hosts or url.username or url.password:
             raise ValueError("RATING_PUBLIC_SOURCE_HOST")
         received = datetime.fromisoformat(ref["acquired_at"])
         if received.tzinfo is None or received > frozen:
             raise ValueError("RATING_PUBLIC_SOURCE_FUTURE")
         path = (root / ref["file"]).resolve()
-        if (
-            not path.is_relative_to(root.resolve() / "sources")
-            or not path.is_file()
-            or path.stat().st_size > 20_000_000
-        ):
+        if not path.is_relative_to(sources_directory) or not path.is_file() or path.stat().st_size > 20_000_000:
             raise ValueError("RATING_PUBLIC_SOURCE_PATH")
         if hashlib.sha256(path.read_bytes()).hexdigest() != ref["sha256"]:
             raise ValueError("RATING_PUBLIC_SOURCE_HASH")
+    if market or etf:
+        # dfcfw 附件主机按东财公告目录逐件绑定身份；白名单不等于整域信任。
+        from app.services.fund_rating_public_market import ATTACHMENT_HOST, attachment_identity
+
+        by_label = {r["label"]: r for r in refs if "label" in r}
+        for ref in refs:
+            if urlsplit(ref["url"]).hostname == ATTACHMENT_HOST:
+                code = bundle["fund_code"]
+                if etf and ref["label"].startswith("target-"):
+                    # 穿透目标 ETF 的披露附件身份绑定到目标基金代码。
+                    code = bundle["classification"]["scope"]["target_fund"]
+                attachment_identity(by_label, root, ref["label"], code)
     hashes = {r["sha256"] for r in refs}
     if not {bundle["report_hash"], bundle["summary_hash"], *bundle["classification"]["source_refs"]} <= hashes:
         raise ValueError("RATING_PUBLIC_SOURCE_REFERENCE")
 
 
 def build_public_metrics(bundle: dict, as_of: date, frozen: datetime) -> tuple[dict, dict, datetime]:
+    if bundle.get("basis") == GLOBAL_BASIS:
+        from app.services.fund_rating_public_global import metrics
+
+        return metrics(bundle, as_of, frozen)
+    if bundle.get("basis") == RECONCILED_BASIS:
+        from app.services.fund_rating_public_reconciled import metrics
+
+        return metrics(bundle, as_of, frozen)
+    if bundle.get("basis") == INDEX_BASIS:
+        from app.services.fund_rating_public_index import metrics
+
+        return metrics(bundle, as_of, frozen)
     """从完整事实重算全部八维指标；有界披露字段采用风险档，不强迫提供不存在的精确值。"""
+    if bundle.get("basis") == MARKET_BASIS:
+        from app.services.fund_rating_public_market import metrics
+
+        return metrics(bundle, as_of, frozen)
+    if bundle.get("basis") == ETF_BASIS:
+        from app.services.fund_rating_public_etf import build_etf_metrics
+
+        return build_etf_metrics(bundle, as_of, frozen)
     if (
         bundle["basis"] != BASIS
         or bundle["family"] != "ACTIVE_EQUITY"
@@ -118,32 +168,7 @@ def build_public_metrics(bundle: dict, as_of: date, frozen: datetime) -> tuple[d
         or date.fromisoformat(info["published_on"]) > as_of
     ):
         raise ValueError("RATING_PUBLIC_DOCUMENT_SCOPE")
-    if not h.get("events_complete") or h["missing_dates"] or h["event_coverage"]["dates_checked"] != len(h["dates"]):
-        raise ValueError("RATING_PUBLIC_EVENTS_INCOMPLETE")
-    from app.services.direction_1d_protocol import calendar
-
-    sessions, calendar_hash = calendar()
-    days = [date.fromisoformat(d) for d in h["dates"]]
-    if not days or calendar_hash != h["calendar_hash"] or days != [d for d in sessions if days[0] <= d <= as_of]:
-        raise ValueError("RATING_PUBLIC_CALENDAR_GAP")
-    if max(d for d in sessions if (d.year, d.month) == (as_of.year, as_of.month)) != as_of:
-        raise ValueError("RATING_PUBLIC_MONTH_END")
-    index = total_return(h["unit_nav"], h["cash_dividend_per_share"], h["split_factor"])
-    metrics = history_metrics(
-        days, index, [], [date.fromisoformat(d) for d in h["month_ends"]], 252, require_sharpe=False
-    )
-    metrics.pop("sharpe")
-    endpoints = [index[h["dates"].index(d)] for d in h["month_ends"]]
-    metrics["rolling_positive"] = Decimal(sum(x > 0 for x in metrics["rolling"])) / len(metrics["rolling"])
-    metrics["monthly_positive"] = Decimal(sum(b > a for a, b in zip(endpoints, endpoints[1:], strict=False))) / (
-        len(endpoints) - 1
-    )
-    # 回撤为零时不伪造分母；只用政策已饱和的端点表达正、零、负收益。
-    metrics["calmar"] = (
-        metrics["return_3y"] / metrics["drawdown"]
-        if metrics["drawdown"]
-        else Decimal(2 if metrics["return_3y"] > 0 else 0 if metrics["return_3y"] == 0 else -1)
-    )
+    metrics = public_history(h, as_of)
     report = date.fromisoformat(holding["report_date"])
     if not 0 <= (as_of - report).days <= 210:
         raise ValueError("RATING_PUBLIC_HOLDINGS_EXPIRED")
@@ -171,7 +196,49 @@ def build_public_metrics(bundle: dict, as_of: date, frozen: datetime) -> tuple[d
         mode=fees["subscription_mode"],
         operating_cost=fees["operating_cost"],
     )
-    checked = datetime.fromisoformat(bundle["documents_checked_at"])
+    expiry = public_valid_until(as_of, report, datetime.fromisoformat(bundle["documents_checked_at"]), frozen)
+    facts = {"nav": str(as_of), "holdings": str(report), "manager": info["checked_on"], "fees": info["checked_on"]}
+    return metrics, facts, expiry
+
+
+def public_history(h: dict, as_of: date) -> dict:
+    """公开权益与ETF共用的真实历史指标；不需要任何持仓或持有人占位值。"""
+    if not h.get("events_complete") or h["missing_dates"] or h["event_coverage"]["dates_checked"] != len(h["dates"]):
+        raise ValueError("RATING_PUBLIC_EVENTS_INCOMPLETE")
+    from app.services.direction_1d_protocol import calendar
+
+    sessions, calendar_hash = calendar()
+    days = [date.fromisoformat(d) for d in h["dates"]]
+    if not days or calendar_hash != h["calendar_hash"] or days != [d for d in sessions if days[0] <= d <= as_of]:
+        raise ValueError("RATING_PUBLIC_CALENDAR_GAP")
+    if max(d for d in sessions if (d.year, d.month) == (as_of.year, as_of.month)) != as_of:
+        raise ValueError("RATING_PUBLIC_MONTH_END")
+    index = total_return(h["unit_nav"], h["cash_dividend_per_share"], h["split_factor"])
+    metrics = history_metrics(
+        days, index, [], [date.fromisoformat(d) for d in h["month_ends"]], 252, require_sharpe=False
+    )
+    metrics.pop("sharpe")
+    endpoints = [index[h["dates"].index(d)] for d in h["month_ends"]]
+    metrics["rolling_positive"] = Decimal(sum(x > 0 for x in metrics["rolling"])) / len(metrics["rolling"])
+    metrics["monthly_positive"] = Decimal(sum(b > a for a, b in zip(endpoints, endpoints[1:], strict=False))) / (
+        len(endpoints) - 1
+    )
+    # 回撤为零时不伪造分母；只用政策已饱和的端点表达正、零、负收益。
+    metrics["calmar"] = (
+        metrics["return_3y"] / metrics["drawdown"]
+        if metrics["drawdown"]
+        else Decimal(2 if metrics["return_3y"] > 0 else 0 if metrics["return_3y"] == 0 else -1)
+    )
+    return metrics
+
+
+def public_valid_until(as_of: date, report: date, checked: datetime, frozen: datetime) -> datetime:
+    """复核、持仓和月度宽限取最早到期点；未来报告或已过期输入拒绝生成等级。"""
+    from app.services.direction_1d_protocol import calendar
+
+    sessions, _ = calendar()
+    if not 0 <= (as_of - report).days <= 210:
+        raise ValueError("RATING_PUBLIC_HOLDINGS_EXPIRED")
     if checked.tzinfo is None or checked > frozen or frozen - checked > timedelta(days=31):
         raise ValueError("RATING_PUBLIC_DOCUMENTS_EXPIRED")
     # 遵循既有月度更新宽限；宽限不超过原文复核/持仓有效期。
@@ -187,8 +254,7 @@ def build_public_metrics(bundle: dict, as_of: date, frozen: datetime) -> tuple[d
     )
     if expiry <= frozen:
         raise ValueError("RATING_PUBLIC_ALREADY_EXPIRED")
-    facts = {"nav": str(as_of), "holdings": str(report), "manager": info["checked_on"], "fees": info["checked_on"]}
-    return metrics, facts, expiry
+    return expiry
 
 
 def prepare_public_bundle(session, as_of: date, frozen: datetime) -> dict:
@@ -259,7 +325,29 @@ def prepare_public_bundle(session, as_of: date, frozen: datetime) -> dict:
 
 
 def verify_public_originals(bundle: dict) -> None:
+    if bundle.get("basis") == GLOBAL_BASIS:
+        from app.services.fund_rating_public_global import verify_originals
+
+        return verify_originals(bundle)
+    if bundle.get("basis") == RECONCILED_BASIS:
+        from app.services.fund_rating_public_reconciled import verify_originals
+
+        return verify_originals(bundle)
+    if bundle.get("basis") == INDEX_BASIS:
+        from app.services.fund_rating_public_index import verify_originals
+
+        return verify_originals(bundle)
     """导入时重读关键PDF，拒绝把手工改写的监管/流通受限事实冒充原文。"""
+    if bundle.get("basis") == MARKET_BASIS:
+        from app.services.fund_rating_public_market import verify_originals
+
+        verify_originals(bundle)
+        return
+    if bundle.get("basis") == ETF_BASIS:
+        from app.services.fund_rating_public_etf import verify_etf_originals
+
+        verify_etf_originals(bundle)
+        return
     root = Path(get_settings().fund_insight_directory) / "ratings"
     refs = {r["sha256"]: r for r in bundle["raw_archive"]}
     raw = (root / refs[bundle["report_hash"]]["file"]).read_bytes()
@@ -290,3 +378,8 @@ def verify_public_originals(bundle: dict) -> None:
     )
     if teams != bundle["manager"]:
         raise ValueError("RATING_PUBLIC_MANAGER_FACT_CONFLICT")
+
+
+def re_market_code(code) -> bool:
+    """公开市场适配仍限六位公开基金代码，不接受调用方路径或任意标识。"""
+    return isinstance(code, str) and len(code) == 6 and code.isascii() and code.isdigit()

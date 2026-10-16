@@ -93,14 +93,24 @@ def prepare(now, code: str, materials_path=None) -> dict:
         if not profiles or profiles[0]["status"] != "ACTIVE":
             raise ValueError("SOURCE_UNAVAILABLE")
         profile = profiles[0]
-        from app.services.nav_repair import domestic_calendar_supported
+        from app.services.comprehensive_calendar import verified_domestic_window
+        from app.services.qdii_valuation_contract import verified_qdii_window
 
-        if not domestic_calendar_supported(profile):
+        if not verified_domestic_window(profile, material, by_id, w) and not verified_qdii_window(
+            profile, material, by_id, w
+        ):
             raise ValueError("COMPREHENSIVE_CALENDAR_POLICY_REQUIRED")
         if "联接" in profile["fund_name"] and len(material.get("exposure_chain", [])) < 2:
             raise ValueError("COMPREHENSIVE_ETF_LOOKTHROUGH_REQUIRED")
         rows = repo.navs(connection, code, source["source_id"], input_days(base)[0], base)
-        rows = [row for row in rows if row["updated_at"] <= now]
+        # 来源可能提前返回估值日数据，但公告日期仍在未来；这类记录尚不可用。
+        # 保留库内原记录与首次响应，只在本次冻结输入中排除，不能倒填公告时间。
+        rows = [
+            row
+            for row in rows
+            if row["updated_at"] <= now
+            and (row.get("ann_date") is None or row["ann_date"] <= now.date())
+        ]
         observed = repo.observe(connection, code, source, rows, now) if rows else []
     data = {
         "fund_code": code,
@@ -124,6 +134,8 @@ def prepare(now, code: str, materials_path=None) -> dict:
         "materials_path": str(path.resolve()),
         "materials_hash": digest(material),
         "exposure_chain": material.get("exposure_chain", [code]),
+        "stock_market_applicable": material.get("stock_market_applicable", True),
+        "calendar_evidence": deepcopy(material.get("calendar_evidence")),
     }
     if len(data["inventory"]) != 16:
         raise ValueError("COMPREHENSIVE_INVENTORY_INVALID")

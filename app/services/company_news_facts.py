@@ -14,7 +14,7 @@ from app.services.fund_exposure_supplement import verified_bytes
 from app.services.fund_materials import snapshot
 from app.services.fund_materials_store import source_path
 
-RULE = "DISCLOSED_HOLDING_COMPANY_PUBLICATION_V1"
+RULE = "DISCLOSED_HOLDING_COMPANY_PUBLICATION_V2"
 # 首次实测目录有207份近期原件。文档处理与网络请求分别限额，复用已保存原件，
 # 不能因“每次只取最新30份”永久饿死较早待核验资料；超过250份仍明确部分覆盖。
 LIMITS = {"days": 30, "companies": 30, "documents": 250, "catalog_requests": 100, "body_requests": 60}
@@ -25,25 +25,66 @@ def compact(value):
     return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(value)))
 
 
-def publication_title_anchor(item, text):
+def publication_words(value):
+    """统一公开文书常见繁体字和版式，不删年份、草案、修订或生效条件。
+
+    仅列出公告身份、表格名称所需的逐字对应；不作语义改写，也不修改留存原文。
+    未覆盖的异体字继续交给逐份原件核验，不能用近似匹配自动放行。
+    """
+    return (
+        compact(value)
+        .translate(
+            str.maketrans(
+                "證券變動報發根據規則託狀態稱際創勝羅劍橋會議註冊於華國實體與聲諾董事長預庫存購",
+                "证券变动报发根据规则托状态称际创胜罗剑桥会议注册于华国实体与声诺董事长预库存购",
+            )
+        )
+        .translate(str.maketrans("", "", "《》“”‘’"))
+    )
+
+
+def publication_title_anchor(item, text, *, legal_name=None):
     """核对标题实质文字，仅兼容明确的排版差异与目录前置证券简称。
 
     书名号和左右引号不改变标题字词；括号及其中的草案、修订、适用条件必须保留。
     去掉目录开头的简称时，正文仍须通过独立公司身份检查，且剩余标题至少八字。
     不删除年份、次数、否定词或“的”等字，也不采用相似度阈值。
     """
-    def normalize(value):
-        return compact(value).translate(str.maketrans("", "", "《》“”‘’"))
-
-    title = normalize(item["title_plain"])
-    body = normalize(text[:4000])
+    title = publication_words(item["title_plain"])
+    body = publication_words(text[:4000])
     if title and title in body:
         return {"rule": "EXACT_WORDS_WITH_LAYOUT_NORMALIZATION", "anchor": title}
-    name = normalize(item["secName"])
+    name = publication_words(item["secName"])
     if name and title.startswith(name):
-        remainder = title[len(name):].removeprefix(":")
+        remainder = title[len(name) :].removeprefix(":")
         if len(remainder) >= 8 and remainder in body:
             return {"rule": "CATALOG_SECURITY_NAME_PREFIX", "anchor": remainder, "security_name": name}
+    if legal_name:
+        # 仅把目录“关于公司”展开为已按证券代码核验的法定名称；不能替换另一家公司。
+        full = publication_words(legal_name)
+        expanded = title.replace("关于公司", "关于" + full, 1)
+        if expanded != title and expanded in body:
+            return {"rule": "VERIFIED_LEGAL_NAME_EXPANSION", "anchor": expanded}
+        if title.startswith("公司章程") and full in body[:600] and title[2:] in body[:600]:
+            return {"rule": "LEGAL_NAME_AND_ARTICLES", "anchor": title[2:], "legal_name": full}
+        # 目录把当事人附在括号中，正文必须同时出现完整文书名及明确的当事人语句。
+        person = re.fullmatch(r"(科创板上市公司独立董事(?:候选人|提名人)声明与承诺)\(([^()]{2,4})\)", title)
+        if person and person[1] in body[:120] and re.search(r"(?:本人|现提名)" + re.escape(person[2]), body[:600]):
+            return {"rule": "DECLARATION_NAMED_PERSON", "anchor": person[1], "person": person[2]}
+        # 港交所表格的目录带“H股公告”分类，正文仍须有法定主体和相同表格标题。
+        hk = re.fullmatch(r"H股公告(?:\((.+)\)|-(.+))", title)
+        if hk and full in body[:600]:
+            core = hk[1] or hk[2]
+            if core in body:
+                return {"rule": "HK_PUBLICATION_CATEGORY", "anchor": core, "legal_name": full}
+            month = re.fullmatch(r"截至(\d{4}年\d{1,2}月\d{1,2}日)止股份发行人的证券变动月报表", core)
+            form = "股份发行人及根据上市规则第十九B章上市的香港预托证券发行人的证券变动月报表"
+            if (core in ("月报表", "证券变动月报表") or month) and form in body[:300]:
+                if not month or "截至月份:" + month[1] in body[:600]:
+                    return {"rule": "HK_MONTHLY_FORM", "anchor": form, "month": month[1] if month else None}
+        numbered = re.fullmatch(r"\d+\s+(.+)", item["title_plain"])
+        if numbered and len(publication_words(numbered[1])) >= 40 and publication_words(numbered[1]) in body:
+            return {"rule": "CATALOG_ATTACHMENT_ORDINAL", "anchor": publication_words(numbered[1])}
     return None
 
 
@@ -120,17 +161,21 @@ def inspect_company(item, document, holding, report, checked_at, *, legacy_catal
     parsed = urlparse(receipt["url"])
     metadata = {k: item.get(k) for k in ("adjunctUrl", "adjunctSize", "announcementTitle", "announcementTime")}
     text = compact("\n".join(document.get("pages", [])))
-    title_anchor = publication_title_anchor(item, text)
-    identity = bool(re.search(r"(?:证券|股票)代码[:：]?" + code + r"(?!\d)", text[:1200]))
-    identity = identity or (compact(item["secName"]) in text[:600] and code in text[:600])
+    words = publication_words(text)
+    identity = bool(re.search(r"(?:证券|股票)代码[:：]?" + code + r"(?!\d)", words[:1200]))
+    identity = identity or (publication_words(item["secName"]) in words[:600] and code in words[:600])
+    legal_name = None
     if identity_evidence:
         source_identity = identity_evidence["row"]
-        identity = identity or (
+        valid_identity = (
             source_identity.get("ts_code") == holding["stockCode"]
             and source_identity.get("symbol") == code
             and len(compact(source_identity.get("fullname", ""))) >= 8
-            and compact(source_identity["fullname"]) in text[:600]
         )
+        if valid_identity:
+            legal_name = source_identity["fullname"]
+            identity = identity or publication_words(legal_name) in words[:600]
+    title_anchor = publication_title_anchor(item, text, legal_name=legal_name)
     checks = {
         "BODY_NOT_EXTRACTED": document.get("text_status") == "TEXT_EXTRACTED",
         "DOCUMENT_ID_MISMATCH": document.get("announcement_id") == item["announcementId"],
@@ -155,7 +200,10 @@ def inspect_company(item, document, holding, report, checked_at, *, legacy_catal
     failed = [reason for reason, passed in checks.items() if not passed]
     reviewed = None
     if failed and set(failed) <= {
-        "BODY_NOT_EXTRACTED", "TITLE_ANCHOR_MISSING", "COMPANY_IDENTITY_ANCHOR_MISSING", "BODY_TOO_SHORT",
+        "BODY_NOT_EXTRACTED",
+        "TITLE_ANCHOR_MISSING",
+        "COMPANY_IDENTITY_ANCHOR_MISSING",
+        "BODY_TOO_SHORT",
     }:
         # 只兼容同一版本已逐份核验的正文/OCR版式问题，目录、原件、时间和公司代码门槛不变。
         from app.services.company_publication_review import reviewed_publication
@@ -169,11 +217,12 @@ def inspect_company(item, document, holding, report, checked_at, *, legacy_catal
         f"{holding['stockName']}（{code}）见基金截至 {report['endDate']} 的披露持仓，"
         f"报告于 {report['publishedDate']} 公开，占基金净资产 {holding['weightPct']}%；不代表当前实际仓位"
     )
+    verified_title = reviewed.get("verified_title", item["title_plain"]) if reviewed else item["title_plain"]
     return {
         "event_id": digest({"source": "CNINFO_PUBLIC_DISCLOSURE", "id": item["announcementId"]}),
         "content_hash": receipt["sha256"],
         "evidence_hash": digest({"item": item, "document": document, **({"review": reviewed} if reviewed else {})}),
-        "title": f"{holding['stockName']}：{item['title_plain']}",
+        "title": f"{holding['stockName']}：{verified_title}",
         "source_name": "巨潮资讯",
         "source_url": receipt["url"],
         "published_date": day.isoformat(),
@@ -181,8 +230,9 @@ def inspect_company(item, document, holding, report, checked_at, *, legacy_catal
         "first_received_at": receipt["received_at"],
         "effective_at": None,
         "stage": "已披露文件",
-        "summary": reviewed["business_boundary"] if reviewed else
-        "公司已披露该文件；事项是否生效、实施或形成收入，需结合原文进一步核实。",
+        "summary": reviewed["business_boundary"]
+        if reviewed
+        else "公司已披露该文件；事项是否生效、实施或形成收入，需结合原文进一步核实。",
         "business_eligible": True,
         "prediction_eligible": False,
         "training_eligible": False,

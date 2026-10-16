@@ -415,19 +415,22 @@ def supplement(*, progress=lambda *args: None):
     old = read(checkpoint) if checkpoint.exists() else {}
     cache = own.STORE / "older-quotes.json"
     index = own.STORE / "indices.json"
-    rebuild = (
-        old.get("signature") != signature
-        or not cache.exists()
-        or not index.exists()
-        or bool(old.get("result", {}).get("errors"))
+    previous_result = old.get("result", {})
+    # 旧版把已有原文证明的退市日期列为错误，导致每次一键同步重建全部早期行情。
+    # 先重验这些证据，只让仍未解决或证据失效的条目触发重建；原检查点按版本留存。
+    quote_errors, not_applicable = own.split_quote_issues(
+        previous_result.get("errors", []) + previous_result.get("not_applicable", [])
     )
+    rebuild = old.get("signature") != signature or not cache.exists() or not index.exists() or bool(quote_errors)
     if rebuild:
         progress(0, 1, FUND, "补齐早期股票行情和指数，已有成功文件继续复用")
         own_result = own.build(progress)
         versioned_save(checkpoint, {"signature": signature, "result": own_result})
     else:
-        own_result = old["result"]
+        own_result = {**previous_result, "errors": quote_errors, "not_applicable": not_applicable}
         own.verify_derived_market(read(cache), read(index))
+        if own_result != previous_result:
+            versioned_save(checkpoint, {"signature": signature, "result": own_result})
     result = build(progress)
     errors = [{"scope": "OWN_HISTORY_REPORT", **e} for e in reports["errors"]]
     errors.extend({"scope": "OWN_HISTORY_QUOTES", **e} for e in own_result.get("errors", []))
@@ -438,6 +441,7 @@ def supplement(*, progress=lambda *args: None):
         "updated": 1 if result["training_ready"] else 0,
         "skipped": reports["reports"],
         "errors": errors,
+        "not_applicable": own_result.get("not_applicable", []),
         "readiness": result,
         "training_runs": 0,
         "new_requests": own_result.get("new_requests", 0) if rebuild else 0,

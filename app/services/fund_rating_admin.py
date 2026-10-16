@@ -15,9 +15,9 @@ from app.services.fund_rating_rules import DIMENSIONS, calculate, candidate
 
 def ingest(session: Session, bundle: dict) -> str:
     """导入实际规范化原件；分类必须有官方产品关系来源，缺少核验不生成分类或证据。"""
-    from app.services.fund_rating_public_policy import BASIS
+    from app.services.fund_rating_public_policy import PUBLIC_BASES
 
-    if bundle.get("basis") == BASIS:
+    if bundle.get("basis") in PUBLIC_BASES:
         return ingest_public(session, bundle)
     now = datetime.now(UTC)
     code = bundle["fund_code"]
@@ -107,7 +107,14 @@ def ingest(session: Session, bundle: dict) -> str:
 def ingest_public(session: Session, bundle: dict) -> str:
     """本机公开资料绝对评价采用适用范围，不伪造同类比较键或来源商业授权。"""
     from app.services.fund_rating_public_inputs import verify_public_originals
-    from app.services.fund_rating_public_policy import BASIS
+    from app.services.fund_rating_public_policy import (
+        BASIS,
+        ETF_BASIS,
+        GLOBAL_BASIS,
+        INDEX_BASIS,
+        MARKET_BASIS,
+        RECONCILED_BASIS,
+    )
 
     now = datetime.now(UTC)
     validate_sources(session, bundle, now)
@@ -116,10 +123,32 @@ def ingest_public(session: Session, bundle: dict) -> str:
     verify_public_originals(bundle)
     classification = bundle["classification"]
     expected = {"basis": BASIS, "asset": "DOMESTIC_ACTIVE_MIXED", "currency": "CNY"}
+    if bundle.get("basis") == GLOBAL_BASIS:
+        from app.services.fund_rating_public_global import SCOPE
+
+        expected = SCOPE
+    if bundle.get("basis") == RECONCILED_BASIS:
+        from app.services.fund_rating_public_reconciled import SCOPE
+
+        expected = SCOPE
+    if bundle.get("basis") == MARKET_BASIS:
+        from app.services.fund_rating_public_market import SCOPE
+
+        expected = SCOPE
+    if bundle.get("basis") == INDEX_BASIS:
+        from app.services.fund_rating_public_index import SCOPE
+
+        expected = SCOPE
+    if bundle.get("basis") == ETF_BASIS:
+        from app.services.fund_rating_public_etf import etf_scope
+
+        expected = etf_scope(classification["scope"])
     if (
         classification["scope"] != expected
         or classification["product_id"] != bundle["key_information"]["product_id"]
         or not classification["relationship_verified"]
+        or classification["family"] != bundle["family"]
+        or date.fromisoformat(classification["effective_from"]) > as_of
     ):
         raise ValueError("RATING_PUBLIC_CLASSIFICATION")
     if not session.scalar(text("SELECT 1 FROM fund_share_class WHERE fund_code=:code"), {"code": bundle["fund_code"]}):
@@ -135,7 +164,7 @@ def ingest_public(session: Session, bundle: dict) -> str:
                 fund_code=bundle["fund_code"],
                 product_id=classification["product_id"],
                 category_code=digest(expected),
-                family="ACTIVE_EQUITY",
+                family=bundle["family"],
                 currency="CNY",
                 eligibility="PUBLIC_LOCAL_ANALYSIS",
                 effective_from=date.fromisoformat(classification["effective_from"]),
@@ -208,9 +237,9 @@ def trial(session: Session, as_of: date) -> dict:
             "sensitivity": [],
             "dimension_correlations": [],
         }
-        from app.services.fund_rating_public_policy import BASIS
+        from app.services.fund_rating_public_policy import PUBLIC_BASES
 
-        if any(m.get("bundle", {}).get("basis") == BASIS for m in members):
+        if any(m.get("bundle", {}).get("basis") in PUBLIC_BASES for m in members):
             from app.services.fund_rating_public_validation import validate_category
 
             entry.update(validate_category(members))

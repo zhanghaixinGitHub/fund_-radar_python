@@ -7,7 +7,7 @@ from pathlib import Path
 from time import monotonic
 
 from sqlalchemy import select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -16,6 +16,7 @@ from app.models.fund_rating import RatingBatch, RatingCurrent, RatingMember, Rat
 from app.repositories.fund_rating import (
     RatingConflict,
     inputs_valid,
+    load_validation_rows,
     persist_input,
     publish,
     summary,
@@ -77,9 +78,9 @@ EXPLANATIONS = {
 
 
 def _public(member: dict, computed: dict | None, config: dict, product_count: int, as_of: date) -> dict:
-    from app.services.fund_rating_public_policy import BASIS
+    from app.services.fund_rating_public_policy import PUBLIC_BASES
 
-    if config.get("basis") == BASIS:
+    if config.get("basis") in PUBLIC_BASES:
         from app.services.fund_rating_public_view import public_evidence
 
         return public_evidence(member, computed, as_of)
@@ -261,12 +262,15 @@ def _category(engine, root, category, members, as_of, frozen) -> dict:
     family = members[0]["family"]
     if any(m["family"] != family for m in members):
         raise ValueError("RATING_MIXED_CATEGORY")
-    from app.services.fund_rating_public_policy import BASIS, calculate_public, policy
+    from app.services.fund_rating_public_policy import PUBLIC_BASES, calculate_public, policy
 
-    public_basis = any(m.get("bundle", {}).get("basis") == BASIS for m in members)
-    if public_basis and any(m["admitted"] and m.get("bundle", {}).get("basis") != BASIS for m in members):
+    bases = {m.get("bundle", {}).get("basis") for m in members if m.get("bundle", {}).get("basis") in PUBLIC_BASES}
+    public_basis = bool(bases)
+    if len(bases) > 1 or (
+        public_basis and any(m["admitted"] and m.get("bundle", {}).get("basis") not in bases for m in members)
+    ):
         raise ValueError("RATING_MIXED_METHODS")
-    config = policy() if public_basis else candidate(family) if family != "OTHER" else None
+    config = policy(next(iter(bases))) if public_basis else candidate(family) if family != "OTHER" else None
     method_id = digest(config) if config else None
     admitted = [m for m in members if m["admitted"]]
     product_count = sum(m["representative"] for m in admitted)
@@ -420,23 +424,42 @@ def read(codes: list[str], *, rating_ref: str | None = None, detail: bool = Fals
                 text("SELECT fund_code FROM fund_share_class WHERE fund_code=ANY(:codes)"), {"codes": codes}
             ).scalars()
         )
-        query = (
-            select(RatingResult, RatingBatch)
-            .join(RatingBatch)
-            .where(RatingResult.fund_code.in_(codes), RatingBatch.status == "PUBLISHED")
+        # 先定位批次，每份完整输入快照只读取一次。直接联表会在同批每只基金上重复
+        # 传输、解析同一大份 JSON；列表摘要也不需要加载完整的八维展示正文。
+        query = select(RatingBatch).where(
+            RatingBatch.batch_id.in_(select(RatingResult.batch_id).where(RatingResult.fund_code.in_(codes))),
+            RatingBatch.status == "PUBLISHED",
         )
         if rating_ref:
             query = query.where(RatingBatch.batch_id == rating_ref)
         else:
-            query = query.join(RatingCurrent, RatingCurrent.batch_id == RatingBatch.batch_id)
-        rows = session.execute(query.order_by(RatingBatch.as_of_date.desc(), RatingBatch.completed_at.desc())).all()
+            query = query.where(RatingBatch.batch_id.in_(select(RatingCurrent.batch_id)))
+        batches = session.scalars(query.order_by(RatingBatch.as_of_date.desc(), RatingBatch.completed_at.desc())).all()
+        context = load_validation_rows(session, batches)
+        method_ids = {batch.methodology_id for batch in batches if batch.methodology_id}
+        methods = (
+            {
+                method.methodology_id: method
+                for method in session.scalars(
+                    select(RatingMethodology)
+                    .where(RatingMethodology.methodology_id.in_(method_ids))
+                    .options(
+                        load_only(
+                            RatingMethodology.methodology_id, RatingMethodology.active, RatingMethodology.validation
+                        )
+                    )
+                )
+            }
+            if method_ids
+            else {}
+        )
         by_code = {}
         validity = {}
-        for result, batch in rows:
+        for batch in batches:
             if batch.batch_id not in validity:
-                complete_results = verify_batch(session, batch)
-                valid = not batch.withdrawn and inputs_valid(session, batch)
-                method = session.get(RatingMethodology, batch.methodology_id) if batch.methodology_id else None
+                complete_results = verify_batch(session, batch, context=context)
+                valid = not batch.withdrawn and inputs_valid(session, batch, context=context)
+                method = methods.get(batch.methodology_id)
                 # 一批可能同时含缺资料行和已评级行；不能以本次查询遇到的第一行决定规则是否有效。
                 if any(r.status == "RATED" for r in complete_results):
                     allowed = (
@@ -451,7 +474,9 @@ def read(codes: list[str], *, rating_ref: str | None = None, detail: bool = Fals
                     if not method or not method.active or batch.category_code not in allowed:
                         valid = False
                 validity[batch.batch_id] = valid
-            by_code.setdefault(result.fund_code, (result, batch))
+            for result in context.results.get(batch.batch_id, []):
+                if result.fund_code in known:
+                    by_code.setdefault(result.fund_code, (result, batch))
         items = []
         for code in codes:
             if code not in known:

@@ -35,8 +35,20 @@ def main():
     parser.add_argument("--output", type=Path)
     parser.add_argument("--fund-code")
     parser.add_argument("--family")
+    parser.add_argument(
+        "--basis",
+        choices=(
+            "PUBLIC_DISCLOSURE_DOMESTIC_EQUITY_V1",
+            "PUBLIC_DISCLOSURE_DOMESTIC_INDEX_V1",
+            "PUBLIC_DISCLOSURE_DOMESTIC_INDEX_RECONCILED_V1",
+            "PUBLIC_DISCLOSURE_GLOBAL_EQUITY_CNY_V1",
+            "PUBLIC_DISCLOSURE_ETF_LINK_V1",
+        ),
+        help="市场公开资料必须显式指定已验证口径，不由基金代码猜测",
+    )
     parser.add_argument("--batch")
     parser.add_argument("--reason")
+    parser.add_argument("--source-root", type=Path, help="已经取得并核验的官方原件目录；准备命令不联网、不出级")
     args = parser.parse_args()
     if args.action == "collect-case":
         if args.fund_code != "002112" or not args.as_of:
@@ -63,21 +75,39 @@ def main():
     else:
         with Session(get_engine()) as session, session.begin():
             if args.action == "prepare-public":
-                if args.fund_code != "002112" or not args.as_of or not args.output:
-                    parser.error("prepare-public 必须明确 --fund-code 002112、--as-of 和 --output；只准备原件，不出级")
+                if args.fund_code not in {"002112", "016008"} or not args.as_of or not args.output:
+                    parser.error("prepare-public 必须明确已支持基金代码、--as-of 和 --output；只准备原件，不出级")
                 from datetime import UTC, datetime
 
                 from app.services.fund_rating_public_inputs import prepare_public_bundle
 
-                result = prepare_public_bundle(session, args.as_of, datetime.now(UTC))
+                if args.fund_code == "016008":
+                    if not args.source_root:
+                        parser.error("016008 必须提供 --source-root 官方原件目录")
+                    from app.services.fund_rating_public_etf import prepare_etf_bundle
+
+                    result = prepare_etf_bundle(args.source_root, args.as_of, datetime.now(UTC))
+                else:
+                    result = prepare_public_bundle(session, args.as_of, datetime.now(UTC))
             elif args.action == "activate-public":
                 if not args.file or not args.reason:
                     parser.error("activate-public 需要真实 --file 和 --reason，不能省略验证")
+                from app.services.fund_rating_public_policy import BASIS, ETF_BASIS, INDEX_BASES, MARKET_BASES
                 from app.services.fund_rating_public_validation import activate_public
+
+                if args.fund_code not in {None, "002112", "016008"} and args.basis not in {
+                    ETF_BASIS,
+                    *MARKET_BASES,
+                    *INDEX_BASES,
+                }:
+                    parser.error("市场资料需显式 --basis，并通过真实八维原件验证")
 
                 result = {
                     "methodology_id": activate_public(
-                        session, json.loads(args.file.read_text(encoding="utf-8")), args.reason
+                        session,
+                        json.loads(args.file.read_text(encoding="utf-8")),
+                        args.reason,
+                        basis=args.basis or (ETF_BASIS if args.fund_code == "016008" else BASIS),
                     )
                 }
             elif args.action == "audit":

@@ -1,11 +1,12 @@
 """评级快照持久化和一致性读取；发布、撤回、回退均由数据库锁保护。"""
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy import select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.models.fund_rating import (
     RatingAudit,
@@ -32,12 +33,91 @@ def lock_category(session: Session, category: str) -> None:
         raise RatingConflict("RATING_CATEGORY_BUSY")
 
 
-def verify_batch(session: Session, batch: RatingBatch) -> list[RatingResult]:
+@dataclass
+class RatingValidationRows:
+    """单次只读事务共用的核验数据；不跨请求缓存，撤回及授权变化仍在本次快照内检查。"""
+
+    members: dict[str, list[RatingMember]]
+    results: dict[str, list[RatingResult]]
+    evidence: dict[str, tuple[RatingEvidence, RatingClassification]]
+    enabled_sources: set[str]
+
+
+def load_validation_rows(session: Session, batches: list[RatingBatch]) -> RatingValidationRows:
+    """按本次涉及的批次一次取齐核验行，避免每个类别重复查询及加载八维展示正文。
+
+    完整批次成员、得分映射、输入哈希和来源资格仍全部核验。评级正文只在详情真正
+    使用时由 ORM 读取；列表不把完整披露依据搬进内存，也不会缓存核验结论。
+    """
+    context = RatingValidationRows({}, {}, {}, set())
+    batch_ids = [batch.batch_id for batch in batches]
+    if not batch_ids:
+        return context
+    members = session.scalars(select(RatingMember).where(RatingMember.batch_id.in_(batch_ids))).all()
+    for member in members:
+        context.members.setdefault(member.batch_id, []).append(member)
+    results = session.scalars(
+        select(RatingResult)
+        .where(RatingResult.batch_id.in_(batch_ids))
+        .options(
+            load_only(
+                RatingResult.batch_id,
+                RatingResult.fund_code,
+                RatingResult.status,
+                RatingResult.score,
+                RatingResult.grade,
+                RatingResult.dimension_values,
+                RatingResult.valid_until,
+            )
+        )
+    ).all()
+    for result in results:
+        context.results.setdefault(result.batch_id, []).append(result)
+    hashes = {member.evidence_hash for member in members if member.evidence_hash is not None}
+    if hashes:
+        rows = session.execute(
+            select(RatingEvidence, RatingClassification)
+            .join(RatingClassification, RatingEvidence.classification_id == RatingClassification.classification_id)
+            .where(RatingEvidence.evidence_hash.in_(hashes))
+        ).all()
+        context.evidence = {e.evidence_hash: (e, classification) for e, classification in rows}
+    from app.services.fund_rating_public_policy import PUBLIC_BASES
+
+    codes = {
+        ref["source_code"]
+        for evidence, _ in context.evidence.values()
+        if evidence.payload.get("basis") not in PUBLIC_BASES
+        for ref in evidence.payload["sources"]
+    }
+    if codes:
+        context.enabled_sources = set(
+            session.execute(
+                text(
+                    "SELECT source_code FROM source_registry WHERE enabled AND "
+                    "authorization_verified_at IS NOT NULL AND source_code=ANY(:codes)"
+                ),
+                {"codes": list(codes)},
+            ).scalars()
+        )
+    return context
+
+
+def verify_batch(
+    session: Session, batch: RatingBatch, *, context: RatingValidationRows | None = None
+) -> list[RatingResult]:
     """哈希、数量、八维及映射核验；损坏抛故障，绝不转换为业务资料不足。"""
     if digest(batch.input_snapshot) != batch.input_hash:
         raise ValueError("RATING_BATCH_HASH_MISMATCH")
-    members = session.scalars(select(RatingMember).where(RatingMember.batch_id == batch.batch_id)).all()
-    results = session.scalars(select(RatingResult).where(RatingResult.batch_id == batch.batch_id)).all()
+    members = (
+        context.members.get(batch.batch_id, [])
+        if context is not None
+        else session.scalars(select(RatingMember).where(RatingMember.batch_id == batch.batch_id)).all()
+    )
+    results = (
+        context.results.get(batch.batch_id, [])
+        if context is not None
+        else session.scalars(select(RatingResult).where(RatingResult.batch_id == batch.batch_id)).all()
+    )
     if len(members) != batch.member_count or {m.fund_code for m in members} != {r.fund_code for r in results}:
         raise ValueError("RATING_BATCH_INCOMPLETE")
     samples = sorted(m.fund_code for m in members if m.representative)
@@ -54,28 +134,36 @@ def verify_batch(session: Session, batch: RatingBatch) -> list[RatingResult]:
     return results
 
 
-def inputs_valid(session: Session, batch: RatingBatch) -> bool:
-    members = session.scalars(
-        select(RatingMember).where(RatingMember.batch_id == batch.batch_id, RatingMember.evidence_hash.is_not(None))
-    ).all()
-    keys = [m.evidence_hash for m in members]
+def inputs_valid(session: Session, batch: RatingBatch, *, context: RatingValidationRows | None = None) -> bool:
+    members = (
+        context.members.get(batch.batch_id, [])
+        if context is not None
+        else session.scalars(
+            select(RatingMember).where(RatingMember.batch_id == batch.batch_id, RatingMember.evidence_hash.is_not(None))
+        ).all()
+    )
+    keys = [m.evidence_hash for m in members if m.evidence_hash is not None]
     if not keys:
         return True
-    rows = session.execute(
-        select(RatingEvidence, RatingClassification)
-        .join(RatingClassification, RatingEvidence.classification_id == RatingClassification.classification_id)
-        .where(RatingEvidence.evidence_hash.in_(keys))
-    ).all()
+    rows = (
+        [context.evidence[key] for key in set(keys) if key in context.evidence]
+        if context is not None
+        else session.execute(
+            select(RatingEvidence, RatingClassification)
+            .join(RatingClassification, RatingEvidence.classification_id == RatingClassification.classification_id)
+            .where(RatingEvidence.evidence_hash.in_(keys))
+        ).all()
+    )
     if len(rows) != len(set(keys)):
         return False
     if not all(not e.revoked and not c.revoked and digest(e.payload) == e.evidence_hash for e, c in rows):
         return False
     from app.services.fund_rating_public_inputs import validate_public_sources
-    from app.services.fund_rating_public_policy import BASIS
+    from app.services.fund_rating_public_policy import PUBLIC_BASES
 
     legacy_rows = []
     for e, c in rows:
-        if e.payload.get("basis") == BASIS:
+        if e.payload.get("basis") in PUBLIC_BASES:
             try:
                 validate_public_sources(e.payload, datetime.now(UTC))
             except ValueError:
@@ -85,6 +173,8 @@ def inputs_valid(session: Session, batch: RatingBatch) -> bool:
     codes = {ref["source_code"] for e, _ in legacy_rows for ref in e.payload["sources"]}
     if not codes:
         return True
+    if context is not None:
+        return codes <= context.enabled_sources
     enabled = set(
         session.execute(
             text(

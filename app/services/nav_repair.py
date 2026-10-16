@@ -11,6 +11,9 @@ def domestic_calendar_supported(fund):
     description = " ".join(
         str(fund.get(k) or "") for k in ("fund_name", "fund_type", "source_fund_type", "benchmark", "invest_type")
     )
+    # 标普中国A股指数的名称含境外指数公司名，但实际投向仍是境内A股。
+    # 只去掉这个已明确指向中国A股的词组，QDII、其他标普指数及港股限制继续生效。
+    description = description.replace("标普中国A股", "中国A股")
     return fund.get("fund_type") in {"STOCK", "MIXED", "BOND"} and not re.search(
         r"QDII|FOF|REIT|货币|黄金|原油|商品|美元|港元|港股|恒生|海外|越南|日本|纳斯达克|全球|标普", description, re.I
     )

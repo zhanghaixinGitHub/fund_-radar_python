@@ -140,9 +140,10 @@ def test_real_materials_pipeline_keeps_one_click_running_until_peer_stage_finish
         assert entered.wait(3)
         assert manager.get_job(parent.job_id).status == "RUNNING"
         assert manager.get_latest_job("FUND_MATERIALS").status == "RUNNING"
-        # 净值与预测已先完成；资料补齐期间批次仍在运行，最后的分析资料留存尚未执行。
+        # 净值与公告先完成；资料补齐期间批次仍在运行，资料留存和综合预测尚未执行。
         assert "MARKET_NAV_INCREMENTAL" in calls
-        assert "MULTI_PREDICTIONS" in calls
+        assert "FUND_NEWS" in calls
+        assert "DIRECTION_1D_PREDICTIONS" not in calls
         assert "FUND_INPUTS" not in calls
         with pytest.raises(SyncJobInProgressError):
             manager.start_fund_materials("002112")

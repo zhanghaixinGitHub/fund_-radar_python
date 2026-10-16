@@ -14,7 +14,7 @@ from app.repositories.fund_rating import RatingConflict, lock_category, publish,
 from app.services.fund_rating import _category, read
 from app.services.fund_rating_inputs import digest, empty_evidence
 from app.services.fund_rating_rules import candidate
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.orm import Session
 
 
@@ -111,6 +111,30 @@ def test_real_migration_atomic_publish_read_and_idempotency(db, tmp_path):
     assert not any(key in str(detail) for key in ("dimensionScore", "raw_score", "methodology", "weights"))
     with pytest.raises(LookupError):
         read(["999999"], detail=True, engine=db)
+
+
+def test_list_read_batches_validation_queries_and_defers_detail_body(db, tmp_path):
+    """涉及多个类别时查询次数保持有界；列表不读取正文，详情仍返回完整八维。"""
+    activate_fixture(db)
+    data = members()
+    _category(db, tmp_path, "test", data, date(2026, 8, 31), datetime.now(UTC))
+    _category(db, tmp_path, "test-equity", data, date(2026, 9, 30), datetime.now(UTC))
+    statements = []
+
+    def capture(_conn, _cursor, statement, _parameters, _context, _many):
+        statements.append(statement)
+
+    event.listen(db, "before_cursor_execute", capture)
+    try:
+        page = read(["002112", "001412"], engine=db)
+    finally:
+        event.remove(db, "before_cursor_execute", capture)
+    assert len(statements) <= 8
+    assert not any("public_evidence" in statement for statement in statements)
+    assert all(item["asOfDate"] == "2026-09-30" for item in page["items"])
+    detail = read(["002112"], detail=True, engine=db)
+    assert len(detail["dimensions"]) == 8
+    assert detail["ratingRef"] == page["items"][0]["ratingRef"]
 
 
 def test_partial_publish_failure_rolls_back_all_rows(db, tmp_path, monkeypatch):

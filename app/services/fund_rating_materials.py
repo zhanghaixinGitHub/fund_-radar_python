@@ -570,7 +570,8 @@ def archive_materials(material: dict, root: Path, frozen: datetime) -> list[dict
             continue
         raw = _raw(origin, receipt, frozen)
         suffix = Path(receipt.get("file", receipt.get("raw_path", ""))).suffix
-        if suffix not in {".pdf", ".json", ".html"}:
+        # 管理人也可能只发布 DOCX 正文；这里只保存已核验原字节，不执行文件内容。
+        if suffix not in {".pdf", ".json", ".html", ".docx"}:
             raise ValueError("RATING_RAW_SOURCE_TYPE")
         relative = f"sources/{key}{suffix}"
         path = root / relative

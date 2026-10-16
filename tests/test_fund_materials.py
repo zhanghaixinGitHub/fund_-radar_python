@@ -164,3 +164,32 @@ def test_internal_api_requires_token_and_bounds(monkeypatch):
     monkeypatch.setattr(routes, "require_fund", lambda code: None)
     for query in ("pageSize=1000", "page=0", "stockCode=../private", "kind=bad"):
         assert client.get("/002112/materials/documents?" + query).status_code == 422
+
+
+def test_hong_kong_and_historical_codes_keep_fund_membership_check(monkeypatch):
+    """港股和未核实市场的历史代码可以查，但不能借格式扩展跨基金取公司或绕过认证。"""
+    from app.api.dependencies import require_service_token
+    from app.api.routes import fund_materials as routes
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    client = TestClient(app)
+    assert client.get("/012835/materials?stockCode=00981.HK").status_code == 403
+    app.dependency_overrides[require_service_token] = lambda: None
+    monkeypatch.setattr(routes, "require_fund", lambda code: None)
+
+    def overview(code, report_id, stock_code):
+        if stock_code not in {"00981.HK", "400174", "300308.SZ"}:
+            raise ValueError("MATERIAL_COMPANY_NOT_FOUND")
+        return {"fundCode": code, "company": {"stockCode": stock_code}}
+
+    monkeypatch.setattr(routes.fund_materials, "overview", overview)
+    monkeypatch.setattr(routes.fund_materials, "documents", lambda code, **kwargs: {"stockCode": kwargs["stock_code"]})
+    for code in ("00981.HK", "400174", "300308.SZ"):
+        assert client.get("/012835/materials", params={"stockCode": code}).json()["company"]["stockCode"] == code
+        assert client.get("/012835/materials/documents", params={"stockCode": code}).json()["stockCode"] == code
+    assert client.get("/012835/materials", params={"stockCode": "00700.HK"}).status_code == 422
+    for invalid in ("../private", "00981.SH", "000981.HK", "981.HK", "400174.UNVERIFIED"):
+        assert client.get("/012835/materials", params={"stockCode": invalid}).status_code == 422
+        assert client.get("/012835/materials/documents", params={"stockCode": invalid}).status_code == 422
