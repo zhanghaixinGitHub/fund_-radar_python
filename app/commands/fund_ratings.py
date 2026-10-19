@@ -34,6 +34,7 @@ def main():
     parser.add_argument("--file", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--fund-code")
+    parser.add_argument("--event-review", action="store_true", help="已核验重大事项的单基金复核，必须明确截止日")
     parser.add_argument("--family")
     parser.add_argument(
         "--basis",
@@ -71,7 +72,9 @@ def main():
             "usage": value["usage"],
         }
     elif args.action == "update":
-        result = update_ratings(args.fund_code, as_of=args.as_of)
+        if args.event_review and (not args.fund_code or not args.as_of):
+            parser.error("重大事项复核必须指定 --fund-code 和 --as-of，并先补齐本期八维原件")
+        result = update_ratings(args.fund_code, as_of=args.as_of, event_review=args.event_review)
     else:
         with Session(get_engine()) as session, session.begin():
             if args.action == "prepare-public":

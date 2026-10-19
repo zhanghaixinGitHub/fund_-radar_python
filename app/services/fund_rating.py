@@ -193,6 +193,9 @@ def update_ratings(
     root: Path | None = None,
     as_of: date | None = None,
     progress_reporter=None,
+    due_only: bool = False,
+    ready_codes: set[str] | None = None,
+    event_review: bool = False,
 ) -> dict:
     """有界市场目录任务；单份额仅选所属完整类别，任何 GET 都不会调用此函数。"""
     engine = engine or get_engine()
@@ -203,8 +206,13 @@ def update_ratings(
     month_end = frozen.astimezone(__import__("zoneinfo").ZoneInfo("Asia/Shanghai")).date().replace(day=1) - timedelta(
         days=1
     )
+    if event_review and (not fund_code or as_of is None or due_only):
+        raise ValueError("RATING_EVENT_REVIEW_SCOPE_REQUIRED")
     as_of = as_of or month_end
-    if as_of > month_end:
+    latest_allowed = (
+        frozen.astimezone(__import__("zoneinfo").ZoneInfo("Asia/Shanghai")).date() if event_review else month_end
+    )
+    if as_of > latest_allowed:
         raise ValueError("RATING_FUTURE_AS_OF")
     with engine.connect() as coordinator:
         if not coordinator.scalar(text("SELECT pg_try_advisory_lock(hashtextextended('fund-rating-task',0))")):
@@ -219,6 +227,10 @@ def update_ratings(
                 groups = {k: v for k, v in groups.items() if any(m["fund_code"] == fund_code for m in v)}
                 if not groups:
                     raise LookupError("RATING_FUND_NOT_FOUND")
+                if event_review and not any(
+                    m["admitted"] for members in groups.values() for m in members if m["fund_code"] == fund_code
+                ):
+                    raise ValueError("RATING_EVENT_REVIEW_DATA_INCOMPLETE")
             report = {
                 "target": sum(map(len, groups.values())),
                 "rated": 0,
@@ -227,9 +239,49 @@ def update_ratings(
                 "failures": [],
                 "grades": {},
                 "reasons": {},
+                "deferred": [],
+                "alreadyCurrent": [],
             }
             reasons, grades = Counter(), Counter()
             for category, members in groups.items():
+                # 一键同步按完整比较类别发布。缺资料的基金保持原记录，不能以旧包重算
+                # 或把本次采集失败写成新的未评级；管理员独立重评仍沿用原显式入口。
+                admitted = {m["fund_code"] for m in members if m["admitted"]}
+                if due_only:
+                    with Session(engine) as check:
+                        latest = check.scalars(
+                            select(RatingBatch)
+                            .join(RatingCurrent, RatingCurrent.batch_id == RatingBatch.batch_id)
+                            .where(RatingBatch.category_code == category, RatingBatch.status == "PUBLISHED")
+                        ).first()
+                        completed_codes = (
+                            set(
+                                check.scalars(
+                                    select(RatingResult.fund_code).where(
+                                        RatingResult.batch_id == latest.batch_id, RatingResult.status == "RATED"
+                                    )
+                                )
+                            )
+                            if latest is not None
+                            else set()
+                        )
+                    # 事项复核可发生在月中；既不能用旧月评覆盖较新的事项结论，也不能
+                    # 让月中复核替代月底的完整月评。旧快照无cadence时按既有月评处理。
+                    if latest is not None and (
+                        latest.as_of_date > as_of
+                        or (
+                            latest.as_of_date.year == as_of.year
+                            and latest.as_of_date.month == as_of.month
+                            and latest.input_snapshot.get("cadence") != "EVENT_REVIEW"
+                            and bool(completed_codes)
+                            and admitted.issubset(completed_codes)
+                        )
+                    ):
+                        report["alreadyCurrent"].append(category)
+                        continue
+                if ready_codes is not None and (not admitted or not admitted.issubset(ready_codes)):
+                    report["deferred"].append(category)
+                    continue
                 if progress_reporter:
                     progress_reporter(
                         report["rated"] + report["notRated"],
@@ -242,7 +294,15 @@ def update_ratings(
                 try:
                     dates = {m["valuation_date"] for m in members if m["admitted"]}
                     category_as_of = date.fromisoformat(next(iter(dates))) if dates else as_of
-                    result = _category(engine, root, category, members, category_as_of, frozen)
+                    result = _category(
+                        engine,
+                        root,
+                        category,
+                        members,
+                        category_as_of,
+                        frozen,
+                        evaluation_kind="EVENT_REVIEW" if event_review else "MONTHLY" if due_only else None,
+                    )
                     report["categories"].append(result)
                     report["rated"] += result["rated"]
                     report["notRated"] += len(members) - result["rated"]
@@ -258,7 +318,7 @@ def update_ratings(
             coordinator.commit()
 
 
-def _category(engine, root, category, members, as_of, frozen) -> dict:
+def _category(engine, root, category, members, as_of, frozen, *, evaluation_kind=None) -> dict:
     family = members[0]["family"]
     if any(m["family"] != family for m in members):
         raise ValueError("RATING_MIXED_CATEGORY")
@@ -320,6 +380,8 @@ def _category(engine, root, category, members, as_of, frozen) -> dict:
                 }
             )
         )
+        if evaluation_kind:
+            snapshot["cadence"] = evaluation_kind
         input_hash, path = persist_input(root, snapshot)
         samples = sorted(m["fund_code"] for m in members if m["representative"])
         batch_id = digest(
@@ -490,6 +552,14 @@ def read(codes: list[str], *, rating_ref: str | None = None, detail: bool = Fals
             if row:
                 result, batch = row
                 item = summary(result, batch, invalid=not validity[batch.batch_id], now=now)
+                if not rating_ref and item["status"] == "RATED":
+                    from app.services.fund_market_review import rating_review_required
+
+                    if rating_review_required(code):
+                        # 复用已有资料待更新状态，不篡改历史分数；新事项没有审阅前不继续显示有效等级。
+                        item.update(
+                            status="STALE", grade=None, gradeLabel=None, message="新增事项待复核，暂不展示当前等级"
+                        )
                 if detail:
                     item.update(result.public_evidence)
                     if item["status"] != "RATED":

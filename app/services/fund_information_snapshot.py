@@ -32,6 +32,18 @@ def prepare(now, fund_code="002112", materials_path=None) -> dict:
     """
     if not enabled(fund_code):
         raise ValueError("INVALID_SCOPE")
+    if materials_path is None:
+        from app.services.fund_workflow_materials import registered_materials
+
+        # 与当前适配器使用同一配置根目录；隔离运行不能误读另一环境的本机交接。
+        insight_root = getattr(get_settings(), "fund_insight_directory", None)
+        handoff = (
+            registered_materials(fund_code, root=Path(insight_root) / "market-workflow", at=now)
+            if insight_root is not None
+            else None
+        )
+        if handoff is not None:
+            materials_path = handoff["materials_path"]
     path = (
         Path(materials_path)
         if materials_path is not None

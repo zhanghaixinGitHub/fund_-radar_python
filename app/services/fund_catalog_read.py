@@ -15,6 +15,7 @@ from app.repositories.fund_read import (
     get_current_market_same_type_comparison,
     get_fund_profile_snapshot,
     get_fund_summary,
+    iter_fund_code_batches,
     list_fund_nav_history,
     list_fund_share_history,
     list_fund_summaries,
@@ -37,6 +38,8 @@ from app.schemas.fund import (
     InternalFundSummary,
     InternalFundWatchlistDetail,
 )
+from app.schemas.fund_rating import RatingSummary
+from app.services.fund_rating import read as read_ratings
 
 
 def list_funds(
@@ -45,12 +48,15 @@ def list_funds(
     page_size: int,
     cursor: str | None,
     page: int | None,
+    rating: str | None = None,
 ) -> InternalFundPage:
     """分页读取真实目录样本，并返回与当前筛选一致的总记录数。
 
     ``page`` 存在时使用页码分页，供浏览器显示总页数和跳转；未传入时保持旧版游标
     语义。两种模式均只查询已落库数据，不调用外部数据源或触发同步。
     """
+    if rating is not None:
+        return _list_funds_by_rating(keyword, fund_type, page_size, cursor, page, rating)
     with Session(get_engine()) as session:
         result = list_fund_summaries(session, keyword, fund_type, page_size, cursor, page)
     page_rows = result.rows if page is not None else result.rows[:page_size]
@@ -63,6 +69,65 @@ def list_funds(
         total_count=result.total_count,
         total_pages=total_pages,
     )
+
+
+def _list_funds_by_rating(
+    keyword: str | None,
+    fund_type: str | None,
+    page_size: int,
+    cursor: str | None,
+    page: int | None,
+    rating: str,
+) -> InternalFundPage:
+    """先核验当前评级再分页，缺失、撤回和过期结果不得计入有效等级。
+
+    目录只流式读取代码与类型，每批最多核验 100 只；仅保留当前页摘要和匹配总数，
+    最后批量读取本页净值，避免全目录加载净值或逐只请求。读取失败向上抛出，不能
+    用空列表或未筛选的缓存冒充查询成功；此路径不会采集、重新评分或写库。
+    """
+    if rating not in {"EXCELLENT", "GOOD", "AVERAGE", "WEAK", "UNRATED", "PENDING"}:
+        raise ValueError("RATING_FILTER_INVALID")
+    offset = (page - 1) * page_size if page is not None else 0
+    total_count = 0
+    eligible_count = 0
+    selected: dict[str, RatingSummary] = {}
+    has_more = False
+    with Session(get_engine()) as session:
+        for codes in iter_fund_code_batches(session, keyword, fund_type, page_mode=page is not None):
+            summaries = {item["fundCode"]: RatingSummary.model_validate(item) for item in read_ratings(codes)["items"]}
+            if set(summaries) != set(codes):
+                raise ValueError("RATING_FILTER_INCOMPLETE")
+            for code in codes:
+                item = summaries[code]
+                matches = (
+                    item.status in {"NOT_RATED", "UNSUPPORTED"} if rating == "UNRATED"
+                    else item.status in {"STALE", "WITHDRAWN"} if rating == "PENDING"
+                    else item.status == "RATED" and item.grade == rating
+                )
+                if not matches:
+                    continue
+                total_count += 1
+                if page is None and cursor and code <= cursor:
+                    continue
+                eligible_count += 1
+                if eligible_count <= offset:
+                    continue
+                if len(selected) < page_size:
+                    selected[code] = item
+                else:
+                    has_more = True
+        rows = {row.fund.fund_code: row for row in list_fund_summaries_by_codes(session, tuple(selected))}
+        if set(rows) != set(selected):
+            raise ValueError("RATING_FILTER_CATALOG_CHANGED")
+        return InternalFundPage(
+            items=tuple(_to_summary(rows[code]) for code in selected),
+            next_cursor=next(reversed(selected)) if page is None and has_more else None,
+            page=page,
+            page_size=page_size,
+            total_count=total_count,
+            total_pages=(total_count + page_size - 1) // page_size,
+            ratings=selected,
+        )
 
 
 def get_fund(fund_code: str) -> InternalFundDetail | None:

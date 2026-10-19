@@ -132,7 +132,7 @@ def test_parent_reconciles_original_children_even_after_order_changes():
         manager._batch_child_ids[parent.job_id] = tuple(reversed(manager._batch_child_ids[parent.job_id]))
         refreshed = manager.get_job(parent.job_id)
         assert refreshed.status == "PARTIAL_SUCCESS"
-        assert "002112 一日预测" in refreshed.error_message
+        assert "关注基金一日综合预测" in refreshed.error_message
         assert "基金持仓与公司资料更新" not in refreshed.error_message
         manager._jobs[child.job_id] = replace(child, status="SUCCEEDED")
         assert manager.get_job(parent.job_id).status == "SUCCEEDED"

@@ -229,6 +229,9 @@ def amount(text: str, label: str, *, first: bool = False) -> str:
 
 
 def balance(pages: list[str], *, require_stock: bool = True) -> dict:
+    from app.services.fund_report_sections import numbered_pages
+
+    pages = numbered_pages(pages)
     text = section("\n".join(pages), r"[56]\.1\s*资产负债表", r"[56]\.2\s*利润表")
     if "单位：人民币元" not in compact(text):
         raise ValueError("RATING_MARKET_BALANCE_UNIT")

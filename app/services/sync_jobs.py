@@ -71,11 +71,11 @@ _ALL_JOB_STAGES = (
     (STOCK_FEATURE_SNAPSHOT_JOB_TYPE, "历史指标计算"),
     # 预测使用前面已同步净值；独立校验输入完整性，来源失败时不能默认算作预测成功。
     (SIMULATION_FEE_JOB_TYPE, "模拟费率"),
-    # 002112综合分析已读取公告、持仓行情和公司资料，必须先更新输入再生成本次预测。
+    # 市场与关注基金共用本次资料准备，生成前逐基金检查，不使用固定试点代码。
     (FUND_NEWS_JOB_TYPE, "近期基金公告核验"),
     (FUND_MATERIALS_JOB_TYPE, "基金持仓与公司资料更新"),
     # 等报告、行情和基金净值更新后再留存；仍检查真实取得时间，不能因后置而放宽截止规则。
-    (FUND_INPUTS_JOB_TYPE, "002112 分析资料更新与留存"),
+    (FUND_INPUTS_JOB_TYPE, "基金分析资料核验与留存"),
     (FUND_RATINGS_JOB_TYPE, "基金八维评级检查与更新"),
     (DIRECTION_1D_JOB_TYPE, "关注基金一日综合预测"),
 )
@@ -148,6 +148,7 @@ class LocalSyncJobManager:
         news_synchronizer=None,
         input_synchronizer=None,
         rating_updater=None,
+        market_workflow_factory=None,
     ) -> None:
         self._service_factory = service_factory
         self._feature_service_factory = feature_service_factory
@@ -160,6 +161,7 @@ class LocalSyncJobManager:
         self._news_synchronizer = news_synchronizer
         self._input_synchronizer = input_synchronizer
         self._rating_updater = rating_updater
+        self._market_workflow_factory = market_workflow_factory
         self._state_path = state_path
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fund-sync-job")
         # 原回执核对按查询请求排队，不设定时循环；独立线程避免慢响应阻塞同步状态接口。
@@ -167,6 +169,8 @@ class LocalSyncJobManager:
         self._jobs: dict[UUID, SyncJobSnapshot] = {}
         self._latest_job_ids: dict[str, UUID] = {}
         self._batch_child_ids: dict[UUID, tuple[UUID, ...]] = {}
+        # 账号由Java认证上下文传入，仅供内部执行和原作业恢复，不回传公开任务摘要。
+        self._prediction_scopes: dict[UUID, dict] = {}
         self._active_job_id: UUID | None = None
         self._lock = Lock()
         self._closed = False
@@ -187,6 +191,7 @@ class LocalSyncJobManager:
                     "jobs": [asdict(j) for j in self._jobs.values()],
                     "latest": self._latest_job_ids,
                     "children": {str(k): v for k, v in self._batch_child_ids.items()},
+                    "prediction_scopes": {str(k): v for k, v in self._prediction_scopes.items()},
                 },
                 replace=True,
             )
@@ -216,6 +221,7 @@ class LocalSyncJobManager:
             self._jobs[raw["job_id"]] = SyncJobSnapshot(**raw)
         self._latest_job_ids = {k: UUID(v) for k, v in saved["latest"].items()}
         self._batch_child_ids = {UUID(k): tuple(UUID(v) for v in values) for k, values in saved["children"].items()}
+        self._prediction_scopes = {UUID(k): v for k, v in saved.get("prediction_scopes", {}).items()}
         self._persist()
 
     def start_fund_materials(self, fund_code: str) -> SyncJobSnapshot:
@@ -312,7 +318,7 @@ class LocalSyncJobManager:
         """持久公共预测批次与个人综合建议按依赖顺序执行。"""
         return self._start_job(MULTI_PREDICTION_JOB_TYPE, self._run_multi_predictions)
 
-    def start_all(self) -> SyncJobSnapshot:
+    def start_all(self, *, owner_user_id: UUID | None = None, materials_only: bool = False) -> SyncJobSnapshot:
         """原子登记全部子任务；完整资料由资料更新覆盖，批次不依赖浏览器存活。"""
         with self._lock:
             self._require_idle()
@@ -326,6 +332,10 @@ class LocalSyncJobManager:
                 self._jobs[snapshot.job_id] = snapshot
                 self._latest_job_ids[snapshot.job_type] = snapshot.job_id
             self._batch_child_ids[parent.job_id] = tuple(child.job_id for child in children)
+            self._prediction_scopes[parent.job_id] = {
+                "owner_user_id": str(owner_user_id) if owner_user_id else None,
+                "materials_only": materials_only,
+            }
             self._active_job_id = parent.job_id
             self._persist()
             self._executor.submit(self._run_all, parent.job_id)
@@ -373,26 +383,61 @@ class LocalSyncJobManager:
             return snapshot
 
     def _run_all(self, job_id: UUID) -> None:
-        """失败不掩盖成功事实；尝试每项一次，最后统一汇总结果。"""
+        """资料阶段失败继续留存；生成阶段只处理本次核验通过的基金，按月检查评级。"""
+        from app.services.fund_market_workflow import MarketSyncWorkflow
+
         self._replace_job(job_id, status="RUNNING", started_at=datetime.now(UTC))
+        options = self._prediction_scopes.get(job_id, {})
+        workflow = None
         runners = (
             self._run_spx_manual,
             lambda child_id: self._run_market_nav_incremental(child_id, build_features=False),
             self._run_market_free_data_completion,
             self._run_stock_feature_snapshots,
             self._run_simulation_fees,
-            self._run_fund_news,
-            self._run_fund_materials,
-            self._run_fund_inputs,
-            self._run_fund_ratings,
+            lambda child: self._run_market_stage(child, workflow.news),
+            lambda child: self._run_market_stage(child, workflow.materials),
+            lambda child: self._run_market_stage(child, workflow.inputs),
+            lambda child: self._run_market_stage(
+                child, lambda progress: workflow.ratings(progress, updater=self._rating_updater)
+            ),
             self._run_direction_1d_predictions,
         )
         try:
+            workflow = (self._market_workflow_factory or MarketSyncWorkflow)(owner_user_id=options.get("owner_user_id"))
             child_ids = self._batch_child_ids[job_id]
             for index, (child_id, runner) in enumerate(zip(child_ids, runners, strict=True)):
                 logger.info("sync_jobs._run_all >>> stage started, job_id=%s, child_job_id=%s", job_id, child_id)
                 try:
-                    runner(child_id)
+                    # 部分完成交给后面的逐基金原件/日期检查，不能因一只基金缺资料拦住其他基金。
+                    # 整项故障或未结束时缺少可信的本轮基础，保守暂停生成。
+                    prior_failed = any(
+                        self._required_job(c).status not in {"SUCCEEDED", "PARTIAL_SUCCESS"} for c in child_ids[:5]
+                    )
+                    if index >= 8 and (options.get("materials_only") or prior_failed):
+                        self._skip_generation(
+                            child_id,
+                            "仅更新资料，分析等待资料核验"
+                            if options.get("materials_only")
+                            else "基础资料更新未完成，本次暂不生成分析",
+                            waiting=prior_failed,
+                        )
+                    elif index == 9:
+                        codes = workflow.prediction_codes()
+                        if not options.get("owner_user_id") or not codes:
+                            self._skip_generation(
+                                child_id, "关注基金资料或综合审阅尚未齐备，本次暂不生成预测", waiting=True
+                            )
+                        else:
+                            with self._lock:
+                                self._prediction_scopes[child_id] = {
+                                    "owner_user_id": options["owner_user_id"],
+                                    "codes": codes,
+                                }
+                                self._persist()
+                            runner(child_id)
+                    else:
+                        runner(child_id)
                 except Exception:
                     logger.exception(
                         "sync_jobs._run_all >>> stage failed, job_id=%s, child_job_id=%s", job_id, child_id
@@ -429,9 +474,58 @@ class LocalSyncJobManager:
                     self._fail_job(child_id, "SYNC_ALL_INTERRUPTED", "一键同步中断，本项未完成，请单独重试。")
             self._fail_job(job_id, "SYNC_ALL_FAILED", "一键同步未完整结束，请检查各项任务状态。")
         finally:
-            with self._lock:
-                if self._active_job_id == job_id:
-                    self._active_job_id = None
+            try:
+                if workflow is not None:
+                    workflow.close()
+            except Exception:
+                logger.exception("sync_jobs._run_all >>> 资料连接清理失败, job_id=%s", job_id)
+                self._fail_job(job_id, "MARKET_WORKFLOW_CLEANUP_FAILED", "资料更新连接未正常结束，请检查后重试")
+            finally:
+                with self._lock:
+                    if self._active_job_id == job_id:
+                        self._active_job_id = None
+
+    def _skip_generation(self, job_id, message, *, waiting):
+        """明确保留等待原因，不把未生成计为新增评级/预测。"""
+        self._replace_job(
+            job_id,
+            status="PARTIAL_SUCCESS" if waiting else "SUCCEEDED",
+            started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
+            progress_message=message,
+            result_summary={"generated": 0, "waitingForData": waiting},
+            error_code="ANALYSIS_DATA_NOT_READY" if waiting else None,
+            error_message=message if waiting else None,
+        )
+
+    def _run_market_stage(self, job_id, action):
+        """统一保存逐基金结果，任何缺项均保留为部分完成；不暴露采集原文或账号身份。"""
+        self._replace_job(job_id, status="RUNNING", started_at=datetime.now(UTC))
+        result = action(lambda c, t, f, m: self._update_progress(job_id, c, t, f, m))
+        # 任务摘要只保存业务检查结果，完整来源在版本化材料目录中保留。
+        items = [
+            {k: i[k] for k in ("fund_code", "status", "gaps", "prediction_ready") if k in i}
+            for i in result.get("items", [])
+        ]
+        summary = {k: v for k, v in result.items() if k not in {"items"}}
+        if items:
+            summary["items"] = items
+        self._replace_job(
+            job_id,
+            status=result["status"],
+            progress_message=result["message"],
+            result_summary=summary,
+            created_count=result.get("created", 0),
+            skipped_count=result.get("skipped", 0),
+            finished_at=datetime.now(UTC),
+            error_code="FUND_DATA_INCOMPLETE" if result["status"] != "SUCCEEDED" else None,
+            error_message="部分基金资料仍需补充或复核" if result["status"] != "SUCCEEDED" else None,
+        )
+
+    def _configure_prediction_scope(self, job_id, service):
+        scope = self._prediction_scopes.get(job_id)
+        if scope and scope.get("owner_user_id"):
+            service.configure_scope(scope["owner_user_id"], scope["codes"])
 
     def _snapshot(self, job_id: UUID | None) -> SyncJobSnapshot | None:
         """调用方持有锁；批次进度附带当前子任务的真实步骤，不估算完成时间。"""
@@ -496,6 +590,7 @@ class LocalSyncJobManager:
         service = None
         try:
             service = self._prediction_service_factory()
+            self._configure_prediction_scope(job_id, service)
             changes = reconcile(snapshot, service, offset=offset, recover_legacy=self._state_path is not None)
             if changes:
                 self._replace_job(job_id, **changes)
@@ -926,6 +1021,7 @@ class LocalSyncJobManager:
         )
         try:
             service = self._prediction_service_factory()
+            self._configure_prediction_scope(job_id, service)
             result = service.sync(
                 progress_reporter=lambda current, total, code, message: self._update_progress(
                     job_id,

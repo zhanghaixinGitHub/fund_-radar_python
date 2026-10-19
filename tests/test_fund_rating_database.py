@@ -23,6 +23,9 @@ def db():
     if os.getenv("RATING_POSTGRES_TEST") != "1":
         pytest.skip("显式 RATING_POSTGRES_TEST=1 才创建本地隔离 schema")
     url = get_settings().ai_database_url
+    from sqlalchemy.engine import make_url
+
+    assert make_url(url).host in {"localhost", "127.0.0.1", "::1"}, "仅允许本机隔离测试"
     admin = create_engine(url)
     schema = "rating_test_" + uuid4().hex
     with admin.begin() as conn:
@@ -111,6 +114,61 @@ def test_real_migration_atomic_publish_read_and_idempotency(db, tmp_path):
     assert not any(key in str(detail) for key in ("dimensionScore", "raw_score", "methodology", "weights"))
     with pytest.raises(LookupError):
         read(["999999"], detail=True, engine=db)
+
+
+def test_monthly_gate_preserves_existing_batch_and_defers_incomplete_new_category(db, tmp_path, monkeypatch):
+    from app.services import fund_rating as rating
+
+    activate_fixture(db)
+    data = members()
+    published = _category(db, tmp_path, "test-equity", data, date(2026, 9, 30), datetime.now(UTC))
+    monkeypatch.setattr(rating, "catalog", lambda session: [{"fund_code": "002112"}])
+    groups = {"test-equity": data}
+    monkeypatch.setattr(rating, "prepare", lambda *a: groups)
+    result = rating.update_ratings(engine=db, root=tmp_path, as_of=date(2026, 9, 30), due_only=True, ready_codes=set())
+    assert result["alreadyCurrent"] == ["test-equity"] and result["rated"] == 0
+    with Session(db) as session:
+        assert session.get(RatingCurrent, "test-equity").batch_id == published["batch"]
+    groups.clear()
+    groups["new-category"] = data
+    deferred = rating.update_ratings(
+        engine=db, root=tmp_path, as_of=date(2026, 9, 30), due_only=True, ready_codes=set()
+    )
+    assert deferred["deferred"] == ["new-category"] and not deferred["categories"]
+    with Session(db) as session:
+        assert session.get(RatingCurrent, "new-category") is None
+
+
+def test_pending_event_hides_current_grade_but_preserves_historical_reference(db, tmp_path, monkeypatch):
+    from app.services import fund_market_review
+
+    activate_fixture(db)
+    published = _category(db, tmp_path, "test-equity", members(), date(2026, 9, 30), datetime.now(UTC))
+    monkeypatch.setattr(fund_market_review, "rating_review_required", lambda code: True)
+    current = read(["002112"], engine=db)["items"][0]
+    assert current["status"] == "STALE" and current["grade"] is None
+    historical = read(["002112"], engine=db, detail=True, rating_ref=published["batch"])
+    assert historical["status"] == "RATED" and historical["grade"]
+
+
+def test_same_month_can_finish_previously_unrated_members_after_data_arrives(db, tmp_path, monkeypatch):
+    from app.services import fund_rating as rating
+
+    activate_fixture(db)
+    incomplete = members()
+    incomplete[-1]["admitted"] = False
+    incomplete[-1]["representative"] = False
+    old = _category(db, tmp_path, "test-equity", incomplete, date(2026, 9, 30), datetime.now(UTC))
+    assert old["rated"] == 0
+    complete = members()
+    for member in complete:
+        member["valuation_date"] = "2026-09-30"
+    monkeypatch.setattr(rating, "catalog", lambda session: [{"fund_code": "002112"}])
+    monkeypatch.setattr(rating, "prepare", lambda *a: {"test-equity": complete})
+    result = rating.update_ratings(
+        engine=db, root=tmp_path, as_of=date(2026, 9, 30), due_only=True, ready_codes={m["fund_code"] for m in complete}
+    )
+    assert result["rated"] == 30 and not result["alreadyCurrent"]
 
 
 def test_list_read_batches_validation_queries_and_defers_detail_body(db, tmp_path):

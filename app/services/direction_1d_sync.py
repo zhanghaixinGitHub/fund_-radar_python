@@ -107,7 +107,12 @@ class Direction1dSyncResult:
 class Direction1dSyncService:
     """逐基金执行，失败继续；不重试不确定的 POST，不获取账号或个人持仓信息。"""
 
+    _owner_user_id = None
+    _allowed_codes = None
+
     def __init__(self) -> None:
+        self._owner_user_id = None
+        self._allowed_codes = None
         settings = get_settings()
         token = settings.ai_service_token.get_secret_value()
         if not token:
@@ -122,10 +127,37 @@ class Direction1dSyncService:
     def close(self) -> None:
         self._client.close()
 
+    def configure_scope(self, owner_user_id: str, codes: list[str]) -> None:
+        """一键同步只消费当前登录账号且本次资料通过的基金；空集合始终保持空。"""
+        self._owner_user_id = str(UUID(owner_user_id))
+        if len(codes) > 5000 or any(re.fullmatch(r"[0-9]{6}", c) is None for c in codes):
+            raise ValueError("INVALID_PREDICTION_SCOPE")
+        self._allowed_codes = set(codes)
+
+    def _scope_body(self, target):
+        body = {"targetNavDate": str(target)}
+        if self._owner_user_id:
+            body["ownerUserId"] = self._owner_user_id
+        return body
+
     def sync(self, *, progress_reporter: Callable[[int, int, str | None, str], None]) -> Direction1dSyncResult:
         """按已有授权分页核对有效关注基金；各基金仅消费其自身的一日综合审阅。"""
         target = self.read_target_date()
-        return self.sync_codes(self.read_fund_codes(), target=target, progress_reporter=progress_reporter)
+        codes = self.read_fund_codes()
+        waiting = []
+        if self._allowed_codes is not None:
+            waiting = [c for c in codes if c not in self._allowed_codes]
+            codes = [c for c in codes if c in self._allowed_codes]
+        result = self.sync_codes(codes, target=target, progress_reporter=progress_reporter)
+        return Direction1dSyncResult(
+            target,
+            result.total + len(waiting),
+            result.created,
+            result.existing,
+            result.issues + tuple(f"{c}：本次资料或综合审阅尚未齐备" for c in waiting),
+            result.unsupported,
+            result.items + tuple(daily_item(c, str(target), {"status": "WAITING_DATA"}) for c in waiting),
+        )
 
     def read_target_date(self) -> date:
         """目标日取自核心服务核验过的一日窗口，不能用本机日期代替交易日。"""
@@ -137,7 +169,9 @@ class Direction1dSyncService:
         """读取服务端分页去重后的有效关注范围，供一日与多周期使用同一批基金。"""
         codes, after = [], ""
         while True:
-            response = self._client.get(f"{_BASE}/fund-codes", params={"after": after})
+            params = {"after": after}
+            path = f"{_BASE}/users/{self._owner_user_id}/fund-codes" if self._owner_user_id else f"{_BASE}/fund-codes"
+            response = self._client.get(path, params=params)
             response.raise_for_status()
             page = response.json()
             if (
@@ -151,6 +185,8 @@ class Direction1dSyncService:
             if not page:
                 break
             codes.extend(page)
+            if len(codes) > 5000:
+                raise ValueError("预测基金范围超限")
             after = page[-1]
         return codes
 
@@ -162,13 +198,15 @@ class Direction1dSyncService:
         progress_reporter: Callable[[int, int, str | None, str], None],
     ) -> Direction1dSyncResult:
         """仅处理服务端已读取的基金范围；Java仍检查窗口、关注关系及原文留档回执。"""
+        if self._allowed_codes is not None and not set(codes).issubset(self._allowed_codes):
+            raise ValueError("INVALID_PREDICTION_SCOPE")
         total, created, existing = len(codes), 0, 0
         issues, unsupported, items = [], [], []
         progress_reporter(0, total, None, f"目标日 {target}，正在检查 {total} 只关注基金")
         for index, code in enumerate(codes, 1):
             item = {"fundCode": code, "horizonId": "T1", "targetDate": str(target), "state": "ERROR"}
             try:
-                response = self._client.post(f"{_BASE}/{code}", json={"targetNavDate": str(target)})
+                response = self._client.post(f"{_BASE}/{code}", json=self._scope_body(target))
                 response.raise_for_status()
                 result = response.json()
                 item = daily_item(code, str(target), result)
@@ -199,10 +237,12 @@ class Direction1dSyncService:
     def reconcile_item(self, item: dict) -> dict:
         """只核对原作业并确认留档；短超时不取消后台计算，也不重新提交生成请求。"""
         code, target, job_id = item["fundCode"], item["targetDate"], str(UUID(item["sourceJobId"]))
+        if self._allowed_codes is not None and code not in self._allowed_codes:
+            raise ValueError("INVALID_PREDICTION_SCOPE")
         try:
             response = self._client.post(
                 f"{_BASE}/{code}/jobs/{job_id}/reconcile",
-                json={"targetNavDate": target},
+                json=self._scope_body(target),
                 timeout=httpx.Timeout(5, connect=1),
             )
             response.raise_for_status()
@@ -217,6 +257,9 @@ class Direction1dSyncService:
 
     def saved_results(self) -> list[dict] | None:
         """延迟留档成功后重新读取按日期汇总；读失败返回未知，不能继续展示旧统计为最新值。"""
+        # 原聚合接口统计全部授权账号；个人批次不能借状态刷新取得其他账号的汇总。
+        if self._owner_user_id:
+            return None
         try:
             response = self._client.get(
                 "/internal/v1/multi-predictions/sync/saved-results",

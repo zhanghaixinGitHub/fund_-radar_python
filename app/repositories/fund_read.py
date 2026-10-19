@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
@@ -203,6 +204,22 @@ def list_fund_summaries(
         rows=_attach_performance(session, rows),
         total_count=int(total_count or 0),
     )
+
+
+def iter_fund_code_batches(
+    session: Session, keyword: str | None, fund_type: str | None, *, page_mode: bool,
+) -> Iterator[Sequence[str]]:
+    """按列表顺序流式读取候选代码，每批至多 100 只，不预加载全目录净值。"""
+    statement = select(FundShareClass.fund_code)
+    if keyword:
+        pattern = f"%{keyword.strip()}%"
+        statement = statement.where(
+            FundShareClass.fund_code.ilike(pattern) | FundShareClass.fund_name.ilike(pattern)
+        )
+    if fund_type:
+        statement = statement.where(FundShareClass.fund_type == fund_type)
+    ordering = (_fund_type_order(), FundShareClass.fund_code) if page_mode else (FundShareClass.fund_code,)
+    yield from session.scalars(statement.order_by(*ordering).execution_options(yield_per=100)).partitions(100)
 
 
 def list_fund_summaries_by_codes(

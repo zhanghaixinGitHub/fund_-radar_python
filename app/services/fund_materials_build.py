@@ -7,8 +7,8 @@ from urllib.parse import urlparse
 
 from app.core.config import get_settings
 from app.services.direction_1d_protocol import digest
-from app.services.fund_exposure_common import ROOT, now, read, save
-from app.services.fund_materials_store import source_files, source_path
+from app.services.fund_exposure_common import ROOT, now, read
+from app.services.fund_materials_store import source_files, source_path, versioned_save
 
 
 def iso_date(value) -> str | None:
@@ -300,7 +300,30 @@ def build(root: Path = ROOT, target: Path | None = None, *, checked_through: str
         "notice": "持仓以定期报告为准，不代表实时调仓；公司公告按历史披露持仓关联收集，未覆盖所有新闻。",
     }
     target = target or Path(get_settings().fund_material_directory) / f"{fund}.json"
+    if target.exists():
+        previous = read(target)
+        if previous.get("fundCode") != fund:
+            raise ValueError("MATERIAL_PREVIOUS_FUND_MISMATCH")
+        # 其他补录入口也可能保存了历史报告；当前来源目录未列出不等于历史事实应被删除。
+        # 以原件标识合并，保留同一报告期的季报、中报/年报和不同原件版本。
+        history = {r["id"]: r for r in previous.get("reports", [])}
+        for report in reports:
+            history[report["id"]] = {**history.get(report["id"], {}), **report}
+        reports = sorted(
+            history.values(),
+            key=lambda r: (r["endDate"], r["publishedDate"], r["fullDisclosure"]),
+            reverse=True,
+        )
+        value["reports"] = reports
+        value["asOfDate"] = max(actual_date, previous.get("asOfDate") or actual_date)
+        # 保留的较新报告可能来自另一补录入口；不能仍把本轮旧报告的公司标成最新持仓。
+        latest_codes = {h["stockCode"] for h in reports[0]["holdings"]}
+        for company in companies:
+            company["latestHeld"] = company["stockCode"] in latest_codes
+        for document in documents:
+            if document["kind"] == "company":
+                document["latestHeld"] = document["stockCode"] in latest_codes
     # 在发布前验证完整内容可序列化且没有非数值金额；异常由调用方记录，旧文件保持可用。
     json.dumps(value, allow_nan=False)
-    save(target, value, replace=True)
+    versioned_save(target, value)
     return {"file": str(target), "reports": len(reports), "companies": len(companies), "documents": len(documents)}

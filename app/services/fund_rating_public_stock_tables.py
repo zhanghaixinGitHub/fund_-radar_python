@@ -9,6 +9,7 @@ from decimal import Decimal
 from itertools import combinations
 
 from app.services.fund_rating_disclosures import compact
+from app.services.fund_report_sections import numbered_pages
 
 _ROW = re.compile(r"^\s*(\d{1,4})\s+(\d{5,6})(?=\s|[\u4e00-\u9fff])\s*(.*)$")
 _INTEGER = r"(?:\d+|\d{1,3}(?:,\d{3})+)"
@@ -16,6 +17,17 @@ _INTEGER = r"(?:\d+|\d{1,3}(?:,\d{3})+)"
 
 def cells(lines: list[str]) -> tuple[str, list[str]]:
     """枚举折行单元格的唯一合法拼接；不补任何数字，金额必须明确到分。"""
+    # PDF 的金额末位有时换到下一行，但同一行的最右侧占比已经先输出。
+    # 只处理“金额恰缺一位小数 + 下一行只有一位数字”的确定布局，不把页码、
+    # 名称或其他缺失金额猜进来；后续仍必须通过全部证券与独立金额对账。
+    if len(lines) == 2 and re.fullmatch(r"\d", lines[1].strip()):
+        wrapped = re.fullmatch(
+            r"([\u4e00-\u9fffA-Za-zＡ-Ｚ*－—-]+)\s+(" + _INTEGER + r")\s+("
+            + _INTEGER + r"\.\d)\s+(\d+(?:\.\d+)?%?)\s*",
+            lines[0].strip(),
+        )
+        if wrapped:
+            return wrapped[1], [wrapped[2], wrapped[3] + lines[1].strip(), wrapped[4]]
     tokens = " ".join(lines).split()
     words, numbers = [], []
     for token in tokens:
@@ -43,7 +55,7 @@ def parse(pages: list[str], stock_amount: str, net_assets: str, *, require_indus
     """解析全部股票并合并同一代码的指数/非指数分表，拒绝未统一的跨市场行业分类。"""
     from app.services.fund_rating_public_market import section, stock_pages
 
-    text = "\n".join(stock_pages(pages))
+    text = "\n".join(stock_pages(numbered_pages(pages)))
     body = section(text, r"(?m)^7\.3\s+[^\n]*股票\s*投\s*资\s*明\s*细", r"(?m)^7\.4\s")
     industry = section(text, r"(?m)^7\.2\s+[^\n]*按行业分类", r"(?m)^7\.3\s")
     # 港股表与境内行业表不能直接拼成不同桶，形成虚假的行业分散。
@@ -139,3 +151,51 @@ def parse(pages: list[str], stock_amount: str, net_assets: str, *, require_indus
         "stock_nav_pct": str(total / Decimal(net_assets) * 100),
         "normalization": edits,
     }
+
+
+def parse_disclosed(pages: list[str], stock_amount: str, net_assets: str) -> dict:
+    """持仓用途核对全部股票与独立行业表，单列有原文证明的替代款增值。
+
+    股票资产账面金额有时含可退替代款估值增值，证券明细却不含该非证券项目。
+    只在原文明确说明账面含该项目、资产组合股票项等于资产负债表、全部行业金额
+    等于全部股票明细三项同时满足时接受。差额保留为独立金额，不能分摊到
+    股票、伪造证券或通过放宽金额误差消除，评级仍由其原有入口单独核验。
+    """
+    from app.services.fund_rating_public_market import section, stock_pages
+
+    try:
+        result = parse(pages, stock_amount, net_assets, require_industry=False)
+        result["substitution_increment_cny"] = "0"
+        return result
+    except ValueError as error:
+        if str(error) != "RATING_STOCK_FULL_AMOUNT_MISMATCH":
+            raise
+    text = "\n".join(stock_pages(numbered_pages(pages)))
+    asset = section(text, r"(?m)^\s*7\.1\s+[^\n]*资产组合情况", r"(?m)^\s*7\.2\s")
+    industry = section(text, r"(?m)^\s*7\.2\s+[^\n]*按行业分类", r"(?m)^\s*7\.3\s")
+    note = compact(asset)
+    if not re.search(r"股票[^。]{0,50}含可退替代款[^。]{0,10}估值增值", note):
+        raise ValueError("HOLDINGS_SUBSTITUTION_NOTE_UNVERIFIED")
+    equity = re.findall(r"(?m)^\s*其中[：:]\s*股票\s+([\d,]+\.\d{2})\s+[\d.]+\s*$", asset)
+    totals = re.findall(r"(?m)^\s*合计\s+([\d,]+\.\d{2})\s+[\d.]+\s*$", industry)
+    if len(equity) != 1 or not totals:
+        raise ValueError("HOLDINGS_SUBSTITUTION_TOTAL_UNVERIFIED")
+    original_total = Decimal(stock_amount)
+    if abs(Decimal(equity[0].replace(",", "")) - original_total) > Decimal(".02"):
+        raise ValueError("HOLDINGS_SUBSTITUTION_BALANCE_CONFLICT")
+    disclosed = sum(Decimal(value.replace(",", "")) for value in totals)
+    difference = original_total - disclosed
+    # 估值增值项目也可能为负，不能将负差额截成零或丢弃；仅允许明确非零差额。
+    if difference == 0:
+        raise ValueError("HOLDINGS_SUBSTITUTION_INCREMENT_RANGE")
+    # 使用真实行业合计作为证券金额，再逐证券相加对账；任何遗漏仍会失败。
+    result = parse(pages, str(disclosed), net_assets, require_industry=False)
+    if abs(sum(Decimal(row["value_cny"]) for row in result["reported_industries"]) - disclosed) > Decimal(".02"):
+        raise ValueError("HOLDINGS_SUBSTITUTION_INDUSTRY_CONFLICT")
+    result.update(
+        balance_stock_value_cny=stock_amount,
+        substitution_increment_cny=str(difference),
+        substitution_basis="BALANCE_LESS_INDEPENDENTLY_RECONCILED_SECURITIES",
+        reconciliation_quotes=[asset, industry],
+    )
+    return result

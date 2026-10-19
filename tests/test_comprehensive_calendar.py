@@ -64,6 +64,35 @@ def test_chinese_ashare_sp_index_remains_domestic_but_us_sp_index_does_not():
     assert not domestic_calendar_supported({"fund_name": "标普500ETF联接(QDII)", "fund_type": "STOCK"})
 
 
+def test_domestic_assets_policy_checks_original_positions_not_edited_company_list(monkeypatch):
+    """必须核对自己的完整股票表；把港股从包里删掉，或借其他基金条款，都不能通过。"""
+    from datetime import date
+
+    from app.services import direction_1d_protocol, fund_rating_public_market, fund_rating_public_stock_tables
+
+    profile, material, documents, window = sample()
+    material["calendar_evidence"].update(policy="CN_NAV_DISCLOSED_DOMESTIC_ASSETS_V1", prospectus_ref="own")
+    documents["own"] = {
+        "kind": "PROSPECTUS",
+        "codes": ["007356"],
+        "url": "https://np-cnotice-fund.eastmoney.com/api/content/ann",
+        "body": "本基金的估值日为本基金相关的证券/期货交易场所的交易日以及国家法律法规规定的其他日期。",
+    }
+    material["companies"] = [{"code": "600000.SH", "quote": {"date": "2026-10-14", "change_pct": 1}}]
+    monkeypatch.setattr(direction_1d_protocol, "calendar", lambda: ((date(2026, 10, 14), date(2026, 10, 15)), "hash"))
+    monkeypatch.setattr(
+        fund_rating_public_market, "balance", lambda *a, **k: {"stock_amount": "100", "net_assets": "200"}
+    )
+    positions = [{"stock_code": "600000.SH"}]
+    monkeypatch.setattr(fund_rating_public_stock_tables, "parse_disclosed", lambda *a: {"holdings": positions})
+    assert verified_domestic_window(profile, material, documents, window)
+    positions.append({"stock_code": "00700.HK"})
+    assert not verified_domestic_window(profile, material, documents, window)
+    positions.pop()
+    documents["own"]["codes"] = ["000001"]
+    assert not verified_domestic_window(profile, material, documents, window)
+
+
 def test_domestic_gold_requires_its_own_target_and_quote():
     profile = {"fund_name": "前海开源黄金ETF联接-C", "fund_type": "OTHER"}
     window = {"base_nav_date": "2026-10-14", "target_nav_date": "2026-10-15"}

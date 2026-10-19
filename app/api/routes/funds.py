@@ -6,6 +6,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.dependencies import require_service_token
 from app.core.logging import get_logger
@@ -21,6 +22,7 @@ from app.schemas.fund import (
     InternalSyncJobLastSuccess,
     InternalSyncJobStatus,
 )
+from app.schemas.market_sync import MarketSyncRequest
 from app.services.fund_catalog_read import (
     get_fund,
     get_fund_nav_history,
@@ -55,12 +57,13 @@ _MAX_BATCH_FUND_CODES = 50
 
 
 @router.get("", response_model=InternalFundPage, dependencies=[Depends(require_service_token)])
-async def list_internal_funds(
+def list_internal_funds(
     keyword: Annotated[str | None, Query(max_length=50)] = None,
     fund_type: Annotated[str | None, Query(alias="fundType", pattern=rf"^({_FUND_TYPES})$")] = None,
     page_size: Annotated[int, Query(alias="pageSize", ge=1, le=100)] = 10,
     cursor: Annotated[str | None, Query(pattern=r"^\d+$")] = None,
     page: Annotated[int | None, Query(ge=1, le=10_000)] = None,
+    rating: Annotated[str | None, Query(pattern=r"^(EXCELLENT|GOOD|AVERAGE|WEAK|UNRATED|PENDING)$")] = None,
 ) -> InternalFundPage:
     """按兼容游标或页码返回已落库的真实基金目录样本。
 
@@ -81,7 +84,16 @@ async def list_internal_funds(
         page_size,
         page,
     )
-    return list_funds(keyword, fund_type, page_size, cursor, page)
+    try:
+        # 不传评级时保留原调用及缓存契约；筛选失败必须显式报错，不能返回未筛选目录。
+        if rating is None:
+            return list_funds(keyword, fund_type, page_size, cursor, page)
+        return list_funds(keyword, fund_type, page_size, cursor, page, rating)
+    except (ValueError, SQLAlchemyError, OSError):
+        if rating is None:
+            raise
+        logger.exception("funds.list_internal_funds >>> rating filter failed, trace_id=%s", get_trace_id())
+        raise HTTPException(503, "评级筛选暂不可用，请稍后重试。") from None
 
 
 @router.get("/batch", response_model=tuple[InternalFundSummary, ...], dependencies=[Depends(require_service_token)])
@@ -163,10 +175,13 @@ def get_latest_internal_fund_news():
     status_code=status.HTTP_202_ACCEPTED,
     dependencies=[Depends(require_service_token)],
 )
-def start_internal_all_sync_jobs() -> InternalSyncJobStatus:
+def start_internal_all_sync_jobs(body: MarketSyncRequest | None = None) -> InternalSyncJobStatus:
     """由 Java 管理员入口创建后台串行批次，不等待任何来源请求完成。"""
     try:
-        snapshot = get_sync_job_manager().start_all()
+        snapshot = (
+            get_sync_job_manager().start_all(owner_user_id=body.owner_user_id, materials_only=body.materials_only)
+            if body else get_sync_job_manager().start_all()
+        )
         logger.info(
             "funds.start_internal_all_sync_jobs >>> batch created, job_id=%s, trace_id=%s",
             snapshot.job_id,

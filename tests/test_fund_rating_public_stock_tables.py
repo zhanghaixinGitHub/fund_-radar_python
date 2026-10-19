@@ -5,7 +5,7 @@ import zipfile
 
 import pytest
 from app.services.fund_rating_public_market import public_document, publication
-from app.services.fund_rating_public_stock_tables import cells, parse
+from app.services.fund_rating_public_stock_tables import cells, parse, parse_disclosed
 
 
 def test_issuer_docx_keeps_table_money_and_rejects_entity_declaration():
@@ -34,6 +34,14 @@ def test_wrapped_money_keeps_every_printed_digit():
 def test_truncated_amount_is_not_filled_from_weight():
     with pytest.raises(ValueError, match="INCOMPLETE_OR_AMBIGUOUS"):
         cells(["中控技术 12,760,839 1,499,398,58 9.05"])
+
+
+def test_last_money_decimal_wrapped_below_percentage_keeps_printed_digit():
+    assert cells(["格力电器 435,000 16,312,500.0 0.11", "0"]) == (
+        "格力电器", ["435,000", "16,312,500.00", "0.11"]
+    )
+    with pytest.raises(ValueError, match="INCOMPLETE_OR_AMBIGUOUS"):
+        cells(["格力电器 435,000 16,312,500.0 0.11"])
 
 
 def test_index_and_active_sleeves_merge_same_security_with_amount_conservation():
@@ -94,3 +102,48 @@ def test_article_metadata_without_full_text_is_not_a_report():
     ).encode()
     with pytest.raises(ValueError, match="IDENTITY_OR_COMPLETENESS"):
         public_document(raw, {"article_id": "AN1"}, "004237", "中期报告")
+
+
+@pytest.mark.parametrize("increment", ["12.34", "-12.34"])
+def test_substitution_is_separate_and_requires_two_independent_tables(increment):
+    """正负替代款差额都保留；缺一只证券、行业合计冲突、无注释均不能通过。"""
+    from decimal import Decimal
+
+    amount = str(Decimal("1500.00") + Decimal(increment))
+    body = f"""7.1 期末基金资产组合情况
+其中：股票 {amount} 15.00
+注：股票投资的公允价值包含可退替代款的估值增值。
+7.2 报告期末按行业分类的股票投资组合
+J 金融业 1,500.00 15.00
+合计 1,500.00 15.00
+7.3 期末所有股票投资明细
+1 600000 浦发银行 100 1,000.00 10.00
+2 000001 平安银行 50 500.00 5.00
+7.4 报告期股票变动
+"""
+    result = parse_disclosed([body], amount, "10000")
+    assert result["substitution_increment_cny"] == increment
+    assert result["stock_value_cny"] == "1500.00"
+    assert len(result["holdings"]) == 2
+    with pytest.raises(ValueError, match="FULL_AMOUNT_MISMATCH"):
+        parse_disclosed([body.replace("2 000001 平安银行 50 500.00 5.00\n", "")], amount, "10000")
+    with pytest.raises(ValueError, match="NOTE_UNVERIFIED"):
+        parse_disclosed([body.replace("包含可退替代款的估值增值", "金额见上表")], amount, "10000")
+    with pytest.raises(ValueError, match="INDUSTRY_CONFLICT"):
+        parse_disclosed([body.replace("J 金融业 1,500.00", "J 金融业 1,400.00")], amount, "10000")
+
+
+def test_numberless_body_headings_retain_all_rows_and_ignore_catalog():
+    pages = ["""报告期末按行业分类的股票投资组合......47
+期末按公允价值占基金资产净值比例大小排序的股票投资明细......48
+报告期末按行业分类的股票投资组合
+C 制造业 1,000.00 10.00
+合计 1,000.00 10.00
+期末按公允价值占基金资产净值比例大小排序的股票投资明细
+期末按公允价值占基金资产净值比例大小排序的所有股票投资明细
+1 688981 中芯国际 100 1,000.00 10.00
+报告期内股票投资组合的重大变动
+"""]
+    result = parse_disclosed(pages, "1000.00", "10000")
+    assert result["holdings"][0]["stock_code"] == "688981.SH"
+    assert "7.3" not in pages[0]

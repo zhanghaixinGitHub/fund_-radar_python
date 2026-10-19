@@ -16,6 +16,37 @@ def worker(handler):
     return result
 
 
+def test_personal_batch_preserves_owner_and_marks_unready_watch_funds_without_posting():
+    from uuid import UUID
+
+    owner = str(UUID(int=1))
+    posts = []
+
+    def handler(request):
+        if request.url.path.endswith("/window"):
+            return httpx.Response(200, json={"targetNavDate": "2026-10-16"})
+        if request.method == "GET":
+            assert f"/users/{owner}/fund-codes" in request.url.path
+            return httpx.Response(200, json=["002112", "016008"] if not request.url.params["after"] else [])
+        posts.append(request.url.path)
+        assert json.loads(request.content) == {"targetNavDate": "2026-10-16", "ownerUserId": owner}
+        return httpx.Response(200, json={"status": "PREDICTED", "reused": False})
+
+    service = worker(handler)
+    service.configure_scope(owner, ["016008"])
+    try:
+        result = service.sync(progress_reporter=lambda *_: None)
+        assert result.total == 2 and result.created == 1 and len(result.issues) == 1
+        assert posts == ["/internal/v1/direction-1d/sync/016008"]
+        assert service.saved_results() is None
+        service.configure_scope(owner, [])
+        result = service.sync(progress_reporter=lambda *_: None)
+        assert result.created == 0 and result.total == 2
+        assert len(posts) == 1
+    finally:
+        service.close()
+
+
 def test_admin_prediction_uses_authorized_fund_pages_for_comprehensive_review():
     calls = []
 

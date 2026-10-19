@@ -35,6 +35,42 @@ def verified_domestic_window(profile: dict, material: dict, documents: dict, win
     if report.get("kind") != "REPORT" or material["fund_code"] not in report.get("codes", []):
         return False
     mode = evidence.get("policy")
+    if mode == "CN_NAV_DISCLOSED_DOMESTIC_ASSETS_V1":
+        # “允许港股通”不等于本期实际持有港股。只有本基金完整原文能重建全部
+        # 股票、全部属于境内市场，且自己的招募说明书定义相关交易场所估值日，
+        # 才采用项目已核实的境内日历；不能只靠删掉材料包里的港股行来放行。
+        from app.services.direction_1d_protocol import calendar
+        from app.services.fund_rating_public_market import balance
+        from app.services.fund_rating_public_stock_tables import parse_disclosed
+
+        prospectus = documents.get(evidence.get("prospectus_ref"), {})
+        if (
+            prospectus.get("kind") != "PROSPECTUS"
+            or material["fund_code"] not in prospectus.get("codes", [])
+            or urlparse(prospectus.get("url", "")).hostname
+            not in {"np-cnotice-fund.eastmoney.com", "www.founderff.com", "founderff.com"}
+            or not re.search(
+                r"估值日为本基金相关的证券[/／]期货交易场所的交易日", prospectus.get("body", "")
+            )
+        ):
+            return False
+        sessions, _ = calendar()
+        if base not in sessions or target not in sessions:
+            return False
+        try:
+            balances = balance([report["body"]], require_stock=False)
+            positions = parse_disclosed([report["body"]], balances["stock_amount"], balances["net_assets"])["holdings"]
+        except (ValueError, KeyError):
+            return False
+        codes = {row["stock_code"] for row in positions}
+        companies = material.get("companies", [])
+        return bool(codes) and all(code.endswith((".SH", ".SZ", ".BJ")) for code in codes) and codes == {
+            company["code"] for company in companies
+        } and all(
+            company.get("quote", {}).get("date") == str(base)
+            and company.get("quote", {}).get("change_pct") is not None
+            for company in companies
+        )
     if mode == "CN_NAV_HK_CONNECT_WINDOW_V1":
         calendar_doc = documents.get(evidence.get("calendar_ref"), {})
         body = calendar_doc.get("body", "")

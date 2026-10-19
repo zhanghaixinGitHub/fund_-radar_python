@@ -121,20 +121,39 @@ def test_peer_partial_failure_updates_002112_page_and_retries_peer_step(pipeline
     assert calls == ["peers", "training_materials", "build"]
 
 
-def test_real_materials_pipeline_keeps_one_click_running_until_peer_stage_finishes(pipeline, monkeypatch):
+def test_market_materials_pipeline_keeps_one_click_running_until_holdings_check_finishes(pipeline, monkeypatch):
+    from app.services.fund_market_preparation import MarketFundPreparation
+    from app.services.fund_market_workflow import MarketSyncWorkflow
     from tests.test_sync_all_jobs import make_manager
 
     entered, release = Event(), Event()
 
-    def peer_stage(**kwargs):
+    def holdings_check(*args, **kwargs):
         entered.set()
         assert release.wait(3)
-        return {"errors": [{"reason": "REPORT_PERIODS_MISSING"}]}
+        return {"status": "PARTIAL_SUCCESS", "funds": [{"fund_code": "008888", "status": "FAILED"}]}
 
-    monkeypatch.setattr(sync, "supplement_peers", peer_stage)
+    # 旧002112研究采集器不再属于一键同步；这里验证真正共用的市场持仓入口。
+    monkeypatch.setattr(MarketFundPreparation, "sync_holdings", holdings_check)
+    monkeypatch.setattr(
+        MarketFundPreparation,
+        "sync_material",
+        lambda *a, **kw: {"fund_code": "008888", "status": "SUCCEEDED", "gaps": []},
+    )
     calls = []
     manager = make_manager(calls)
-    manager._materials_service_factory = sync.FundMaterialsSyncService
+    base = manager._market_workflow_factory
+
+    def workflow_factory(**kwargs):
+        workflow = base(**kwargs)
+        market = MarketSyncWorkflow(
+            preparation=MarketFundPreparation(root=pipeline[0] / "market"),
+            scope_provider=lambda: [{"fund_code": "008888"}],
+        )
+        workflow.materials = market.materials
+        return workflow
+
+    manager._market_workflow_factory = workflow_factory
     try:
         parent = manager.start_all()
         assert entered.wait(3)
@@ -436,6 +455,16 @@ def test_page_publish_preserves_actual_dates_and_previous_snapshot_on_failure(tm
     assert page["asOfDate"] == "2026-09-24"
     assert page["companies"][0]["quote"]["date"] == "2026-09-24"
     assert page["checkedThrough"] == "2026-09-25"
+
+    # 较早经其他入口补录的报告即便不在本轮来源索引里，也必须继续在报告列表中可查。
+    historical = {**page["reports"][0], "id": "historical", "endDate": "2025-12-31", "publishedDate": "2026-03-31"}
+    page["reports"].append(historical)
+    save(target, page, replace=True)
+    builder.build(root, target, checked_through="20260925")
+    assert {r["id"] for r in read(target)["reports"]} == {"r", "historical"}
+    archived = [read(p)["value"] for p in (tmp_path / "versions").glob("*.json")]
+    assert any(value == page for value in archived)
+    original = target.read_bytes()
 
     def fail_replace(*args):
         raise OSError("simulated publication failure")

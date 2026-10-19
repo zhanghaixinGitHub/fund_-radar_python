@@ -3,7 +3,7 @@
 from datetime import date
 from threading import Event
 from time import monotonic, sleep
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from app.core.config import get_settings
@@ -94,6 +94,9 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
             close_hook("SIMULATION_FEES")
 
     class PredictionService:
+        def configure_scope(self, owner, codes):
+            assert codes == ["008888"]
+
         def sync(self, *, progress_reporter):
             run("DIRECTION_1D_PREDICTIONS", progress_reporter)
             return Direction1dSyncResult(date(2026, 9, 23), 2, 1, 1, ())
@@ -127,7 +130,35 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
         run("FUND_RATINGS", progress_reporter)
         return {"target": 2, "rated": 0, "notRated": 2, "failures": []}
 
-    return LocalSyncJobManager(
+    class Workflow:
+        ready = False
+
+        def __init__(self, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+        def news(self, progress):
+            result = news_sync("002112", progress=progress)
+            return {**result, "items": []}
+
+        def materials(self, progress):
+            return MaterialsService().sync("008888", progress_reporter=progress)
+
+        def inputs(self, progress):
+            result = manager._input_synchronizer(progress_reporter=progress)
+            self.ready = result["status"] == "SUCCEEDED" and not set(failures) & {"FUND_NEWS", "FUND_MATERIALS"}
+            return result
+
+        def ratings(self, progress, **kwargs):
+            result = rating_update(progress_reporter=progress)
+            return {**result, "status": "SUCCEEDED", "message": "月度评级检查完成"}
+
+        def prediction_codes(self):
+            return ["008888"] if self.ready else []
+
+    manager = LocalSyncJobManager(
         FundService,
         FeatureService,
         FreeService,
@@ -138,7 +169,9 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
         news_synchronizer=news_sync,
         input_synchronizer=input_sync,
         rating_updater=rating_update,
+        market_workflow_factory=Workflow,
     )
+    return manager
 
 
 def wait_finished(manager, job_id):
@@ -158,9 +191,14 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
     calls = []
     manager = make_manager(calls, failures)
     try:
-        started = manager.start_all()
+        started = manager.start_all(owner_user_id=UUID(int=1))
         result = wait_finished(manager, started.job_id)
-        assert calls == list(STAGES)  # 净值仍优先；公告、持仓行情与分析输入完成后才开始预测。
+        blocked = set()
+        if set(failures) & set(STAGES[:5]):
+            blocked.update(STAGES[8:])
+        if set(failures) & {"FUND_NEWS", "FUND_MATERIALS", "FUND_INPUTS"}:
+            blocked.add("DIRECTION_1D_PREDICTIONS")
+        assert calls == [s for s in STAGES if s not in blocked]
         assert result.status == (
             "SUCCEEDED" if not failures else "FAILED" if len(failures) == len(STAGES) else "PARTIAL_SUCCESS"
         )
@@ -172,7 +210,9 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
         assert bool(result.error_message) == bool(failures)
         for stage in STAGES:
             child = manager.get_latest_job(stage)
-            assert child.status == ("FAILED" if stage in failures else "SUCCEEDED")
+            assert child.status == (
+                "PARTIAL_SUCCESS" if stage in blocked else "FAILED" if stage in failures else "SUCCEEDED"
+            )
             assert child.started_at and child.finished_at
             if stage not in failures and stage not in {
                 "SPX_MANUAL",
@@ -184,7 +224,7 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
                 "FUND_RATINGS",
             }:
                 assert child.sync_run_id is not None
-        next_batch = manager.start_all()
+        next_batch = manager.start_all(owner_user_id=UUID(int=1))
         assert next_batch.job_id != started.job_id
         wait_finished(manager, next_batch.job_id)
     finally:
@@ -208,9 +248,9 @@ def test_spx_batch_preserves_actual_attempt_and_timing_result(performed, state, 
         "lastAttempt": {"state": state, "message": "原时间状态保持", "rowCount": 2, "usableBeforeU08": False},
     }
     try:
-        result = wait_finished(manager, manager.start_all().job_id)
+        result = wait_finished(manager, manager.start_all(owner_user_id=UUID(int=1)).job_id)
         assert manager.get_latest_job("SPX_MANUAL").status == expected
-        assert calls == list(STAGES[1:])
+        assert calls == list(STAGES[1:] if expected == "SUCCEEDED" else STAGES[1:8])
         assert result.progress_current == result.progress_total == len(STAGES)
         assert result.status == ("SUCCEEDED" if expected == "SUCCEEDED" else "PARTIAL_SUCCESS")
     finally:
@@ -227,7 +267,7 @@ def test_batch_holds_exclusion_across_every_stage_and_restores_live_progress():
 
     manager = make_manager([], stage_hook=hold)
     try:
-        started = manager.start_all()
+        started = manager.start_all(owner_user_id=UUID(int=1))
         for index, stage in enumerate(STAGES):
             assert entered[stage].wait(3)
             parent = manager.get_latest_job(MARKET_ALL_JOB_TYPE)
@@ -277,7 +317,7 @@ def test_running_single_job_rejects_batch_and_cleanup_failure_does_not_drop_late
         assert entered.wait(3)
         # 子任务虽已返回成功状态，连接尚未清理完成时仍然不能开始另一批次。
         with pytest.raises(SyncJobInProgressError):
-            manager.start_all()
+            manager.start_all(owner_user_id=UUID(int=1))
         release.set()
         wait_finished(manager, single.job_id)
     finally:
@@ -292,10 +332,10 @@ def test_running_single_job_rejects_batch_and_cleanup_failure_does_not_drop_late
 
     manager = make_manager(calls, close_hook=failing_close)
     try:
-        result = wait_finished(manager, manager.start_all().job_id)
+        result = wait_finished(manager, manager.start_all(owner_user_id=UUID(int=1)).job_id)
         assert result.status == "PARTIAL_SUCCESS"
         assert manager.get_latest_job("MARKET_FREE_DATA_COMPLETION").error_code == "SYNC_STAGE_FAILED"
-        assert calls == list(STAGES)
+        assert calls == list(STAGES[:8])
     finally:
         manager.close()
 
@@ -314,18 +354,18 @@ def test_input_gaps_are_preserved_in_batch_result_and_after_restart(tmp_path, in
 
     manager._input_synchronizer = incomplete
     try:
-        result = wait_finished(manager, manager.start_all().job_id)
-        assert calls == list(STAGES)
+        result = wait_finished(manager, manager.start_all(owner_user_id=UUID(int=1)).job_id)
+        assert calls == list(STAGES[:-1])
         assert result.status == "PARTIAL_SUCCESS"
-        assert "002112 分析资料" in result.error_message
-        assert manager.get_latest_job("FUND_INPUTS").error_message == "所需净值尚未齐全"
+        assert "基金分析资料" in result.error_message
+        assert "补充" in manager.get_latest_job("FUND_INPUTS").error_message
     finally:
         manager.close()
     restored = LocalSyncJobManager(state_path=tmp_path / "jobs.json")
     try:
         assert restored.get_latest_job(MARKET_ALL_JOB_TYPE).status == "PARTIAL_SUCCESS"
         assert restored.get_latest_job("FUND_INPUTS").status == input_status
-        assert restored.get_latest_job("FUND_INPUTS").fund_codes == ("002112",)
+        assert restored.get_latest_job("DIRECTION_1D_PREDICTIONS").created_count == 0
     finally:
         restored.close()
 

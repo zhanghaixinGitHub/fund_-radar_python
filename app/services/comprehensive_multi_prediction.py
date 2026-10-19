@@ -24,18 +24,53 @@ from app.services.prediction_direction import direction_fields
 logger = logging.getLogger(__name__)
 
 
-def freeze_packet(directory: Path, code: str, horizon: str, materials_path=None) -> dict:
-    """分别冻结周期和日期；不能将已完成的一日判断复制为其他周期。"""
+def review_calendar(data: dict, code: str, at: datetime):
+    """多周期复用已经逐原文验证的境内实际投向日历，不再被旧名称筛选误拦。
+
+    仅为完整披露股票均属境内、且有本基金估值条款的已核实政策增加衔接。
+    再核对原文、全部证券、基准行情及项目日历摘要，不接受包内单个就绪标志。
+    黄金与境外产品仍走原有适配，不从这一入口泛化其未来估值日历。
+    """
     from app.services.prediction_features import read_fund_data
 
+    if (data.get("calendar_evidence") or {}).get("policy") != "CN_NAV_DISCLOSED_DOMESTIC_ASSETS_V1":
+        return read_fund_data(code, at)["calendar"]
+    from app.services.comprehensive_calendar import verified_domestic_window
+    from app.services.prediction_contract import ValuationCalendar
+    from app.services.trading_calendar import load_calendar, load_current_calendar
+
+    with get_engine().connect() as connection:
+        profiles = repo.profiles(connection, [code])
+    documents = {document["id"]: document for document in data["documents"]}
+    past, current = load_calendar(), load_current_calendar()
+    calendar_hash = digest([past.content_hash, current.content_hash])
+    if (
+        data.get("fund_code") != code
+        or len(profiles) != 1
+        or not data.get("time_context", {}).get("baseline_complete")
+        or data["window"]["calendar_version"] != calendar_hash
+        or not verified_domestic_window(profiles[0], data, documents, data["window"])
+    ):
+        raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "本基金实际投向或估值条款仍待核验")
+    return ValuationCalendar(
+        "CN_NAV_DISCLOSED_DOMESTIC_ASSETS_V1",
+        past.sessions + current.sessions,
+        past.definition.coverage_start,
+        current.definition.coverage_end,
+        calendar_hash,
+    )
+
+
+def freeze_packet(directory: Path, code: str, horizon: str, materials_path=None) -> dict:
+    """分别冻结周期和日期；不能将已完成的一日判断复制为其他周期。"""
     if horizon not in {h["horizon_id"] for h in prediction_policy()["horizons"]}:
         raise ValueError("COMPREHENSIVE_HORIZON_INVALID")
     now = repo.clock()
     data = prepare(now, code, materials_path)
-    calendar_data = read_fund_data(code, now)
+    calendar = review_calendar(data, code, now)
     contents = {
         "data": data,
-        "dates": target_dates(calendar_data["calendar"], now, horizon),
+        "dates": target_dates(calendar, now, horizon),
         "horizon_id": horizon,
         "prediction_policy": prediction_policy(),
         "analysis_policy": policy(),
@@ -78,10 +113,8 @@ def import_review(packet_path: Path, review_path: Path) -> dict:
     ):
         raise ValueError("MISSED_DEADLINE")
     code = data["fund_code"]
-    from app.services.prediction_features import read_fund_data
-
-    calendar_data = read_fund_data(code, cutoff)
-    if target_dates(calendar_data["calendar"], cutoff, horizon) != contents["dates"]:
+    calendar = review_calendar(data, code, cutoff)
+    if target_dates(calendar, cutoff, horizon) != contents["dates"]:
         raise ValueError("COMPREHENSIVE_DATE_CONTRACT_MISMATCH")
     restored = prepare(cutoff, code, data.get("materials_path"))
     if digest(restored) != digest(data):

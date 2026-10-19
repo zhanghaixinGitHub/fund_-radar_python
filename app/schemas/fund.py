@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.fund_rating import RatingSummary
+
 
 class InternalFundSummary(BaseModel):
     """传递给 Java 核心服务的最小且可公开展示的基金摘要。"""
@@ -228,3 +230,5 @@ class InternalFundPage(BaseModel):
     page_size: int = Field(default=20, serialization_alias="page_size")
     total_count: int = Field(default=0, ge=0, serialization_alias="total_count")
     total_pages: int = Field(default=0, ge=0, serialization_alias="total_pages")
+    # 仅评级筛选时携带本页的已核验摘要，保证筛选与展示使用同一次评级读取。
+    ratings: dict[str, RatingSummary] | None = None
