@@ -214,6 +214,19 @@ def narrative(analysis: dict, facts: dict, inventory: list, gaps: list) -> dict:
     }
 
 
+def referenced_facts(analysis: dict, facts: dict) -> dict:
+    """公开结果只携带实际引用的完整事实；全部输入另存不可变快照。
+
+    全市场持仓资料较多时，未采用的财务正文不应反复进入结果传输。这里按
+    已验证的 refs 选择完整条目，不截原文或条件、不缩减冻结输入及事实快照；
+    缺引用仍报错，不能通过过滤隐藏缺口。原有结果字节上限保持不变。
+    """
+    references = {ref for reason in [*analysis["reasons"], *analysis["counterpoints"]] for ref in reason["refs"]}
+    if not references <= set(facts):
+        raise ValueError("ANALYSIS_REFERENCE_INVALID")
+    return {ref: facts[ref] for ref in sorted(references)}
+
+
 def display_narrative(body: dict) -> dict:
     """按每条原始事实补充公告关联公司，保持保存的预测正文和分析结论不变。
 
@@ -418,10 +431,11 @@ def _infer_current(
             "feature_as_of": data["as_of"],
             "values": data["nav"],
             "source_id": data["source_id"],
+            "nav_provenance": data.get("nav_provenance"),
             "holding_report_date": data["report"]["endDate"],
             "event_status": "KNOWN_EVENT" if documents_used(facts) else "UNKNOWN",
         },
-        "evidence": public_evidence(facts),
+        "evidence": public_evidence(referenced_facts(result, facts)),
         "evidence_snapshot_id": evidence_sid,
         "evidence_snapshot_hash": evidence_hash,
         "calls": budget.calls,

@@ -49,9 +49,7 @@ def verified_domestic_window(profile: dict, material: dict, documents: dict, win
             or material["fund_code"] not in prospectus.get("codes", [])
             or urlparse(prospectus.get("url", "")).hostname
             not in {"np-cnotice-fund.eastmoney.com", "www.founderff.com", "founderff.com"}
-            or not re.search(
-                r"估值日为本基金相关的证券[/／]期货交易场所的交易日", prospectus.get("body", "")
-            )
+            or not re.search(r"估值日为本基金相关的证券[/／]期货交易场所的交易日", prospectus.get("body", ""))
         ):
             return False
         sessions, _ = calendar()
@@ -64,12 +62,15 @@ def verified_domestic_window(profile: dict, material: dict, documents: dict, win
             return False
         codes = {row["stock_code"] for row in positions}
         companies = material.get("companies", [])
-        return bool(codes) and all(code.endswith((".SH", ".SZ", ".BJ")) for code in codes) and codes == {
-            company["code"] for company in companies
-        } and all(
-            company.get("quote", {}).get("date") == str(base)
-            and company.get("quote", {}).get("change_pct") is not None
-            for company in companies
+        return (
+            bool(codes)
+            and all(code.endswith((".SH", ".SZ", ".BJ")) for code in codes)
+            and codes == {company["code"] for company in companies}
+            and all(
+                company.get("quote", {}).get("date") == str(base)
+                and company.get("quote", {}).get("change_pct") is not None
+                for company in companies
+            )
         )
     if mode == "CN_NAV_HK_CONNECT_WINDOW_V1":
         calendar_doc = documents.get(evidence.get("calendar_ref"), {})
@@ -108,9 +109,18 @@ def verified_domestic_window(profile: dict, material: dict, documents: dict, win
             date(int(year), months[month], int(day))
             for day, month, year in re.findall(r"(\d{1,2})\s+(" + "|".join(months) + r")\s+(\d{4})", body)
         }
-        if len({day for day in closed if day.year == target.year}) < 15 or base in closed or target in closed:
+        if len({day for day in closed if day.year == target.year}) < 15 or target in closed:
             return False
         hong_kong = [company for company in material.get("companies", []) if company["code"].endswith(".HK")]
+        if base in closed:
+            # 香港休市不等于人民币基金不估值。只有本基金条款及官方日历、汇率和
+            # 真实最近收盘同时可证实时，才接纳参考行情；日期和涨跌仍保留原交易日。
+            from app.services.fund_valuation_sessions import verified_hk_holiday_reference
+
+            return bool(hong_kong) and all(
+                verified_hk_holiday_reference(material, documents, c["code"], c.get("quote") or {}, window)
+                for c in hong_kong
+            )
         return all(
             company.get("quote", {}).get("date") == str(base) and company.get("quote", {}).get("change_pct") is not None
             for company in hong_kong

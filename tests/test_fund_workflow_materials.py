@@ -167,3 +167,43 @@ def test_calendar_rejection_keeps_real_candidate_path_and_failure_without_approv
     checked = MarketFundPreparation(root=root, clock=lambda: NOW).prepare_inputs([{"fund_code": CODE}])
     assert not checked["items"][0]["prediction_ready"]
     assert checked["items"][0]["prepare_failure"] == result["prepare_failure"]
+
+
+@pytest.mark.parametrize("defect", [None, "future", "hash", "other_fund", "wrong_kind"])
+def test_calendar_failure_can_only_handoff_verified_own_disclosures(material, monkeypatch, defect):
+    """复用真实来源校验；公告可登记不等于日历、行情和批准条件被绕过。"""
+    from app.services import fund_information_snapshot as snapshot
+    from app.services.direction_1d_protocol import digest
+    from app.services.fund_market_review import approve_comprehensive
+
+    root, path, collected, _ = material
+    document = {
+        "id": "search", "kind": "DISCLOSURE_SEARCH", "codes": [CODE],
+        "url": "https://example.test/disclosures", "body": BODY, "body_hash": digest(BODY),
+        "published_date": "2026-10-16", "available_at": NOW.isoformat(), "body_scope": "FULL_TEXT",
+    }
+    if defect == "future":
+        document["available_at"] = "2026-10-18T18:00:00+08:00"
+    elif defect == "hash":
+        document["body_hash"] = "0" * 64
+    elif defect == "other_fund":
+        document["codes"] = ["000001"]
+    elif defect == "wrong_kind":
+        document["kind"] = "MARKET_DATA"
+    save(path, {"fund_code": CODE, "documents": [document]}, replace=True)
+    collected["gaps"].append("本基金实际基准日净值或所列行情仍未齐备")
+    save(root / "materials" / (CODE + ".json"), collected, replace=True)
+
+    def incompatible(*args):
+        raise ValueError("COMPREHENSIVE_CALENDAR_POLICY_REQUIRED")
+
+    monkeypatch.setattr(snapshot, "prepare", incompatible)
+    result = inspect_materials(CODE, path, root=root, clock=lambda: NOW, resolutions=[resolution()])
+    assert (GAP in result["gaps"]) == (defect is not None)
+    assert result["prepare_failure"] == "COMPREHENSIVE_CALENDAR_POLICY_REQUIRED"
+    assert "本基金实际基准日净值或所列行情仍未齐备" in result["gaps"]
+    assert "综合资料校验未通过：COMPREHENSIVE_CALENDAR_POLICY_REQUIRED" in result["gaps"]
+    assert not result["reviewed"]
+    assert read(root / "materials" / (CODE + ".json")) == collected
+    with pytest.raises(ValueError, match="GAPS_REMAIN"):
+        approve_comprehensive(CODE, "公告已补齐但日历与行情未通过，不能批准。" * 10, root=root)

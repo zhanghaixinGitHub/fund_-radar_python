@@ -3,6 +3,7 @@
 import os
 from copy import deepcopy
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -302,7 +303,12 @@ def test_public_policy_full_publication_idempotence_failure_and_deactivation(db,
         _category(db, tmp_path, "public-test", [m], date(2026, 9, 30), datetime.now(UTC))["batch"] == published["batch"]
     )
     result = read(["002112"], detail=True, engine=db)
-    assert result["status"] == "RATED" and len(result["dimensions"]) == 8 and "score" not in result
+    assert result["status"] == "RATED" and len(result["dimensions"]) == 8
+    with Session(db) as s:
+        saved = s.get(RatingResult, (published["batch"], "002112"))
+        assert result["score"] == f"{saved.score:.2f}"
+        assert all(d["score"] == f"{Decimal(saved.dimension_values[d['key']]):.2f}"
+                   for d in result["dimensions"])
     bad = deepcopy(m)
     bad["metrics"]["drawdown"] = None
     with pytest.raises(ValueError):
@@ -310,7 +316,9 @@ def test_public_policy_full_publication_idempotence_failure_and_deactivation(db,
     with Session(db) as s, s.begin():
         assert s.get(RatingCurrent, "public-test").batch_id == published["batch"]
         s.get(RatingMethodology, digest(policy())).active = False
-    assert read(["002112"], detail=True, engine=db)["status"] == "WITHDRAWN"
+    withdrawn = read(["002112"], detail=True, engine=db)
+    assert withdrawn["status"] == "WITHDRAWN" and withdrawn["score"] is None
+    assert all(d["score"] is None for d in withdrawn["dimensions"])
 
 
 def test_input_corruption_is_service_failure_not_not_rated(db, tmp_path):

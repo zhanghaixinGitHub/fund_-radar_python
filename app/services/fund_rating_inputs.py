@@ -140,12 +140,13 @@ def validate_sources(session: Session, bundle: dict, frozen: datetime) -> None:
 
     if bundle.get("basis") in PUBLIC_BASES:
         from app.services.fund_rating_public_inputs import validate_public_sources
-        from app.services.fund_rating_public_policy import ETF_BASIS, INDEX_BASES, MARKET_BASES
+        from app.services.fund_rating_public_policy import ETF_BASIS, INDEX_BASES, MARKET_BASES, REVIEWED_BASES
 
         validate_public_sources(bundle, frozen)
         uses_provider = any(r.get("label") == "provider" for r in bundle.get("raw_archive", []))
         if (
             bundle.get("basis") in {*MARKET_BASES, *INDEX_BASES}
+            or (bundle.get("basis") in REVIEWED_BASES and uses_provider)
             or (bundle.get("basis") == ETF_BASIS and uses_provider)
         ) and not session.scalar(
             text(

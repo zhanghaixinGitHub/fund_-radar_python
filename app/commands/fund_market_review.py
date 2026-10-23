@@ -4,12 +4,12 @@ import argparse
 import json
 from pathlib import Path
 
-from app.services.fund_market_review import approve_comprehensive, record_event_review
+from app.services.fund_market_review import approve_comprehensive, record_event_review, record_prediction_event_review
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("event", "comprehensive", "inspect"))
+    parser.add_argument("action", choices=("event", "prediction-event", "comprehensive", "inspect"))
     parser.add_argument("--fund-code", required=True)
     parser.add_argument("--note-file", type=Path)
     parser.add_argument("--materials", type=Path, help="本基金补充资料的真实路径；不接受其他基金资料")
@@ -18,6 +18,7 @@ def main():
     parser.add_argument("--source-hash")
     parser.add_argument("--decision", choices=("NO_RATING_IMPACT", "REQUIRES_RATING_REVIEW", "RATING_REVIEW_COMPLETED"))
     parser.add_argument("--rating-batch")
+    parser.add_argument("--evidence-file", type=Path, help="本次预测事项审阅引用的连续原文片段JSON数组")
     args = parser.parse_args()
     if args.action != "inspect" and args.note_file is None:
         parser.error("公告或综合审阅必须提供 --note-file")
@@ -29,6 +30,11 @@ def main():
         result = record_event_review(
             args.fund_code, args.article, args.source_hash, args.decision, note, rating_batch_id=args.rating_batch
         )
+    elif args.action == "prediction-event":
+        if not all((args.article, args.source_hash, args.evidence_file)):
+            parser.error("预测事项审阅必须指定公告编号、原文摘要和 --evidence-file")
+        quotes = json.loads(args.evidence_file.read_text(encoding="utf-8"))
+        result = record_prediction_event_review(args.fund_code, args.article, args.source_hash, note, quotes)
     elif args.action == "inspect":
         from app.services.fund_workflow_materials import inspect_materials
 

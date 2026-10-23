@@ -99,7 +99,7 @@ def inspect_materials(code: str, materials_path, *, root=None, clock=None, resol
     """登记本基金补充包并读回缺项；不批准审阅、不生成结论、不覆盖采集原件。"""
     from app.services.fund_exposure_common import now
     from app.services.fund_information_snapshot import prepare
-    from app.services.fund_market_review import pending_events
+    from app.services.fund_market_review import pending_prediction_events
 
     current = (clock or now)()
     root = workflow_root(root)
@@ -113,13 +113,38 @@ def inspect_materials(code: str, materials_path, *, root=None, clock=None, resol
         packet = prepare(current, code, path)
     except (ValueError, KeyError, TypeError, IndexError) as error:
         # 日历等契约不适配也留存真实路径和失败，后续不能又误报成默认目录没文件。
-        # 尚未通过原契约时不采用任何缺口处置，全部保留待补。
+        # 整体未通过时仍不批准；仅可独立交接下方严格核验过的本基金公告来源。
         failure = str(error)
-        gaps = list(material.get("gaps", [])) + ["综合资料校验未通过：" + failure]
+        gaps = list(material.get("gaps", []))
+        if failure == "COMPREHENSIVE_CALENDAR_POLICY_REQUIRED" and resolutions:
+            from app.services.fund_comprehensive_materials import checked_documents
+
+            # 只允许日历失败时单独交接公告原文。仍使用正式冻结的来源校验，
+            # 并要求证据属于本基金的公告或目录；不能据此清除净值、行情、
+            # 持仓和经营缺口，更不能消除下方保留的日历失败或批准综合审阅。
+            try:
+                documents = {d["id"]: d for d in checked_documents(current, code, payload)}
+            except (ValueError, KeyError, TypeError, IndexError):
+                documents = {}
+            source_only = [
+                row
+                for row in resolutions
+                if row.get("gap") == "本次公告目录或原文尚未核验完整"
+                and row.get("evidence")
+                and all(
+                    proof.get("document_id") in documents
+                    and documents[proof["document_id"]].get("kind") in {"ANNOUNCEMENT", "DISCLOSURE_SEARCH"}
+                    and code in documents[proof["document_id"]].get("codes", [])
+                    for proof in row["evidence"]
+                )
+            ]
+            if source_only:
+                gaps = unresolved_gaps(material, {"documents": list(documents.values())}, source_only)
+        gaps += ["综合资料校验未通过：" + failure]
     else:
         failure = None
         gaps = unresolved_gaps(material, packet, resolutions) + input_gaps(packet)
-    if pending_events(material.get("candidate_events", [])):
+    if pending_prediction_events(material.get("candidate_events", []), material["source_hash"], root=root):
         gaps.append("本期新增事项尚需结合原文复核")
     receipt = {
         "fund_code": code,

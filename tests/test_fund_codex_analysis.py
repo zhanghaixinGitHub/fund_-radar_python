@@ -56,6 +56,27 @@ def test_missing_sections_cannot_be_disguised_as_complete_reading():
         reviewed_events(data(), review("FULL_TEXT", [{"start": 1, "end": len(data()["documents"][0]["body"])}]))
 
 
+def test_public_result_preserves_all_used_conditions_without_transmitting_unused_originals():
+    from copy import deepcopy
+
+    from app.services.fund_information_analysis import referenced_facts
+
+    facts = {
+        "used": {"text": "计划尚未实施，仍需批准。", "source": {"url": "https://example.com/plan"}},
+        "counter": {"text": "现金流弱于利润，尚有收款风险。"},
+        "unused": {"text": "未采用的完整资料" * 100000},
+    }
+    original = deepcopy(facts)
+    analysis = {"reasons": [{"refs": ["used"]}], "counterpoints": [{"refs": ["counter", "used"]}]}
+    selected = referenced_facts(analysis, facts)
+    assert selected == {"counter": facts["counter"], "used": facts["used"]}
+    assert facts == original
+    assert "尚未实施，仍需批准" in selected["used"]["text"]
+    analysis["reasons"][0]["refs"].append("missing")
+    with pytest.raises(ValueError, match="ANALYSIS_REFERENCE_INVALID"):
+        referenced_facts(analysis, facts)
+
+
 def test_manual_mode_is_default_and_private_key_does_not_enable_paid_calls(monkeypatch):
     assert Settings(_env_file=None).fund_002112_analysis_mode == "CODEX_MANUAL"
     settings = deepseek_policy.PrivateDeepSeekSettings(_env_file=None, api_key="test-only", enabled=False)

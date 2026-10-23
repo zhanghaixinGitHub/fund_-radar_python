@@ -15,7 +15,18 @@ from app.services.fund_rating_rules import DIMENSIONS, calculate, candidate
 
 def ingest(session: Session, bundle: dict) -> str:
     """导入实际规范化原件；分类必须有官方产品关系来源，缺少核验不生成分类或证据。"""
+    from app.repositories.fund_rating import reviewed_current_bases
     from app.services.fund_rating_public_policy import PUBLIC_BASES
+    from app.services.fund_rating_reviewed_quality import BASES as REVIEWED_BASES
+
+    # 旧自动采集器只具备旧资料契约，不能撤回已经受控启用的新证据，再把它降回旧评分。
+    if bundle.get("basis") not in REVIEWED_BASES and reviewed_current_bases(session, [bundle["fund_code"]]):
+        raise ValueError("RATING_REVIEWED_INPUT_REQUIRED")
+
+    if bundle.get("basis") in REVIEWED_BASES:
+        from app.services.fund_rating_reviewed_quality import ingest as ingest_reviewed
+
+        return ingest_reviewed(session, bundle)
 
     if bundle.get("basis") in PUBLIC_BASES:
         return ingest_public(session, bundle)
@@ -89,7 +100,8 @@ def ingest(session: Session, bundle: dict) -> str:
                 RatingEvidence.fund_code == code, RatingEvidence.as_of_date == as_of, ~RatingEvidence.revoked
             )
         ):
-            old.revoked = True
+            if old.payload.get("basis") not in REVIEWED_BASES:
+                old.revoked = True
         session.add(
             RatingEvidence(
                 evidence_hash=key,
@@ -186,7 +198,10 @@ def ingest_public(session: Session, bundle: dict) -> str:
                 ~RatingEvidence.revoked,
             )
         ):
-            old.revoked = True
+            from app.services.fund_rating_reviewed_quality import BASES as REVIEWED_BASES
+
+            if old.payload.get("basis") not in REVIEWED_BASES:
+                old.revoked = True
         session.add(
             RatingEvidence(
                 evidence_hash=key,

@@ -75,6 +75,19 @@ def validate_public_sources(bundle: dict, frozen: datetime, *, root: Path | None
     限官方德邦原文及本机运行；原文、哈希、取得时间与来源域名全部校验。
     原商业/授权来源的规范化包仍走原门禁，部署到非local环境时本口径失效。
     """
+    from app.services.fund_rating_reviewed_snapshot import BASIS as SNAPSHOT_BASIS
+    if bundle.get("basis") == SNAPSHOT_BASIS:
+        from app.services.fund_rating_reviewed_snapshot import validate_sources
+
+        validate_sources(bundle, frozen, root=root)
+        return
+    from app.services.fund_rating_reviewed_quality import BASES as REVIEWED_BASES
+
+    if bundle.get("basis") in REVIEWED_BASES:
+        from app.services.fund_rating_reviewed_quality import validate_sources
+
+        validate_sources(bundle, frozen, root=root)
+        return
     if get_settings().app_environment != "local" or bundle.get("source_scope") != "PUBLIC_DISCLOSURE_LOCAL_ANALYSIS":
         raise ValueError("RATING_PUBLIC_LOCAL_SCOPE_REQUIRED")
     etf = bundle.get("basis") == ETF_BASIS
@@ -131,6 +144,12 @@ def validate_public_sources(bundle: dict, frozen: datetime, *, root: Path | None
 
 
 def build_public_metrics(bundle: dict, as_of: date, frozen: datetime) -> tuple[dict, dict, datetime]:
+    from app.services.fund_rating_reviewed_quality import BASES as REVIEWED_BASES
+
+    if bundle.get("basis") in REVIEWED_BASES:
+        from app.services.fund_rating_reviewed_quality import build_metrics
+
+        return build_metrics(bundle, as_of, frozen)
     if bundle.get("basis") == GLOBAL_BASIS:
         from app.services.fund_rating_public_global import metrics
 

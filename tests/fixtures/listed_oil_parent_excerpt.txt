@@ -1,0 +1,120 @@
+6.4.13.4.2.1 外汇风险敞口
+
+                                                                          单位：人民币元
+
+                                          本期末 2026 年 6 月 30 日
+
+  项目    美元折合人民  港币折合人民  欧元折合人民  日元折合人民  其他币种折合      合计
+
+                币            币            币            币          人民币
+
+以外币计
+价的资产
+
+货币资金  49,636,028.39            -            -  25,152,188.91            -  74,788,217.30
+
+交易性金  1,117,388,628.            -            -  148,669,863.40            -  1,266,058,491.
+融资产              06                                                                      46
+
+应收清算    1,364,525.47            -            -    3,767,882.35            -    5,132,407.82
+款
+
+资产合计  1,168,389,181.            -            -  177,589,934.66            -  1,345,979,116.
+                    92                                                                      58
+
+以外币计
+价的负债
+
+负债合计              -            -            -            -            -            -
+
+资产负债
+
+表外汇风  1,168,389,181.            -            -  177,589,934.66            -  1,345,979,116.
+险敞口净            92                                                                      58
+额
+
+
+上年度末 2025 年 12 月 31 日
+§7 投资组合报告
+7.10 期末按公允价值占基金资产净值比例大小排序的基金投资明细
+
+
+                                                            金额单位：人民币元
+
+                                                          公允价值  占基金资
+  序号    基金名称  基金类型  运作方式    管理人    （元）    产净值比
+                                                                    例（%）
+
+                                              WisdomTr
+
+            WisdomTr              交易型开  ee        252,904,11
+
+    1      ee Brent    ETF      放式      Manageme        3.99      18.79
+            Crude Oil                          nt Jersey
+
+                                              Ltd
+
+            United                            United
+
+            States                交易型开  States      251,403,76
+
+    2      Brent Oil  ETF      放式      Commodit        5.01      18.67
+            Fund LP                          y Funds
+
+                                              LLC
+
+                                              WisdomTr
+
+            WisdomTr              交易型开  ee        251,149,57
+
+    3      ee WTI    ETF      放式      Manageme        6.53      18.66
+            Crude Oil                          nt Jersey
+
+                                              Ltd
+
+                                              United
+
+            United                交易型开  States      247,900,30
+
+    4      States Oil  ETF      放式      Commodit        3.23      18.41
+            Fund LP                          y Funds
+
+                                              LLC
+
+            UBS                  交易型开  UBS Fund  114,030,86
+
+    5      CMCI Oil  ETF      放式      Manageme        9.30      8.47
+            SF ETF                          nt
+
+
+                                              Switzerlan
+
+                                              dAG
+
+                                              Simplex
+
+            Simplex              交易型开  Asset      75,727,504
+
+    6      WTI ETF  ETF      放式      Manageme        .29      5.62
+                                              nt Co
+
+                                              Ltd/Japan
+
+            NEXT
+
+            FUNDS
+
+            NOMURA                        Nomura
+
+            Crude Oil            交易型开  Asset      72,942,359
+
+    7      Long      ETF      放式      Manageme        .11      5.42
+            Index                            nt Co Ltd
+
+            Linked
+
+            Exchange
+
+            Traded
+
+7.11 投资组合报告附注

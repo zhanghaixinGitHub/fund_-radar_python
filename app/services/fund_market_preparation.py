@@ -206,9 +206,11 @@ class MarketFundPreparation:
                 approved = read(material_path)
                 if not prior or approved.get("workflow_source_hash") != prior["source_hash"]:
                     gaps.append("本次更新资料尚未完成综合核验与审阅")
-                from app.services.fund_market_review import pending_events
+                from app.services.fund_market_review import pending_prediction_events
 
-                if not prior or pending_events(prior.get("candidate_events", [])):
+                if not prior or pending_prediction_events(
+                    prior.get("candidate_events", []), prior["source_hash"], root=self.root
+                ):
                     gaps.append("本期新增事项尚需结合原文复核")
             except (ValueError, KeyError, OSError, TypeError, IndexError) as error:
                 logger.info(

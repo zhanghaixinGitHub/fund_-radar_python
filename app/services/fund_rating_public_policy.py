@@ -16,7 +16,9 @@ RECONCILED_BASIS = "PUBLIC_DISCLOSURE_DOMESTIC_INDEX_RECONCILED_V1"
 GLOBAL_BASIS = "PUBLIC_DISCLOSURE_GLOBAL_EQUITY_CNY_V1"
 MARKET_BASES = frozenset((MARKET_BASIS, GLOBAL_BASIS))
 INDEX_BASES = frozenset((INDEX_BASIS, RECONCILED_BASIS))
-PUBLIC_BASES = frozenset((BASIS, ETF_BASIS, *MARKET_BASES, *INDEX_BASES))
+REVIEWED_BASES = frozenset(("PUBLIC_REVIEWED_ACTIVE_QUALITY_V2", "PUBLIC_REVIEWED_PASSIVE_QUALITY_V2"))
+SNAPSHOT_BASIS = "PUBLIC_REVIEWED_QUALITY_SNAPSHOT_V3"
+PUBLIC_BASES = frozenset((BASIS, ETF_BASIS, *MARKET_BASES, *INDEX_BASES, *REVIEWED_BASES, SNAPSHOT_BASIS))
 ANCHORS = {
     "return_1y": [(-0.20, 0), (-0.05, 30), (0, 50), (0.05, 70), (0.10, 90), (0.20, 100)],
     "return_3y": [(-0.20, 0), (-0.05, 30), (0, 50), (0.05, 70), (0.10, 90), (0.20, 100)],
@@ -51,6 +53,10 @@ TERMS = {
 
 
 def policy(basis: str = BASIS) -> dict:
+    if basis in REVIEWED_BASES:
+        from app.services.fund_rating_reviewed_quality import policy as reviewed_policy
+
+        return reviewed_policy(basis)
     if basis == GLOBAL_BASIS:
         from app.services.fund_rating_public_global import global_policy
 
@@ -108,6 +114,10 @@ def interpolate(value, anchors) -> Decimal:
 def calculate_public(metrics: dict, *, config: dict | None = None) -> dict:
     """八维同时计算；只接受指标，不接受调用方提供评级或分项分值。"""
     config = config or policy()
+    if config.get("basis") in REVIEWED_BASES:
+        from app.services.fund_rating_reviewed_quality import calculate
+
+        return calculate(metrics, config=config)
     weights = {k: decimal(v) for k, v in config["weights"].items()}
     if set(weights) != set(DIMENSIONS) or any(v <= 0 for v in weights.values()) or sum(weights.values()) != 100:
         raise ValueError("RATING_WEIGHTS_INVALID")

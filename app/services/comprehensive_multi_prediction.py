@@ -1,7 +1,7 @@
 """多周期综合审阅的冻结、导入及只读消费；没有统计模型或付费回退路径。"""
 
 import logging
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -25,15 +25,25 @@ logger = logging.getLogger(__name__)
 
 
 def review_calendar(data: dict, code: str, at: datetime):
-    """多周期复用已经逐原文验证的境内实际投向日历，不再被旧名称筛选误拦。
+    """复核资料包已证明的估值政策，并限定多周期可证实的日历覆盖。
 
     仅为完整披露股票均属境内、且有本基金估值条款的已核实政策增加衔接。
     再核对原文、全部证券、基准行情及项目日历摘要，不接受包内单个就绪标志。
-    黄金与境外产品仍走原有适配，不从这一入口泛化其未来估值日历。
+    港股通及人民币股票QDII仅使用境内外正常交易日完全一致的未来区间；
+    第一个休市差异、半日市或来源年度边界即停止覆盖，不推断差异日估值。
+    已逐项核实的多市场上市原油产品另查自身开放日条款；仍只延续日历一致区间。
+    黄金及其他上市基金组合继续使用原路径，不从股票条款泛化其他资产。
     """
+    from app.services.fund_listed_product_contract import POLICY as multi_listed_policy
     from app.services.prediction_features import read_fund_data
 
-    if (data.get("calendar_evidence") or {}).get("policy") != "CN_NAV_DISCLOSED_DOMESTIC_ASSETS_V1":
+    mode = (data.get("calendar_evidence") or {}).get("policy")
+    if mode not in {
+        "CN_NAV_DISCLOSED_DOMESTIC_ASSETS_V1",
+        "CN_NAV_HK_CONNECT_WINDOW_V1",
+        "QDII_CNY_VERIFIED_SESSION_V1",
+        multi_listed_policy,
+    }:
         return read_fund_data(code, at)["calendar"]
     from app.services.comprehensive_calendar import verified_domestic_window
     from app.services.prediction_contract import ValuationCalendar
@@ -44,21 +54,120 @@ def review_calendar(data: dict, code: str, at: datetime):
     documents = {document["id"]: document for document in data["documents"]}
     past, current = load_calendar(), load_current_calendar()
     calendar_hash = digest([past.content_hash, current.content_hash])
+    from app.services.qdii_valuation_contract import verified_qdii_window
+
+    verified = (
+        verified_qdii_window
+        if mode in {"QDII_CNY_VERIFIED_SESSION_V1", multi_listed_policy}
+        else verified_domestic_window
+    )
     if (
         data.get("fund_code") != code
         or len(profiles) != 1
         or not data.get("time_context", {}).get("baseline_complete")
         or data["window"]["calendar_version"] != calendar_hash
-        or not verified_domestic_window(profiles[0], data, documents, data["window"])
+        or not verified(profiles[0], data, documents, data["window"])
     ):
         raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "本基金实际投向或估值条款仍待核验")
+    sessions, end, source_hash = past.sessions + current.sessions, current.definition.coverage_end, calendar_hash
+    if mode != "CN_NAV_DISCLOSED_DOMESTIC_ASSETS_V1":
+        sessions, end, source_hash = _matched_future_sessions(data, documents, sessions, end, calendar_hash)
     return ValuationCalendar(
-        "CN_NAV_DISCLOSED_DOMESTIC_ASSETS_V1",
-        past.sessions + current.sessions,
+        mode,
+        sessions,
         past.definition.coverage_start,
-        current.definition.coverage_end,
-        calendar_hash,
+        end,
+        source_hash,
     )
+
+
+def _matched_future_sessions(data, documents, sessions, coverage_end, calendar_hash):
+    """仅延续官方日历一致的有限区间；基准日净值和本期休市参考已在上游复核。
+
+    未来中外交易日不同不等于基金必然不估值，本函数对此没有作出判断，直接
+    截断可用区间。因此不能将日历交集当作基金的永久估值政策，也不能跨年猜测。
+    """
+    import json
+    import re
+    from urllib.parse import urlparse
+
+    from app.services.fund_listed_product_contract import POLICY as multi_listed_policy
+    from app.services.fund_listed_product_contract import european_calendar
+    from app.services.fund_valuation_sessions import hk_closed_dates
+
+    evidence = data["calendar_evidence"]
+    own = documents.get(evidence.get("prospectus_ref"), {})
+    body = re.sub(r"\s+", "", own.get("body", ""))
+    listed = evidence["policy"] == multi_listed_policy
+    open_quote = evidence.get("joint_open_days_quote", "")
+    listed_clause = (
+        listed
+        and open_quote in own.get("body", "")
+        and "共同交易日" in open_quote
+        and all(market in open_quote for market in ("纽约", "伦敦", "东京"))
+        and "估值日为本基金的开放日" in body
+    )
+    if (
+        data["fund_code"] not in own.get("codes", [])
+        or own.get("kind") != "PROSPECTUS"
+        # 部分基金原文明确写“共同交易日”。下方本已只延续中外交易日完全一致
+        # 的区间，识别这个更严格的真实条款不意味着放开任一市场单独休市的日期。
+        or not (
+            listed_clause
+            or re.search(r"估值日为本基金相关的证券(?:[/／、]期货)?交易场所的(?:共同)?交易日", body)
+        )
+    ):
+        raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "本基金未来估值日条款仍待核验")
+    target = date.fromisoformat(data["window"]["target_nav_date"])
+    if evidence["policy"] == "CN_NAV_HK_CONNECT_WINDOW_V1":
+        markets, references = {"HK"}, {"HK": evidence.get("calendar_ref")}
+        if any(not c["code"].endswith((".HK", ".SH", ".SZ", ".BJ")) for c in data["companies"]):
+            raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "实际投向包含尚未核验的交易市场")
+    else:
+        markets = {
+            q.get("valuation_market")
+            for q in [*(c.get("quote", {}) for c in data["companies"]), *data["market"].values()]
+        } - {"CN"}
+        references = evidence.get("calendar_refs", {})
+    if not markets or not markets <= ({"HK", "US", "JP", "UK", "CH"} if listed else {"HK", "US", "JP"}):
+        raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "未来交易市场日历范围仍待核验")
+    calendars, hashes = [], [calendar_hash, own["body_hash"]]
+    end = min(coverage_end, date(target.year, 12, 31))
+    for market in sorted(markets):
+        source = documents[references[market]]
+        host = urlparse(source.get("url", "")).hostname
+        if listed and market in {"UK", "CH"}:
+            try:
+                closed, start, stop = european_calendar(market, source, target.year)
+            except (KeyError, TypeError, ValueError) as error:
+                raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "上市产品交易日历仍待核验") from error
+            if target < start or target > stop:
+                raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "当前目标超出已核实日历覆盖")
+            end = min(end, stop)
+        elif market == "HK":
+            # 完整港交所通告同时列出半日市，本接口保守视为未支持的日期。
+            closed = hk_closed_dates(source, target.year)
+            if not closed:
+                raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "香港年度日历尚未核验")
+        else:
+            parsed = json.loads(source["body"])
+            if (
+                source.get("kind") != "EXCHANGE_CALENDAR"
+                or parsed["year"] != target.year
+                or host != {"US": "www.nyse.com", "JP": "www.jpx.co.jp"}[market]
+            ):
+                raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "境外年度日历尚未核验")
+            closed = {date.fromisoformat(d) for d in parsed["closed_dates"] + parsed.get("early_close_dates", [])}
+        calendars.append(closed)
+        hashes.append(source["body_hash"])
+    domestic = set(sessions)
+    day = target
+    while day <= end:
+        if any((day in domestic) != (day.weekday() < 5 and day not in closed) for closed in calendars):
+            end = day - timedelta(days=1)
+            break
+        day += timedelta(days=1)
+    return tuple(d for d in sessions if d <= end), end, digest(hashes)
 
 
 def freeze_packet(directory: Path, code: str, horizon: str, materials_path=None) -> dict:

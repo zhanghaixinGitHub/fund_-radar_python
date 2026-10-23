@@ -44,7 +44,7 @@ class MarketNewsClient(MarketReportClient):
             expected = total if expected is None else expected
             if total != expected or value.get("PageIndex") != page or not 0 <= total <= 2000 or len(rows) > 100:
                 raise ValueError("MARKET_NEWS_CATALOG_CHANGED_OR_LIMIT")
-            self._archive(raw, ".json", CATALOG_URL, params)
+            catalog_source = self._archive(raw, ".json", CATALOG_URL, params)
             for row in rows:
                 article = row.get("ID", "")
                 published = str(row.get("PUBLISHDATEDesc", ""))[:10]
@@ -59,7 +59,9 @@ class MarketNewsClient(MarketReportClient):
                     raise ValueError("MARKET_NEWS_CATALOG_IDENTITY_DATE")
                 seen.add(article)
                 if published >= lower:
-                    entries.append({"id": article, "title": row["TITLE"], "published": published})
+                    entries.append(
+                        {"id": article, "title": row["TITLE"], "published": published, "catalog_source": catalog_source}
+                    )
             if len(seen) == total:
                 return entries
             if not rows:
@@ -71,7 +73,7 @@ class MarketNewsClient(MarketReportClient):
         # 正文可能在同一公告编号下修订，每日重新确认一次，旧版本仍由内容摘要保存。
         if (
             old
-            and old.get("entry") == entry
+            and all(old.get("entry", {}).get(key) == entry.get(key) for key in ("id", "title", "published"))
             and old.get("source")
             and now() - datetime.fromisoformat(old["source"]["received_at"]) < timedelta(hours=24)
         ):
@@ -83,17 +85,25 @@ class MarketNewsClient(MarketReportClient):
             raw = self._get(BODY_URL, params)
             source = self._archive(raw, ".json", BODY_URL, params)
             received = source["received_at"]
+        # 即便后续身份核验失败，也保存真实取得回执，避免只剩原始字节而丢失取得时间。
+        versioned_save(self.root / "body-receipts" / code / (entry["id"] + ".json"), source)
         value = json.loads(raw)
         data = value.get("data") or {}
         body = data.get("notice_content", "")
         if (
             value.get("success") != 1
             or data.get("art_code") != entry["id"]
-            or code not in {s.get("stock") for s in data.get("security", [])}
             or not isinstance(body, str)
             or len(body.strip()) < 50
         ):
             raise ValueError("MARKET_NEWS_BODY_UNVERIFIED")
+        identity = None
+        if code not in {s.get("stock") for s in data.get("security", [])}:
+            from app.services.fund_news_identity import checked_applicability
+
+            identity = checked_applicability(self.root, code, entry, source)
+            if identity is None:
+                raise ValueError("MARKET_NEWS_BODY_UNVERIFIED")
         return {
             "entry": entry,
             "source": source,
@@ -103,6 +113,7 @@ class MarketNewsClient(MarketReportClient):
             "publication_precision": "DAY",
             "requires_review": True,
             "candidate_material_event": bool(_EVENT.search(entry["title"])),
+            "applicability_review": identity,
         }
 
 
@@ -176,3 +187,50 @@ def synchronize(code: str, *, progress=lambda *args: None, client=None, root=Non
             return collect(code, progress=progress, client=client, root=root)
         finally:
             connection.execute(text("SELECT pg_advisory_unlock(hashtextextended(:key,0))"), {"key": key})
+
+
+def refresh_material_news_link(code: str, *, root=None) -> dict:
+    """仅衔接已核验公告，不重复持仓检查或公司采集，不设置综合就绪或评级。
+
+    初始资料及旧缺口继续由内容寻址历史保留。新的公告正文、适用凭据和候选事项
+    参与来源摘要，旧综合批准及旧事项用途回执不会静默沿用到新来源。
+    """
+    from app.services.direction_1d_protocol import digest
+
+    root = Path(root) if root is not None else directory().parent
+    news_root = root / "news"
+    state = read(news_root / "funds" / (code + ".json"))
+    if state.get("fund_code") != code or state.get("status") != "SUCCEEDED" or not state.get("catalog_complete"):
+        raise ValueError("MARKET_NEWS_LINK_INCOMPLETE")
+    manifest = {}
+    for article, item in state["items"].items():
+        raw = json.loads(read_source(news_root, item["source"]))
+        data = raw.get("data") or {}
+        if raw.get("success") != 1 or data.get("art_code") != article or data.get("notice_content") != item["body"]:
+            raise ValueError("MARKET_NEWS_LINK_SOURCE_MISMATCH")
+        identity = None
+        if code not in {s.get("stock") for s in data.get("security", [])}:
+            from app.services.fund_news_identity import checked_applicability
+
+            identity = checked_applicability(news_root, code, item["entry"], item["source"])
+            if identity is None:
+                raise ValueError("MARKET_NEWS_BODY_UNVERIFIED")
+        manifest[article] = {"source_hash": item["source"]["sha256"], "identity_hash": digest(identity)}
+    path = root / "materials" / (code + ".json")
+    material = read(path)
+    if material.get("fund_code") != code:
+        raise ValueError("MARKET_NEWS_LINK_FUND_MISMATCH")
+    basis = material.get("news_link_base_source_hash", material["source_hash"])
+    material.update(
+        news_link_base_source_hash=basis,
+        news_link_manifest=manifest,
+        news_link_checked_at=now().isoformat(),
+        source_hash=digest({"original_materials_source_hash": basis, "reviewed_news": manifest}),
+        candidate_events=state["candidate_events"],
+        prediction_ready=False,
+        rating_ready=False,
+    )
+    material["gaps"] = [g for g in material["gaps"] if g != "本次公告目录或原文尚未核验完整"]
+    material["status"] = "PARTIAL_SUCCESS" if material["gaps"] else "SUCCEEDED"
+    versioned_save(path, material)
+    return material

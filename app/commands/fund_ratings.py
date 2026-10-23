@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_engine
 from app.models.fund_rating import RatingBatch
-from app.repositories.fund_rating import publish, withdraw
+from app.repositories.fund_rating import publish, rollback_switch, withdraw
 from app.services.fund_rating import update_ratings
 from app.services.fund_rating_admin import activate, ingest, trial
 
@@ -28,6 +28,7 @@ def main():
             "collect-case",
             "prepare-public",
             "activate-public",
+            "publish-reviewed",
         ),
     )
     parser.add_argument("--as-of", type=date.fromisoformat)
@@ -44,10 +45,13 @@ def main():
             "PUBLIC_DISCLOSURE_DOMESTIC_INDEX_RECONCILED_V1",
             "PUBLIC_DISCLOSURE_GLOBAL_EQUITY_CNY_V1",
             "PUBLIC_DISCLOSURE_ETF_LINK_V1",
+            "PUBLIC_REVIEWED_ACTIVE_QUALITY_V2",
+            "PUBLIC_REVIEWED_PASSIVE_QUALITY_V2",
         ),
         help="市场公开资料必须显式指定已验证口径，不由基金代码猜测",
     )
     parser.add_argument("--batch")
+    parser.add_argument("--from-batch", help="跨口径回退时明确指定撤销的当前批次，防止误改其他类别")
     parser.add_argument("--reason")
     parser.add_argument("--source-root", type=Path, help="已经取得并核验的官方原件目录；准备命令不联网、不出级")
     args = parser.parse_args()
@@ -77,7 +81,13 @@ def main():
         result = update_ratings(args.fund_code, as_of=args.as_of, event_review=args.event_review)
     else:
         with Session(get_engine()) as session, session.begin():
-            if args.action == "prepare-public":
+            if args.action == "publish-reviewed":
+                if not args.file or not args.reason:
+                    parser.error("publish-reviewed 需要已归档研究清单 --file 和明确 --reason")
+                from app.services.fund_rating_reviewed_snapshot import publish_reviewed
+
+                result = publish_reviewed(session, json.loads(args.file.read_text(encoding="utf-8")), args.reason)
+            elif args.action == "prepare-public":
                 if args.fund_code not in {"002112", "016008"} or not args.as_of or not args.output:
                     parser.error("prepare-public 必须明确已支持基金代码、--as-of 和 --output；只准备原件，不出级")
                 from datetime import UTC, datetime
@@ -95,13 +105,20 @@ def main():
             elif args.action == "activate-public":
                 if not args.file or not args.reason:
                     parser.error("activate-public 需要真实 --file 和 --reason，不能省略验证")
-                from app.services.fund_rating_public_policy import BASIS, ETF_BASIS, INDEX_BASES, MARKET_BASES
+                from app.services.fund_rating_public_policy import (
+                    BASIS,
+                    ETF_BASIS,
+                    INDEX_BASES,
+                    MARKET_BASES,
+                    REVIEWED_BASES,
+                )
                 from app.services.fund_rating_public_validation import activate_public
 
                 if args.fund_code not in {None, "002112", "016008"} and args.basis not in {
                     ETF_BASIS,
                     *MARKET_BASES,
                     *INDEX_BASES,
+                    *REVIEWED_BASES,
                 }:
                     parser.error("市场资料需显式 --basis，并通过真实八维原件验证")
 
@@ -131,6 +148,8 @@ def main():
                     parser.error("撤回/回退必须明确 --batch 和 --reason")
                 if args.action == "withdraw":
                     withdraw(session, args.batch, args.reason)
+                elif args.from_batch:
+                    rollback_switch(session, args.from_batch, args.batch, args.reason)
                 else:
                     batch = session.get(RatingBatch, args.batch)
                     if not batch:

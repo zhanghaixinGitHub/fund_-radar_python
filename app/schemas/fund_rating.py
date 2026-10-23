@@ -1,4 +1,4 @@
-"""对外评级白名单；内部原始分数、权重和方法号不属于查询契约。"""
+"""对外评级白名单；展示正式分数，内部权重、方法号及研究点值不对外。"""
 
 from typing import Literal
 
@@ -22,11 +22,29 @@ class RatingMetric(PublicModel):
     period: str
 
 
+class RatingScoreRange(PublicModel):
+    """当前已发布的分数范围；不是概率或未来损失区间。"""
+    lower: str
+    upper: str
+
+
+class RatingCoverage(PublicModel):
+    """原八维权重的点分、有效区间和未评分覆盖，均为百分数。"""
+    pointWeight: str
+    intervalWeight: str
+    missingWeight: str
+    pointDimensions: int
+    intervalDimensions: int
+
+
 class RatingDimension(PublicModel):
     key: str
     name: str
     grade: str | None = None
     gradeLabel: str | None = None
+    # 同正式批次的0至100分，两位小数；暂无有效评分时为空，不补零。
+    score: str | None = None
+    scoreRange: RatingScoreRange | None = None
     explanation: str
     metrics: list[RatingMetric] = Field(default_factory=list)
     sources: list[RatingSource] = Field(default_factory=list)
@@ -34,13 +52,16 @@ class RatingDimension(PublicModel):
 
 class RatingSummary(PublicModel):
     fundCode: str
-    status: Literal["RATED", "NOT_RATED", "UNSUPPORTED", "STALE", "NOT_FOUND", "WITHDRAWN"]
+    status: Literal["RATED", "PARTIAL", "NOT_RATED", "UNSUPPORTED", "STALE", "NOT_FOUND", "WITHDRAWN"]
     grade: str | None = None
     gradeLabel: str | None = None
     asOfDate: str | None = None
     validUntil: str | None = None
     ratingRef: str | None = None
     message: str | None = None
+    scoreRange: RatingScoreRange | None = None
+    partialScore: str | None = None
+    scoreCoverage: RatingCoverage | None = None
 
 
 class RatingComparison(PublicModel):
@@ -64,6 +85,8 @@ class RatingDates(PublicModel):
 
 
 class RatingDetail(RatingSummary):
+    # 仅基金详情展示正式综合分；市场列表摘要保持现有契约。
+    score: str | None = None
     summary: str
     comparison: RatingComparison
     dimensions: list[RatingDimension]

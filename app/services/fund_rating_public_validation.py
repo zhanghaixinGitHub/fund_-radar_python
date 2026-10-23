@@ -219,6 +219,12 @@ def validate_category(members: list[dict]) -> dict:
     if not admitted or len(bases) != 1 or not bases <= PUBLIC_BASES:
         return {"basis": BASIS, "eligible": False, "validation_scope": "缺少完整八维公开原件"}
     basis = next(iter(bases))
+    from app.services.fund_rating_reviewed_quality import BASES as REVIEWED_BASES
+
+    if basis in REVIEWED_BASES:
+        from app.services.fund_rating_reviewed_quality import validate_category as validate_reviewed
+
+        return validate_reviewed(members)
     config = policy(basis)
     outcomes = {}
     for m in admitted:

@@ -111,6 +111,36 @@ def test_japan_closing_session_and_national_holiday_are_checked():
     assert not verified_qdii_window(p, m, d, w)
 
 
+def test_hong_kong_normal_session_uses_verified_auction_completion():
+    p, m, d, w = deepcopy(sample())
+    q = m["companies"][0]["quote"]
+    q.update(valuation_market="HK", currency="HKD", closed_at="2026-10-14T16:10:00+08:00")
+    d["fx"]["body"] = json.dumps(
+        {"rates": [{"currency": "HKD", "date": "2026-10-14", "cny_per_unit": "0.86"}]}
+    )
+    from app.services.fund_valuation_sessions import hk_closed_dates
+
+    dates = [f"{day} January 2026" for day in range(1, 16)]
+    d["calendar"].update(
+        url="https://www.hkex.com.hk/calendar",
+        body="Holiday Schedule for Year 2026 Saturdays, Sundays " + " ".join(dates),
+    )
+    assert len(hk_closed_dates(d["calendar"], 2026)) == 15
+    d["hours"] = {
+        "kind": "EXCHANGE_TRADING_HOURS",
+        "url": "https://www.hkex.com.hk/Global/Exchange/FAQ/Securities-Market/Trading/CAS",
+        "body": "Random Closing Period: 16:08 to 16:10",
+    }
+    m["calendar_evidence"].update(calendar_refs={"HK": "calendar"}, market_hours_ref="hours")
+    d["quotes"]["available_at"] = "2026-10-14T16:11:00+08:00"
+    assert verified_qdii_window(p, m, d, w)
+    d["quotes"]["available_at"] = "2026-10-14T16:05:00+08:00"
+    assert not verified_qdii_window(p, m, d, w)
+    d["quotes"]["available_at"] = "2026-10-14T16:11:00+08:00"
+    d["hours"]["url"] = "https://example.com/hours"
+    assert not verified_qdii_window(p, m, d, w)
+
+
 @pytest.mark.parametrize(
     "problem",
     [

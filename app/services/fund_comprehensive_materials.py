@@ -14,28 +14,15 @@ from app.services.fund_exposure_common import read
 from app.services.fund_information_contracts import time_context
 
 
-def prepare(now, code: str, materials_path=None) -> dict:
-    """冻结该基金的公开资料与真实数据库时钟；缺少投向/行情/公告时不生成方向。
+def checked_documents(now: datetime, code: str, material: dict) -> list[dict]:
+    """独立核验原文身份、摘要和可用时间，不判断日历、净值或预测是否就绪。
 
-    资料包使用既有 hash/payload 格式。正文、发布时间、关联投向及行情由本机采集
-    和聊天审阅整理，导入不接受浏览器上传；本函数复核身份、字节及日期边界。
+    资料交接与完整冻结共用同一来源检查，避免境外行情尚未闭市时，已经取得的
+    公告仍被误报缺失。返回副本，不向原件补写字段；通过本检查不代表可以预测。
     """
     now = now.astimezone(ZONE)
-    path = Path(materials_path or Path(get_settings().fund_material_directory) / "comprehensive" / f"{code}.json")
-    if not path.is_file():
-        raise ValueError("COMPREHENSIVE_MATERIALS_REQUIRED")
-    material = read(path)
     if material.get("fund_code") != code:
         raise ValueError("COMPREHENSIVE_FUND_MISMATCH")
-    w = window(now)
-    base = date.fromisoformat(w["base_nav_date"])
-    report = material["report"]
-    if (
-        date.fromisoformat(report["endDate"]) > base
-        or report["publishedDate"] > str(now.date())
-        or not 0 <= (base - date.fromisoformat(report["endDate"])).days <= 210
-    ):
-        raise ValueError("COMPREHENSIVE_EXPOSURE_STALE")
     documents = deepcopy(material["documents"])
     by_id = {d["id"]: d for d in documents}
     if len(by_id) != len(documents):
@@ -65,6 +52,33 @@ def prepare(now, code: str, materials_path=None) -> dict:
         document.setdefault("date", document["published_date"])
         document.setdefault("source_hash", document["body_hash"])
         document.setdefault("body_truncated", document.get("body_scope") != "FULL_TEXT")
+    return documents
+
+
+def prepare(now, code: str, materials_path=None) -> dict:
+    """冻结该基金的公开资料与真实数据库时钟；缺少投向/行情/公告时不生成方向。
+
+    资料包使用既有 hash/payload 格式。正文、发布时间、关联投向及行情由本机采集
+    和聊天审阅整理，导入不接受浏览器上传；本函数复核身份、字节及日期边界。
+    """
+    now = now.astimezone(ZONE)
+    path = Path(materials_path or Path(get_settings().fund_material_directory) / "comprehensive" / f"{code}.json")
+    if not path.is_file():
+        raise ValueError("COMPREHENSIVE_MATERIALS_REQUIRED")
+    material = read(path)
+    if material.get("fund_code") != code:
+        raise ValueError("COMPREHENSIVE_FUND_MISMATCH")
+    w = window(now)
+    base = date.fromisoformat(w["base_nav_date"])
+    report = material["report"]
+    if (
+        date.fromisoformat(report["endDate"]) > base
+        or report["publishedDate"] > str(now.date())
+        or not 0 <= (base - date.fromisoformat(report["endDate"])).days <= 210
+    ):
+        raise ValueError("COMPREHENSIVE_EXPOSURE_STALE")
+    documents = checked_documents(now, code, material)
+    by_id = {d["id"]: d for d in documents}
     facts = deepcopy(material["facts"])
     for fact in facts.values():
         categories = {
@@ -97,7 +111,7 @@ def prepare(now, code: str, materials_path=None) -> dict:
         from app.services.qdii_valuation_contract import verified_qdii_window
 
         if not verified_domestic_window(profile, material, by_id, w) and not verified_qdii_window(
-            profile, material, by_id, w
+            profile, material, by_id, w, as_of=now
         ):
             raise ValueError("COMPREHENSIVE_CALENDAR_POLICY_REQUIRED")
         if "联接" in profile["fund_name"] and len(material.get("exposure_chain", [])) < 2:
@@ -112,6 +126,9 @@ def prepare(now, code: str, materials_path=None) -> dict:
             and (row.get("ann_date") is None or row["ann_date"] <= now.date())
         ]
         observed = repo.observe(connection, code, source, rows, now) if rows else []
+    from app.services.fund_material_nav import supplement_nav
+
+    observed, nav_proof = supplement_nav(profile, material, by_id, observed, w)
     data = {
         "fund_code": code,
         "fund_name": profile["fund_name"],
@@ -126,8 +143,8 @@ def prepare(now, code: str, materials_path=None) -> dict:
         "documents": documents,
         "facts": facts,
         "nav": observed,
-        "latest_nav_date": str(rows[-1]["nav_date"]) if rows else None,
-        "source_manifest": material["source_manifest"],
+        "latest_nav_date": max((row["nav_date"] for row in observed), default=None),
+        "source_manifest": deepcopy(material["source_manifest"]),
         "inventory": deepcopy(material["inventory"]),
         "comprehensive_coverage": deepcopy(material["comprehensive_coverage"]),
         "analysis_policy_version": policy()["version"],
@@ -137,6 +154,15 @@ def prepare(now, code: str, materials_path=None) -> dict:
         "stock_market_applicable": material.get("stock_market_applicable", True),
         "calendar_evidence": deepcopy(material.get("calendar_evidence")),
     }
+    if nav_proof is not None:
+        data["nav_provenance"] = {
+            "mode": "PER_ROW_PROVENANCE",
+            "historical_provider_source_id": str(source["source_id"]),
+            "supplement": nav_proof,
+        }
+        data["source_manifest"]["nav_provenance"] = deepcopy(data["nav_provenance"])
+    if material.get("market_quote_exceptions") is not None:
+        data["market_quote_exceptions"] = deepcopy(material["market_quote_exceptions"])
     if len(data["inventory"]) != 16:
         raise ValueError("COMPREHENSIVE_INVENTORY_INVALID")
     data["time_context"] = time_context(data)

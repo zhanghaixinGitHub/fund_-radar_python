@@ -43,6 +43,101 @@ def rating_review_required(code: str):
     return bool(pending_events(read(path).get("candidate_events", []))) if path.exists() else False
 
 
+def pending_prediction_events(events: list[dict], workflow_source_hash: str, *, root=None):
+    """预测单独核对事项影响；不把正式评级重评当作所有预测的先决条件。
+
+    已有无评级影响或正式重评回执继续适用。仍待评级的事项，必须另有本基金、
+    同一正文版本、本轮来源及当前目标日的预测影响审阅，才不再阻断预测用途。
+    该回执不改变原评级待办，其他资料缺项仍由综合资料契约独立检查。
+    """
+    from app.services.direction_1d_protocol import window
+
+    pending = pending_events(events)
+    current = now()
+    target = window(current)["target_nav_date"]
+    root = Path(root) if root is not None else review_root().parent
+    result = []
+    for event in pending:
+        if not isinstance(event, dict):
+            result.append(event)
+            continue
+        path = root / "prediction-event-reviews" / event["fund_code"] / (event["source_hash"] + ".json")
+        receipt = read(path) if path.exists() else None
+        try:
+            valid = (
+                receipt is not None
+                and receipt.get("event") == event
+                and receipt.get("decision") == "REVIEWED_FOR_PREDICTION"
+                and receipt.get("workflow_source_hash") == workflow_source_hash
+                and receipt.get("target_nav_date") == target
+                and datetime.fromisoformat(receipt["reviewed_at"]).tzinfo is not None
+                and datetime.fromisoformat(receipt["reviewed_at"]) <= current
+                and len(receipt.get("note", "").strip()) >= 160
+                and bool(receipt.get("quotes"))
+            )
+        except (KeyError, TypeError, ValueError):
+            valid = False
+        if not valid:
+            result.append(event)
+    return result
+
+
+def record_prediction_event_review(
+    code: str, article: str, sha: str, note: str, quotes: list[str], *, root=None, news_root=None
+):
+    """保存当前窗口的人工预测影响审阅，原评级结论与待办保持各自真实状态。
+
+    仅本机命令可调用；基金身份、公告原始响应摘要、归档正文、真实取得时间、
+    本轮来源和连续原文引用均重新核验。不能以标题或批量生成的就绪标志代替。
+    """
+    from app.services.direction_1d_protocol import window
+    from app.services.fund_market_news import directory
+
+    validate_codes([code])
+    if (
+        not re.fullmatch(r"AN\d{18}", article)
+        or not re.fullmatch(r"[a-f0-9]{64}", sha)
+        or len(note.strip()) < 160
+        or not isinstance(quotes, list)
+        or not 1 <= len(quotes) <= 10
+        or any(not isinstance(quote, str) or len(quote.strip()) < 20 for quote in quotes)
+        or len(set(quotes)) != len(quotes)
+    ):
+        raise ValueError("MARKET_PREDICTION_EVENT_REVIEW_INVALID")
+    current = now()
+    root = Path(root) if root is not None else review_root().parent
+    material = read(root / "materials" / (code + ".json"))
+    state = read((news_root or directory()) / "funds" / (code + ".json"))
+    item = state["items"][article]
+    event = {"fund_code": code, "article_id": article, "source_hash": sha}
+    received = datetime.fromisoformat(item["received_at"])
+    if (
+        material.get("fund_code") != code
+        or event not in material.get("candidate_events", [])
+        or not re.fullmatch(r"[a-f0-9]{64}", material.get("source_hash", ""))
+        or item["source"]["sha256"] != sha
+        or not item.get("candidate_material_event")
+        or not item.get("body")
+        or any(quote not in item["body"] for quote in quotes)
+        or received.tzinfo is None
+        or received > current
+        or item["entry"]["published"] > current.date().isoformat()
+    ):
+        raise ValueError("MARKET_PREDICTION_EVENT_SOURCE_MISMATCH")
+    value = {
+        "event": event,
+        "decision": "REVIEWED_FOR_PREDICTION",
+        "workflow_source_hash": material["source_hash"],
+        "target_nav_date": window(current)["target_nav_date"],
+        "note": note.strip(),
+        "quotes": quotes,
+        "reviewed_at": current.isoformat(),
+        "rating_review_unchanged": True,
+    }
+    versioned_save(root / "prediction-event-reviews" / code / (sha + ".json"), value)
+    return value
+
+
 def record_event_review(
     code: str, article: str, sha: str, decision: str, note: str, *, root=None, news_root=None, rating_batch_id=None
 ):
@@ -146,7 +241,7 @@ def approve_comprehensive(code: str, note: str, *, root=None, materials_path=Non
         else registered_materials(code, root=root, at=now())
     )
     gaps = handoff["gaps"] if handoff is not None else material["gaps"]
-    if gaps or pending_events(material["candidate_events"]):
+    if gaps or pending_prediction_events(material["candidate_events"], material["source_hash"], root=root):
         raise ValueError("MARKET_COMPREHENSIVE_GAPS_REMAIN")
     packet = prepare(now(), code, handoff["materials_path"] if handoff else None)
     if input_gaps(packet):

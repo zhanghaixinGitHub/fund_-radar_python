@@ -78,6 +78,12 @@ EXPLANATIONS = {
 
 
 def _public(member: dict, computed: dict | None, config: dict, product_count: int, as_of: date) -> dict:
+    from app.services.fund_rating_reviewed_quality import BASES as REVIEWED_BASES
+
+    if member.get("bundle", {}).get("basis") in REVIEWED_BASES:
+        from app.services.fund_rating_reviewed_quality import public_evidence
+
+        return public_evidence(member, computed)
     from app.services.fund_rating_public_policy import PUBLIC_BASES
 
     if config.get("basis") in PUBLIC_BASES:
@@ -222,8 +228,20 @@ def update_ratings(
             with Session(engine.execution_options(isolation_level="REPEATABLE READ")) as session, session.begin():
                 session.execute(text("SET LOCAL statement_timeout='15s'"))
                 rows = catalog(session)
+                from app.repositories.fund_rating import reviewed_current_bases
+                from app.services.fund_rating_reviewed_snapshot import BASIS as SNAPSHOT_BASIS
+
+                pinned = reviewed_current_bases(session, [r["fund_code"] for r in rows])
+                snapshot_codes = sorted(code for code, basis in pinned.items() if basis == SNAPSHOT_BASIS)
+                # 这些产品已按用户批准的部分/区间契约发布。旧采集器没有新契约的完整
+                # 原始输入，不能把新结果降回旧公式；新期需要重新核验并追加资料清单。
+                rows = [r for r in rows if r["fund_code"] not in snapshot_codes]
                 groups = prepare(session, rows, as_of, frozen)
             if fund_code:
+                if fund_code in snapshot_codes:
+                    return {"target": 1, "rated": 0, "notRated": 0, "categories": [], "failures": [],
+                            "grades": {}, "reasons": {}, "alreadyCurrent": [],
+                            "deferred": [fund_code], "reviewedSnapshotUpdatesRequired": [fund_code]}
                 groups = {k: v for k, v in groups.items() if any(m["fund_code"] == fund_code for m in v)}
                 if not groups:
                     raise LookupError("RATING_FUND_NOT_FOUND")
@@ -239,7 +257,8 @@ def update_ratings(
                 "failures": [],
                 "grades": {},
                 "reasons": {},
-                "deferred": [],
+                "deferred": snapshot_codes if not fund_code else [],
+                "reviewedSnapshotUpdatesRequired": snapshot_codes if not fund_code else [],
                 "alreadyCurrent": [],
             }
             reasons, grades = Counter(), Counter()
@@ -523,7 +542,10 @@ def read(codes: list[str], *, rating_ref: str | None = None, detail: bool = Fals
                 valid = not batch.withdrawn and inputs_valid(session, batch, context=context)
                 method = methods.get(batch.methodology_id)
                 # 一批可能同时含缺资料行和已评级行；不能以本次查询遇到的第一行决定规则是否有效。
-                if any(r.status == "RATED" for r in complete_results):
+                if (
+                    any(r.status in {"RATED", "PARTIAL"} for r in complete_results)
+                    or batch.input_snapshot.get("method", {}).get("basis") == "PUBLIC_REVIEWED_QUALITY_SNAPSHOT_V3"
+                ):
                     allowed = (
                         {
                             r["category"]
@@ -552,7 +574,7 @@ def read(codes: list[str], *, rating_ref: str | None = None, detail: bool = Fals
             if row:
                 result, batch = row
                 item = summary(result, batch, invalid=not validity[batch.batch_id], now=now)
-                if not rating_ref and item["status"] == "RATED":
+                if not rating_ref and item["status"] in {"RATED", "PARTIAL"}:
                     from app.services.fund_market_review import rating_review_required
 
                     if rating_review_required(code):
@@ -576,6 +598,10 @@ def read(codes: list[str], *, rating_ref: str | None = None, detail: bool = Fals
                         )
                         item["strengths"], item["weaknesses"] = [], []
                         item["dimensions"] = [{**d, "grade": None, "gradeLabel": None} for d in item["dimensions"]]
+                    # 数字分与补充事实严格来自当前已核验批次；不重新计算、不发布研究分。
+                    from app.services.fund_rating_presentation import enrich_published_detail
+
+                    item = enrich_published_detail(item, result, batch.input_snapshot)
             else:
                 item = {"fundCode": code, "status": "NOT_RATED", "message": "暂未评级"}
                 if detail:

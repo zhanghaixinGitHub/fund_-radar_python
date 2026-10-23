@@ -93,12 +93,20 @@ class RatingResult(Base):
         CheckConstraint("score IS NULL OR (score >= 0 AND score <= 100)", name="ck_rating_score_range"),
         CheckConstraint(
             "(status = 'RATED' AND score IS NOT NULL AND grade IS NOT NULL) OR "
-            "(status IN ('NOT_RATED','UNSUPPORTED') AND score IS NULL AND grade IS NULL)",
+            "(status IN ('NOT_RATED','UNSUPPORTED','PARTIAL') AND score IS NULL AND grade IS NULL)",
             name="ck_rating_score_state",
         ),
         CheckConstraint(
             "grade IS NULL OR grade = CASE WHEN score < 50 THEN 'WEAK' WHEN score < 70 THEN 'AVERAGE' "
-            "WHEN score < 90 THEN 'GOOD' ELSE 'EXCELLENT' END",
+            "WHEN score < 90 THEN 'GOOD' ELSE 'EXCELLENT' END OR "
+            "(grade = 'AVERAGE' AND score >= 70 AND LEAST("
+            "(dimension_values->>'risk')::numeric,(dimension_values->>'efficiency')::numeric,"
+            "(dimension_values->>'management')::numeric,(dimension_values->>'liquidity')::numeric) < 50) OR "
+            "(grade = 'GOOD' AND score >= 90 AND LEAST("
+            "(dimension_values->>'risk')::numeric,(dimension_values->>'efficiency')::numeric,"
+            "(dimension_values->>'management')::numeric,(dimension_values->>'liquidity')::numeric) >= 50 AND LEAST("
+            "(dimension_values->>'risk')::numeric,(dimension_values->>'efficiency')::numeric,"
+            "(dimension_values->>'management')::numeric,(dimension_values->>'liquidity')::numeric) < 70)",
             name="ck_rating_score_grade",
         ),
         Index("ix_rating_result_code_batch", "fund_code", "batch_id"),
