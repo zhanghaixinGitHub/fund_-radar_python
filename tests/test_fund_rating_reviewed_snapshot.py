@@ -130,6 +130,35 @@ def test_expired_verification_and_future_original_rejected(dossier):
         validate_sources(bundle, datetime.now(UTC), root=dossier[1])
 
 
+@pytest.mark.parametrize("damage", ["hash", "missing", "outside"])
+def test_parallel_archives_rechecked_and_late_damage_rejected(dossier, damage):
+    """并行队列后部的原件也必须校验；上次核验成功不能掩盖本次篡改或丢失。"""
+    bundle = bundle_from(dossier)
+    root = dossier[1]
+    refs = []
+    for index in range(32):
+        content = json.dumps({"source": index}).encode()
+        relative = f"sources/extra-{index}.json"
+        (root / relative).write_bytes(content)
+        refs.append({"file": relative, "sha256": hashlib.sha256(content).hexdigest(), "kind": "json"})
+    bundle["extra_archives"] = refs
+    validate_sources(bundle, datetime.now(UTC), root=root)
+    last = root / refs[-1]["file"]
+    if damage == "hash":
+        last.write_text('{"source":"changed"}', encoding="utf-8")
+        expected = "ARCHIVE_HASH"
+    elif damage == "missing":
+        last.unlink()
+        expected = "ARCHIVE_PATH"
+    else:
+        outside = root / "outside.json"
+        outside.write_bytes(last.read_bytes())
+        refs[-1]["file"] = "outside.json"
+        expected = "ARCHIVE_PATH"
+    with pytest.raises(ValueError, match=expected):
+        validate_sources(bundle, datetime.now(UTC), root=root)
+
+
 def test_fixed_eight_weights_and_interval_cannot_become_point(dossier):
     bundle = bundle_from(dossier)
     bundle["reviewed_document"]["dimensions"]["execution"] = {"lower": "20", "upper": "80", "candidate": None}

@@ -8,6 +8,7 @@
 import hashlib
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, localcontext
@@ -119,8 +120,19 @@ def validate_sources(bundle: dict, frozen: datetime, *, root: Path | None = None
         raise ValueError("RATING_SNAPSHOT_LEGAL_IDENTITY_MISMATCH")
     if bundle.get("money_input_archive") and _read(bundle["money_input_archive"], root) != bundle.get("money_inputs"):
         raise ValueError("RATING_SNAPSHOT_MONEY_INPUT_HASH")
-    for ref in bundle.get("extra_archives", []):
-        _read(ref, root)
+    extra_archives = bundle.get("extra_archives", [])
+    if extra_archives:
+        # 持续补证后可能有上千份归档。每次请求仍逐文件检查路径、大小、原字节哈希
+        # 及 JSON 格式，仅把相互独立的本地读取并行，避免页面超过服务间读取时限。
+        # 不跨请求缓存核验结论；原件在两次请求之间被改动或删除时仍立即拒绝。
+        def verify_archive(ref: dict) -> None:
+            _read(ref, root)
+
+        with ThreadPoolExecutor(max_workers=min(8, len(extra_archives))) as executor:
+            # 按输入顺序取完结果，确保任一工作线程的校验异常都向调用方抛出。
+            # 工作线程不返回解析正文，避免把全部大份 JSON 同时留在结果列表中。
+            for _ in executor.map(verify_archive, extra_archives):
+                pass
     verified = datetime.fromisoformat(bundle["verified_at"])
     if verified.tzinfo is None or verified > frozen or verified + timedelta(days=31) <= frozen:
         raise ValueError("RATING_SNAPSHOT_VERIFICATION_EXPIRED")

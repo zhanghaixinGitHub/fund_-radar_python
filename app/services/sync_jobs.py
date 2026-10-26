@@ -61,6 +61,8 @@ FUND_MATERIALS_JOB_TYPE = "FUND_MATERIALS"
 FUND_NEWS_JOB_TYPE = "FUND_NEWS"
 FUND_INPUTS_JOB_TYPE = "FUND_INPUTS"
 FUND_RATINGS_JOB_TYPE = "FUND_RATINGS"
+PREDICTION_OUTCOME_JOB_TYPE = "PREDICTION_OUTCOMES"
+FUND_MANAGERS_JOB_TYPE = "FUND_MANAGERS"
 _ALL_JOB_STAGES = (
     # SPX有早上08:00的观测边界，先取这一小份数据，避免被较长的全市场同步拖到截止后。
     (SPX_MANUAL_JOB_TYPE, "标普500"),
@@ -78,6 +80,10 @@ _ALL_JOB_STAGES = (
     (FUND_INPUTS_JOB_TYPE, "基金分析资料核验与留存"),
     (FUND_RATINGS_JOB_TYPE, "基金八维评级检查与更新"),
     (DIRECTION_1D_JOB_TYPE, "关注基金一日综合预测"),
+    # 旧预测核对不依赖新分析是否可生成；纯资料批次也必须执行，补充已到期的真实结果。
+    (PREDICTION_OUTCOME_JOB_TYPE, "历史预测到期核对"),
+    # 公共经理更新放在原阶段之后，不改变已有分析依赖，也不扩大市场范围。
+    (FUND_MANAGERS_JOB_TYPE, "基金经理资料更新"),
 )
 _ACTIVE_STATUSES = frozenset({"QUEUED", "RUNNING"})
 _SYNC_TYPES_BY_JOB_TYPE = {
@@ -149,6 +155,8 @@ class LocalSyncJobManager:
         input_synchronizer=None,
         rating_updater=None,
         market_workflow_factory=None,
+        outcome_verifier=None,
+        manager_synchronizer=None,
     ) -> None:
         self._service_factory = service_factory
         self._feature_service_factory = feature_service_factory
@@ -162,6 +170,8 @@ class LocalSyncJobManager:
         self._input_synchronizer = input_synchronizer
         self._rating_updater = rating_updater
         self._market_workflow_factory = market_workflow_factory
+        self._manager_synchronizer = manager_synchronizer
+        self._outcome_verifier = outcome_verifier
         self._state_path = state_path
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fund-sync-job")
         # 原回执核对按查询请求排队，不设定时循环；独立线程避免慢响应阻塞同步状态接口。
@@ -298,6 +308,58 @@ class LocalSyncJobManager:
         """创建完整资料任务，与其他同步共用互斥保护。"""
         return self._start_job(MARKET_DETAIL_JOB_TYPE, self._run_market_details)
 
+    def start_fund_managers(self, manager_ids: tuple[UUID, ...], request_id: str) -> SyncJobSnapshot:
+        """明确人员范围，重复请求返回同任务；状态和幂等编号随原任务树持久化。"""
+        with self._lock:
+            for job in self._jobs.values():
+                if job.job_type == "FUND_MANAGERS" and (job.result_summary or {}).get("requestId") == request_id:
+                    if set((job.result_summary or {}).get("managerIds", [])) != {str(value) for value in manager_ids}:
+                        raise ValueError("该请求编号已用于其他经理范围，请先核对原任务。")
+                    return job
+            self._require_idle()
+            snapshot = replace(
+                self._new_job("FUND_MANAGERS"),
+                result_summary={"requestId": request_id, "managerIds": [str(value) for value in manager_ids]},
+            )
+            self._jobs[snapshot.job_id] = snapshot
+            self._latest_job_ids[snapshot.job_type] = snapshot.job_id
+            self._active_job_id = snapshot.job_id
+            self._persist()
+            self._executor.submit(self._run_fund_managers, snapshot.job_id, manager_ids, request_id)
+            return snapshot
+
+    def _run_fund_managers(self, job_id: UUID, manager_ids: tuple[UUID, ...], request_id: str):
+        """与原资料任务共用单执行器；单经理失败保留成果，摘要不含来源正文。"""
+        from app.services.fund_manager_directory_sync import synchronize
+        self._replace_job(job_id, status="RUNNING", started_at=datetime.now(UTC))
+        try:
+            result = (self._manager_synchronizer or synchronize)(
+                manager_ids, fetch=True,
+                progress=lambda index, total, code, message: self._replace_job(
+                    job_id, progress_current=index, progress_total=total,
+                    current_fund_code=code, progress_message=message,
+                ),
+            )
+            self._replace_job(
+                job_id, status=result["status"], finished_at=datetime.now(UTC),
+                fetched_count=result.get("fetchedRows", 0),
+                created_count=result.get("created", 0),
+                updated_count=result.get("updated", 0),
+                skipped_count=result.get("skipped", 0),
+                sync_run_id=UUID(result["syncRunId"]) if result.get("syncRunId") else None,
+                result_summary={**result, "requestId": request_id, "managerIds": [str(value) for value in manager_ids]},
+                progress_message="经理资料核对结束",
+            )
+        except Exception:
+            logger.exception("sync_jobs._run_fund_managers >>> manager sync failed, job_id=%s", job_id)
+            self._replace_job(job_id, status="FAILED", finished_at=datetime.now(UTC),
+                              error_code="MANAGER_SYNC_FAILED", error_message="经理资料更新未完成，请稍后重试。")
+        finally:
+            with self._lock:
+                if self._active_job_id == job_id:
+                    self._active_job_id = None
+                self._persist()
+
     def start_stock_feature_snapshots(self) -> SyncJobSnapshot:
         """创建已落库净值的独立特征快照任务。"""
         return self._start_job(STOCK_FEATURE_SNAPSHOT_JOB_TYPE, self._run_stock_feature_snapshots)
@@ -402,6 +464,8 @@ class LocalSyncJobManager:
                 child, lambda progress: workflow.ratings(progress, updater=self._rating_updater)
             ),
             self._run_direction_1d_predictions,
+            self._run_prediction_outcomes,
+            lambda child_id: self._run_fund_managers(child_id, (), "batch:" + str(job_id)),
         )
         try:
             workflow = (self._market_workflow_factory or MarketSyncWorkflow)(owner_user_id=options.get("owner_user_id"))
@@ -414,7 +478,10 @@ class LocalSyncJobManager:
                     prior_failed = any(
                         self._required_job(c).status not in {"SUCCEEDED", "PARTIAL_SUCCESS"} for c in child_ids[:5]
                     )
-                    if index >= 8 and (options.get("materials_only") or prior_failed):
+                    child_type = self._required_job(child_id).job_type
+                    if child_type in {FUND_RATINGS_JOB_TYPE, DIRECTION_1D_JOB_TYPE} and (
+                        options.get("materials_only") or prior_failed
+                    ):
                         self._skip_generation(
                             child_id,
                             "仅更新资料，分析等待资料核验"
@@ -422,7 +489,7 @@ class LocalSyncJobManager:
                             else "基础资料更新未完成，本次暂不生成分析",
                             waiting=prior_failed,
                         )
-                    elif index == 9:
+                    elif child_type == DIRECTION_1D_JOB_TYPE:
                         codes = workflow.prediction_codes()
                         if not options.get("owner_user_id") or not codes:
                             self._skip_generation(
@@ -453,11 +520,18 @@ class LocalSyncJobManager:
             success_count = len(children) - len(failed_names)
             result_status = "SUCCEEDED" if not failed_names else "PARTIAL_SUCCESS" if success_count else "FAILED"
             message = f"一键同步已结束：成功 {success_count} 项，未完成 {len(failed_names)} 项"
+            outcome_job = next(child for child in children if child.job_type == PREDICTION_OUTCOME_JOB_TYPE)
             self._replace_job(
                 job_id,
                 status=result_status,
                 progress_message=message,
                 current_fund_code=None,
+                result_summary={
+                    "predictionOutcomes": {
+                        "jobId": str(outcome_job.job_id), "status": outcome_job.status,
+                        "summary": outcome_job.result_summary,
+                    }
+                },
                 error_code="SYNC_ALL_INCOMPLETE" if failed_names else None,
                 error_message=(
                     "未完成：" + "、".join(failed_names) + "。请检查结果后重试；分析资料留存可重新执行一键同步。"
@@ -484,6 +558,38 @@ class LocalSyncJobManager:
                 with self._lock:
                     if self._active_job_id == job_id:
                         self._active_job_id = None
+
+    def _run_prediction_outcomes(self, job_id: UUID) -> None:
+        """核对已保存的多周期预测；使用现有净值、分红和日历，不生成新判断。"""
+        from app.services.prediction_generation import verify_all_outcomes
+
+        self._replace_job(job_id, status="RUNNING", started_at=datetime.now(UTC),
+                          progress_message="正在核对已到期的历史预测")
+        try:
+            result = (self._outcome_verifier or verify_all_outcomes)(
+                progress_reporter=lambda c, t, f, m: self._update_progress(job_id, c, t, f, m)
+            )
+            incomplete = result["pending"] + result["failed"] + result["remaining"]
+            self._replace_job(
+                job_id, status="PARTIAL_SUCCESS" if incomplete else "SUCCEEDED",
+                progress_current=result["checked"], progress_total=result["total"], current_fund_code=None,
+                fetched_count=result["checked"], created_count=result["created"],
+                updated_count=result["completed"] - result["created"], skipped_count=incomplete,
+                result_summary=result, finished_at=datetime.now(UTC),
+                progress_message=(f"已核对 {result['checked']} 条历史预测，结果齐备 {result['completed']} 条，"
+                                  f"新增结果 {result['created']} 条，等待资料 {result['pending']} 条，"
+                                  f"异常 {result['failed']} 条，未核对 {result['remaining']} 条"),
+                error_code="PREDICTION_OUTCOMES_INCOMPLETE" if incomplete else None,
+                error_message="部分已到期预测仍缺少资料或核对未完成，已保存的结果保留。" if incomplete else None,
+            )
+            logger.info("sync_jobs._run_prediction_outcomes >>> job_id=%s result=%s", job_id, result)
+        except Exception:
+            logger.exception("sync_jobs._run_prediction_outcomes >>> failed, job_id=%s", job_id)
+            self._fail_job(job_id, "PREDICTION_OUTCOMES_FAILED", "历史预测核对未完成，已有结果保留。")
+        finally:
+            with self._lock:
+                if self._active_job_id == job_id:
+                    self._active_job_id = None
 
     def _skip_generation(self, job_id, message, *, waiting):
         """明确保留等待原因，不把未生成计为新增评级/预测。"""

@@ -386,6 +386,11 @@ class SourceSyncRun(Base):
     # 同步任务实际结束的时间；尚未结束时可以为空。
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # 经理等独立资料任务的冻结范围；旧任务为空，不能由个人关注列表反推公共来源范围。
+    scope_snapshot: Mapped[dict | None] = mapped_column(JSONB, comment="独立资料任务的冻结目标范围，历史任务可空")
+    # 逐阶段完成、失败和覆盖摘要；不保存凭据或来源原始正文。
+    result_summary: Mapped[dict | None] = mapped_column(JSONB, comment="资料任务结果与真实覆盖，历史任务可空")
+
 
 class SourceSyncCursor(Base):
     """一个来源、数据域和实体的最后成功水位与失败摘要。"""

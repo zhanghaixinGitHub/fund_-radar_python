@@ -635,21 +635,30 @@ def resolve_pending_targets(limit=100):
     return {"checked": len(pending), "resolved": resolved_count}
 
 
-def verify_outcomes(limit=100):
-    """到期标签追加版本；尚未有未来官方日历时等待，绝不把名义日期伪装成已解析日期。"""
+def verify_outcomes(limit=100, *, checked_before=None):
+    """追加到期答案；批次水位使分页只检查本轮尚未处理的原预测，缺资料仍保留等待。"""
     from app.services.prediction_contract import reinvested_series
 
+    now = datetime.now(UTC)
+    # 每日00:30的任务仍处于UTC前一天；到期判断必须使用北京时间，否则会漏掉刚结束的估值日。
+    due_before = (checked_before or now).astimezone(ZoneInfo("Asia/Shanghai")).date()
     with get_engine().connect() as c:
         records = rows(
             c,
             """SELECT prediction_id,payload FROM fund_prediction_record
-            WHERE mode='LIVE' AND coalesce(payload->>'endDate',payload->>'nominalEndDate')<CAST(CURRENT_DATE AS text)
+            WHERE mode='LIVE' AND coalesce(payload->>'endDate',payload->>'nominalEndDate')<:due_before
+            AND (CAST(:checked_before AS timestamptz) IS NULL OR
+              (generated_at<=:checked_before AND NOT EXISTS
+                (SELECT 1 FROM prediction_check_state s WHERE s.prediction_id=fund_prediction_record.prediction_id
+                 AND s.last_attempt_at>=:checked_before)))
             ORDER BY (SELECT s.last_attempt_at FROM prediction_check_state s
                       WHERE s.prediction_id=fund_prediction_record.prediction_id)
                       ASC NULLS FIRST,generated_at LIMIT :limit""",
             limit=min(limit, 500),
+            due_before=str(due_before),
+            checked_before=checked_before,
         )
-    now, completed = datetime.now(UTC), 0
+    completed = created = pending = failed = 0
     for record in records:
         prediction = record["payload"]
         check_status, check_payload = "PENDING_DATA", {"summary": "到期净值或分红核验水位尚未齐备"}
@@ -683,11 +692,11 @@ def verify_outcomes(limit=100):
                         {"id": record["prediction_id"], "hash": fingerprint(resolved), "payload": encode(resolved)},
                     )
                 end = resolved["endDate"]
-            if end >= str(now.date()):
+            if end >= str(due_before):
                 continue
             end_day = date.fromisoformat(end)
             dates = [d for d in data["calendar"].sessions if start_day <= d <= end_day]
-            if data["dividendWatermark"].date() < end_day:
+            if data["dividendWatermark"].astimezone(ZoneInfo("Asia/Shanghai")).date() < end_day:
                 continue
             nav = {r["nav_date"]: r["unit_nav"] for r in data["navs"] if r["updated_at"] <= now}
             events = cash_events(data, dates, now)
@@ -712,7 +721,7 @@ def verify_outcomes(limit=100):
             # 核验时刻不参与内容身份；净值或分红修订才追加新版本，重复检查不增加独立成绩。
             identity = {k: v for k, v in outcome.items() if k != "checkedAt"}
             with get_engine().begin() as c:
-                c.execute(
+                inserted = c.execute(
                     text("""INSERT INTO prediction_outcome(outcome_id,prediction_id,content_hash,payload)
                   VALUES(:id,:prediction,:hash,CAST(:payload AS jsonb)) ON CONFLICT DO NOTHING"""),
                     {
@@ -721,7 +730,8 @@ def verify_outcomes(limit=100):
                         "hash": fingerprint(identity),
                         "payload": encode(outcome),
                     },
-                )
+                ).rowcount
+            created += inserted
             completed += 1
             check_status, check_payload = "SUCCEEDED", {"checkedAt": now.isoformat(), "endDate": end}
         except PredictionFailure as error:
@@ -738,4 +748,44 @@ def verify_outcomes(limit=100):
             )
         finally:
             record_check(record["prediction_id"], check_status, check_payload)
-    return {"checked": len(records), "completed": completed}
+            pending += int(check_status == "PENDING_DATA")
+            failed += int(check_status == "FAILED")
+    return {"checked": len(records), "completed": completed, "created": created, "pending": pending, "failed": failed}
+
+
+def verify_all_outcomes(*, progress_reporter, max_batches=20):
+    """一键同步专用核对：分页覆盖已到期原预测，不生成预测、不采集外部资料。
+
+    同一轮每条原预测最多处理一次；缺净值、分红或日历时留待下轮，不能因等待项反复重试。
+    每页最多500条、每轮最多20页；超出预算时明确记录剩余数量，不把部分检查记为全部成功。
+    """
+    with get_engine().connect() as c:
+        started = c.execute(text("SELECT clock_timestamp()")).scalar()
+    due_before = str(started.astimezone(ZoneInfo("Asia/Shanghai")).date())
+
+    def remaining():
+        with get_engine().connect() as c:
+            return c.execute(
+                text("""SELECT count(*) FROM fund_prediction_record p WHERE mode='LIVE'
+                AND coalesce(payload->>'endDate',payload->>'nominalEndDate')<:due_before
+                AND generated_at<=:started AND NOT EXISTS
+                  (SELECT 1 FROM prediction_check_state s WHERE s.prediction_id=p.prediction_id
+                   AND s.last_attempt_at>=:started)"""),
+                {"due_before": due_before, "started": started},
+            ).scalar_one()
+
+    total = remaining()
+    summary = dict.fromkeys(("checked", "completed", "created", "pending", "failed"), 0)
+    progress_reporter(0, total, None, "正在核对已到期的历史预测")
+    batches = 0
+    for _ in range(max_batches):
+        if summary["checked"] >= total:
+            break
+        result = verify_outcomes(limit=500, checked_before=started)
+        batches += 1
+        for key in summary:
+            summary[key] += result[key]
+        progress_reporter(summary["checked"], total, None, "已核对历史预测，缺少资料的记录保留等待")
+        if result["checked"] < 500:
+            break
+    return {**summary, "total": total, "remaining": remaining(), "batches": batches, "dueBefore": due_before}

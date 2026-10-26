@@ -26,6 +26,8 @@ STAGES = (
     "FUND_INPUTS",
     "FUND_RATINGS",
     "DIRECTION_1D_PREDICTIONS",
+    "PREDICTION_OUTCOMES",
+    "FUND_MANAGERS",
 )
 
 
@@ -130,6 +132,16 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
         run("FUND_RATINGS", progress_reporter)
         return {"target": 2, "rated": 0, "notRated": 2, "failures": []}
 
+    def outcome_verify(*, progress_reporter):
+        run("PREDICTION_OUTCOMES", progress_reporter)
+        return {"total": 2, "checked": 2, "completed": 2, "created": 1,
+                "pending": 0, "failed": 0, "remaining": 0, "batches": 1, "dueBefore": "2026-09-24"}
+
+    def manager_sync(manager_ids, *, fetch, progress):
+        assert fetch and not manager_ids
+        run("FUND_MANAGERS", progress)
+        return {"status": "SUCCEEDED", "managerCount": 2, "completed": 2, "failed": 0}
+
     class Workflow:
         ready = False
 
@@ -170,17 +182,20 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
         input_synchronizer=input_sync,
         rating_updater=rating_update,
         market_workflow_factory=Workflow,
+        outcome_verifier=outcome_verify,
+        manager_synchronizer=manager_sync,
     )
     return manager
 
 
 def wait_finished(manager, job_id):
-    deadline = monotonic() + 3
+    # 每阶段真实写回状态，Windows并发检查保留磁盘I/O预算；不等待真实外部来源。
+    deadline = monotonic() + 10
     while monotonic() < deadline:
         job = manager.get_job(job_id)
         if job.status not in {"QUEUED", "RUNNING"}:
             # 等后台函数完成 finally 的资源释放，而非仅观察状态已经变成终态。
-            manager._executor.submit(lambda: None).result(timeout=3)
+            manager._executor.submit(lambda: None).result(timeout=10)
             return job
         sleep(0.005)
     pytest.fail("batch did not finish")
@@ -195,7 +210,7 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
         result = wait_finished(manager, started.job_id)
         blocked = set()
         if set(failures) & set(STAGES[:5]):
-            blocked.update(STAGES[8:])
+            blocked.update({"FUND_RATINGS", "DIRECTION_1D_PREDICTIONS"})
         if set(failures) & {"FUND_NEWS", "FUND_MATERIALS", "FUND_INPUTS"}:
             blocked.add("DIRECTION_1D_PREDICTIONS")
         assert calls == [s for s in STAGES if s not in blocked]
@@ -222,6 +237,8 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
                 "FUND_NEWS",
                 "FUND_INPUTS",
                 "FUND_RATINGS",
+                "PREDICTION_OUTCOMES",
+                "FUND_MANAGERS",
             }:
                 assert child.sync_run_id is not None
         next_batch = manager.start_all(owner_user_id=UUID(int=1))
@@ -229,6 +246,76 @@ def test_all_stages_are_attempted_once_and_result_preserves_failures(failures):
         wait_finished(manager, next_batch.job_id)
     finally:
         manager.close()
+
+
+@pytest.mark.parametrize("failures", [(), ("MARKET_NAV_INCREMENTAL",)])
+def test_materials_only_always_checks_old_outcomes_even_when_new_generation_is_skipped(failures):
+    """00:30自动任务使用的纯资料请求必须真正调用核对，而不是把它当作新预测跳过。"""
+    calls = []
+    manager = make_manager(calls, failures)
+    try:
+        result = wait_finished(manager, manager.start_all(materials_only=True).job_id)
+        assert calls == [s for s in STAGES if s not in {"FUND_RATINGS", "DIRECTION_1D_PREDICTIONS"}]
+        outcome = manager.get_latest_job("PREDICTION_OUTCOMES")
+        assert outcome.status == "SUCCEEDED"
+        assert outcome.result_summary["created"] == 1
+        assert result.result_summary["predictionOutcomes"] == {
+            "jobId": str(outcome.job_id), "status": "SUCCEEDED", "summary": outcome.result_summary,
+        }
+        assert manager.get_latest_job("DIRECTION_1D_PREDICTIONS").result_summary["generated"] == 0
+    finally:
+        manager.close()
+
+
+def test_outcome_gaps_are_visible_in_parent_and_survive_restart(tmp_path):
+    calls = []
+    manager = make_manager(calls)
+    manager._state_path = tmp_path / "jobs.json"
+    manager._outcome_verifier = lambda **kw: {
+        "total": 5, "checked": 4, "completed": 2, "created": 1,
+        "pending": 1, "failed": 1, "remaining": 1,
+    }
+    try:
+        result = wait_finished(manager, manager.start_all(materials_only=True).job_id)
+        assert result.status == "PARTIAL_SUCCESS"
+        assert "历史预测到期核对" in result.error_message
+        assert result.result_summary["predictionOutcomes"]["status"] == "PARTIAL_SUCCESS"
+    finally:
+        manager.close()
+    restored = LocalSyncJobManager(state_path=tmp_path / "jobs.json")
+    try:
+        saved = restored.get_latest_job("PREDICTION_OUTCOMES")
+        assert saved.result_summary == {"total": 5, "checked": 4, "completed": 2, "created": 1,
+                                        "pending": 1, "failed": 1, "remaining": 1}
+        assert restored.get_latest_job(MARKET_ALL_JOB_TYPE).result_summary == result.result_summary
+    finally:
+        restored.close()
+
+
+def test_materials_only_http_request_returns_actual_outcome_receipt(monkeypatch):
+    """使用夜间任务相同的HTTP正文验证新增步骤和父回执，其他资料步骤使用测试替身。"""
+    from app.main import create_application
+
+    calls = []
+    manager = make_manager(calls)
+    monkeypatch.setenv("AI_SERVICE_TOKEN", "outcome-sync-test-token")
+    get_settings.cache_clear()
+    monkeypatch.setattr("app.api.routes.funds.get_sync_job_manager", lambda: manager)
+    try:
+        with TestClient(create_application()) as client:
+            headers = {"X-Service-Token": "outcome-sync-test-token"}
+            response = client.post("/internal/v1/funds/sync-jobs/all", json={"materialsOnly": True}, headers=headers)
+            assert response.status_code == 202
+            job_id = UUID(response.json()["job_id"])
+            wait_finished(manager, job_id)
+            saved = client.get(f"/internal/v1/funds/sync-jobs/{job_id}", headers=headers).json()
+            assert saved["result_summary"]["predictionOutcomes"]["summary"]["checked"] == 2
+            assert saved["result_summary"]["predictionOutcomes"]["status"] == "SUCCEEDED"
+            assert "PREDICTION_OUTCOMES" in calls
+            assert "DIRECTION_1D_PREDICTIONS" not in calls
+    finally:
+        manager.close()
+        get_settings.cache_clear()
 
 
 @pytest.mark.parametrize(
@@ -250,7 +337,9 @@ def test_spx_batch_preserves_actual_attempt_and_timing_result(performed, state, 
     try:
         result = wait_finished(manager, manager.start_all(owner_user_id=UUID(int=1)).job_id)
         assert manager.get_latest_job("SPX_MANUAL").status == expected
-        assert calls == list(STAGES[1:] if expected == "SUCCEEDED" else STAGES[1:8])
+        assert calls == list(
+            STAGES[1:] if expected == "SUCCEEDED" else (*STAGES[1:8], "PREDICTION_OUTCOMES", "FUND_MANAGERS")
+        )
         assert result.progress_current == result.progress_total == len(STAGES)
         assert result.status == ("SUCCEEDED" if expected == "SUCCEEDED" else "PARTIAL_SUCCESS")
     finally:
@@ -335,7 +424,7 @@ def test_running_single_job_rejects_batch_and_cleanup_failure_does_not_drop_late
         result = wait_finished(manager, manager.start_all(owner_user_id=UUID(int=1)).job_id)
         assert result.status == "PARTIAL_SUCCESS"
         assert manager.get_latest_job("MARKET_FREE_DATA_COMPLETION").error_code == "SYNC_STAGE_FAILED"
-        assert calls == list(STAGES[:8])
+        assert calls == [*STAGES[:8], "PREDICTION_OUTCOMES", "FUND_MANAGERS"]
     finally:
         manager.close()
 
@@ -355,7 +444,7 @@ def test_input_gaps_are_preserved_in_batch_result_and_after_restart(tmp_path, in
     manager._input_synchronizer = incomplete
     try:
         result = wait_finished(manager, manager.start_all(owner_user_id=UUID(int=1)).job_id)
-        assert calls == list(STAGES[:-1])
+        assert calls == [s for s in STAGES if s != "DIRECTION_1D_PREDICTIONS"]
         assert result.status == "PARTIAL_SUCCESS"
         assert "基金分析资料" in result.error_message
         assert "补充" in manager.get_latest_job("FUND_INPUTS").error_message

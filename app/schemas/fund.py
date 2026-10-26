@@ -66,6 +66,32 @@ class InternalFundDetail(InternalFundSummary):
     market: str | None = None
 
 
+class InternalFundManagerPerformance(BaseModel):
+    """本基金具体任期的展示回报；收益率为小数比例，非个人收益或经理贡献评分。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    status: str
+    # 例如0.1234表示12.34%；未知必须为空，不能填0。日期为实际参与计算的净值日期。
+    return_rate: Decimal | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    reason: str | None = None
+    includes_co_management: bool = False
+    calculation_basis: str = "CASH_REINVESTED_NAV_V1"
+
+
+class InternalFundManagerPeriod(BaseModel):
+    """管理团队不变的一段自然日期及该阶段基金回报，与个人完整任期回报独立。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    begin_date: date
+    end_date: date | None = None
+    manager_names: tuple[str, ...]
+    performance: InternalFundManagerPerformance
+
+
 class InternalFundManager(BaseModel):
     """关注后可展示的基金经理任职资料，不返回简历等非必要个人信息。"""
 
@@ -77,6 +103,7 @@ class InternalFundManager(BaseModel):
     end_date: date | None = None
     education: str | None = None
     data_source: str
+    tenure_performance: InternalFundManagerPerformance | None = None
 
 
 class InternalFundShareSnapshot(BaseModel):
@@ -124,6 +151,7 @@ class InternalFundWatchlistDetail(BaseModel):
     latest_share: InternalFundShareSnapshot | None = None
     dividends_status: str
     dividends: tuple[InternalFundDividend, ...]
+    manager_periods: tuple[InternalFundManagerPeriod, ...] = ()
 
 
 class InternalFundNavPoint(BaseModel):

@@ -173,6 +173,7 @@ class TushareFundClient:
         catalog_max_rows_per_query: int,
         nav_max_rows_per_query: int = 10_000,
         transport: httpx.BaseTransport | None = None,
+        request_rate_limit_per_minute: int = 200,
     ) -> None:
         if not token.strip():
             raise ValueError("Tushare Token is not configured.")
@@ -181,6 +182,9 @@ class TushareFundClient:
         if nav_max_rows_per_query < 1:
             raise ValueError("nav_max_rows_per_query must be positive.")
         self._token = token
+        # 真正联网的各入口共享本机预算；测试替身不等待，也不写预算文件。
+        self._use_request_budget = transport is None
+        self._request_rate_limit = request_rate_limit_per_minute
         self._max_retries = max_retries
         self._catalog_max_rows_per_query = catalog_max_rows_per_query
         self._nav_max_rows_per_query = nav_max_rows_per_query
@@ -389,6 +393,9 @@ class TushareFundClient:
         last_error: BaseException | None = None
         for attempt in range(self._max_retries + 1):
             try:
+                if self._use_request_budget:
+                    from app.integrations.source_request_budget import wait_for_tushare_slot
+                    wait_for_tushare_slot(self._request_rate_limit)
                 response = self._client.post(self._api_url, json=payload)
                 if response.status_code in _RETRYABLE_HTTP_STATUS_CODES:
                     raise TushareIntegrationError(

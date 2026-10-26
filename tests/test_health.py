@@ -138,7 +138,12 @@ def test_internal_watchlist_detail_requires_service_token_and_has_no_user_state(
 
     from app.api.routes import funds
     from app.main import create_application
-    from app.schemas.fund import InternalFundDetail, InternalFundWatchlistDetail
+    from app.schemas.fund import (
+        InternalFundDetail,
+        InternalFundManager,
+        InternalFundManagerPerformance,
+        InternalFundWatchlistDetail,
+    )
 
     basic = InternalFundDetail(
         fund_code="010710",
@@ -155,7 +160,13 @@ def test_internal_watchlist_detail_requires_service_token_and_has_no_user_state(
         lambda fund_code: InternalFundWatchlistDetail(
             basic=basic,
             managers_status="SYNCED",
-            managers=(),
+            managers=(InternalFundManager(
+                manager_name="测试经理", begin_date=date(2024, 1, 2), data_source="TUSHARE_PRO_FUND",
+                tenure_performance=InternalFundManagerPerformance(
+                    status="AVAILABLE", return_rate="0.125", start_date=date(2024, 1, 2),
+                    end_date=date(2026, 8, 25), includes_co_management=True,
+                ),
+            ),),
             latest_share_status="SYNCED",
             latest_share=None,
             dividends_status="SYNCED",
@@ -179,6 +190,8 @@ def test_internal_watchlist_detail_requires_service_token_and_has_no_user_state(
     assert unauthorized_response.status_code == 403
     assert detail_response.status_code == 200
     assert detail_response.json()["basic"]["fund_code"] == "010710"
+    assert detail_response.json()["managers"][0]["tenure_performance"]["return_rate"] == "0.125"
+    assert detail_response.json()["managers"][0]["tenure_performance"]["includes_co_management"] is True
     assert "is_watched" not in detail_response.json()
     assert missing_response.status_code == 404
     assert missing_response.json()["detail"]["code"] == "FUND_NOT_FOUND"
@@ -483,6 +496,8 @@ def test_internal_market_nav_sync_job_requires_service_token_and_returns_progres
         "progress_total": 3,
         "current_fund_code": "002112.OF",
         "progress_message": "已读取 002112.OF 的待补齐净值",
+        # 所有任务共用响应结构；尚无额外结果时明确返回空摘要。
+        "result_summary": None,
         "sync_run_id": None,
         "fetched_count": 0,
         "created_count": 0,
@@ -676,7 +691,11 @@ def test_internal_market_detail_sync_job_returns_progress_and_last_success(monke
     assert latest_response.status_code == 200
     assert latest_response.json()["progress_current"] == 5
     assert success_response.status_code == 200
+    # 成功时间接口覆盖现有六类任务，未成功的类型保留空值，不省略业务类型。
     assert success_response.json() == [
+        {"job_type": "FUND_RATINGS", "last_successful_at": None},
+        {"job_type": "FUND_MATERIALS", "last_successful_at": None},
+        {"job_type": "FUND_NEWS", "last_successful_at": None},
         {"job_type": "MARKET_NAV_INCREMENTAL", "last_successful_at": None},
         {"job_type": "MARKET_DETAIL", "last_successful_at": "2026-08-27T12:00:00Z"},
         {"job_type": "MARKET_FREE_DATA_COMPLETION", "last_successful_at": None},

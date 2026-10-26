@@ -39,6 +39,7 @@ from app.schemas.fund import (
     InternalFundWatchlistDetail,
 )
 from app.schemas.fund_rating import RatingSummary
+from app.services.fund_manager_performance import build_manager_return_bundle
 from app.services.fund_rating import read as read_ratings
 
 
@@ -150,6 +151,7 @@ def get_fund_watchlist_detail(fund_code: str) -> InternalFundWatchlistDetail | N
     with Session(get_engine()) as session:
         snapshot = get_fund_watchlist_detail_snapshot(session, fund_code)
         summaries = list_fund_summaries_by_codes(session, (fund_code,))
+        returns = build_manager_return_bundle(session, snapshot) if snapshot is not None else None
     if snapshot is None or not summaries:
         return None
     basic = _to_detail(summaries[0], snapshot.detail, snapshot.profile)
@@ -166,9 +168,11 @@ def get_fund_watchlist_detail(fund_code: str) -> InternalFundWatchlistDetail | N
                 end_date=item.assignment.end_date,
                 education=item.assignment.education,
                 data_source=item.source_code,
+                tenure_performance=performance,
             )
-            for item in snapshot.managers
+            for item, performance in zip(snapshot.managers, returns.managers, strict=True)
         ),
+        manager_periods=returns.periods,
         latest_share_status=(
             "SYNCED" if "MARKET_DETAIL_SHARE" in snapshot.succeeded_sync_types else "NOT_SYNCED"
         ),
