@@ -197,6 +197,15 @@ class InternalFundSameTypeComparisonItem(BaseModel):
     data_source: str
 
 
+class InternalFundComparisonGroup(BaseModel):
+    """实际比较组的业务名称与固定准入条件；内部证据和规则代码不在页面展示。"""
+
+    model_config = ConfigDict(frozen=True)
+    name: str
+    description: str
+    basis: str
+
+
 class InternalFundSameTypeComparison(BaseModel):
     """受控样本的同类型比较；不得解释为全市场排名。"""
 
@@ -210,6 +219,11 @@ class InternalFundSameTypeComparison(BaseModel):
     target_rank: int | None = None
     comparable_count: int = 0
     items: tuple[InternalFundSameTypeComparisonItem, ...] = ()
+    comparison_group: InternalFundComparisonGroup | None = None
+    comparison_start_date: date | None = None
+    sample_unit: str = "SHARE_CLASS"
+    comparable_product_count: int | None = None
+    reason: str | None = None
 
 
 class InternalSyncJobStatus(BaseModel):

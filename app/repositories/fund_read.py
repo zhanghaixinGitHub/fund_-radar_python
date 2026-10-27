@@ -512,6 +512,26 @@ def get_current_market_same_type_comparison(
     )
 
 
+def list_peer_nav_endpoints(
+    session: Session, fund_codes: tuple[str, ...], start: date, end: date,
+) -> dict[str, tuple[FundNavHistorySnapshot, ...]]:
+    """严格比较只批量读取共同起止日的原始单位净值及来源，不按基金逐条查询。"""
+    if not fund_codes:
+        return {}
+    if len(fund_codes) > 5000 or start >= end:
+        raise ValueError("peer comparison codes or interval invalid")
+    rows = session.execute(
+        select(NavDaily.fund_code, NavDaily.nav_date, NavDaily.unit_nav, SourceRegistry.source_code)
+        .join(SourceRegistry, SourceRegistry.source_id == NavDaily.source_id)
+        .where(NavDaily.fund_code.in_(fund_codes), NavDaily.nav_date.in_((start, end)))
+        .order_by(NavDaily.fund_code, NavDaily.nav_date, SourceRegistry.source_code)
+    ).all()
+    points: dict[str, list[FundNavHistorySnapshot]] = {}
+    for code, nav_date, unit_nav, source_code in rows:
+        points.setdefault(code, []).append(FundNavHistorySnapshot(nav_date, unit_nav, None, source_code))
+    return {code: tuple(values) for code, values in points.items()}
+
+
 def _latest_nav_date_subquery():
     """返回每只基金的最近净值日期；净值数值另按来源确定性规则读取。"""
     return (

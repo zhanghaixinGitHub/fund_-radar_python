@@ -12,7 +12,6 @@ from app.repositories.fund_read import (
     FundDetailSnapshot,
     FundProfileSnapshot,
     FundSummarySnapshot,
-    get_current_market_same_type_comparison,
     get_fund_profile_snapshot,
     get_fund_summary,
     iter_fund_code_batches,
@@ -32,7 +31,6 @@ from app.schemas.fund import (
     InternalFundNavPoint,
     InternalFundPage,
     InternalFundSameTypeComparison,
-    InternalFundSameTypeComparisonItem,
     InternalFundShareHistory,
     InternalFundShareSnapshot,
     InternalFundSummary,
@@ -269,74 +267,11 @@ def get_fund_share_history(fund_code: str, start_date: date, end_date: date) -> 
 
 
 def get_fund_same_type_comparison(fund_code: str) -> InternalFundSameTypeComparison | None:
-    """返回当前基金市场范围内同类型、同净值日期的一月涨跌事实比较。"""
+    """返回已核实细类、独立产品和共同起止日的单位净值对照。"""
+    from app.services.fund_peer_comparison import read_peer_comparison
+
     with Session(get_engine()) as session:
-        result = get_current_market_same_type_comparison(session, fund_code)
-    if result is None:
-        return None
-    target = result.target
-    if target.fund.status != "ACTIVE" or target.fund.source_code != "TUSHARE_PRO_FUND":
-        return InternalFundSameTypeComparison(
-            fund_code=fund_code,
-            fund_type=target.fund.fund_type,
-            scope="CURRENT_MARKET_ACTIVE_TUSHARE_PRO_FUND",
-            status="OUT_OF_SCOPE",
-            as_of_date=target.nav_date,
-        )
-    if target.nav_date is None or target.performance.month_change_rate is None:
-        return InternalFundSameTypeComparison(
-            fund_code=fund_code,
-            fund_type=target.fund.fund_type,
-            scope="CURRENT_MARKET_ACTIVE_TUSHARE_PRO_FUND",
-            status="DATA_INSUFFICIENT",
-            as_of_date=target.nav_date,
-        )
-    comparable = sorted(
-        (
-            item for item in result.items
-            if item.summary.nav_date == target.nav_date
-            and item.summary.performance.month_change_rate is not None
-            and item.data_source is not None
-        ),
-        key=lambda item: (-item.summary.performance.month_change_rate, item.summary.fund.fund_code),
-    )
-    target_rank = next(
-        (
-            index
-            for index, item in enumerate(comparable, start=1)
-            if item.summary.fund.fund_code == fund_code
-        ),
-        None,
-    )
-    if target_rank is None:
-        return InternalFundSameTypeComparison(
-            fund_code=fund_code,
-            fund_type=target.fund.fund_type,
-            scope="CURRENT_MARKET_ACTIVE_TUSHARE_PRO_FUND",
-            status="DATA_INSUFFICIENT",
-            as_of_date=target.nav_date,
-        )
-    return InternalFundSameTypeComparison(
-        fund_code=fund_code,
-        fund_type=target.fund.fund_type,
-        scope="CURRENT_MARKET_ACTIVE_TUSHARE_PRO_FUND",
-        status="SYNCED",
-        as_of_date=target.nav_date,
-        target_rank=target_rank,
-        comparable_count=len(comparable),
-        items=tuple(
-            InternalFundSameTypeComparisonItem(
-                rank=index,
-                fund_code=item.summary.fund.fund_code,
-                fund_name=item.summary.fund.fund_name,
-                fund_type=item.summary.fund.fund_type,
-                as_of_date=item.summary.nav_date,
-                month_change_rate=item.summary.performance.month_change_rate,
-                data_source=item.data_source,
-            )
-            for index, item in enumerate(comparable, start=1)
-        ),
-    )
+        return read_peer_comparison(session, fund_code)
 
 
 def _to_summary(snapshot: FundSummarySnapshot) -> InternalFundSummary:
