@@ -1,6 +1,5 @@
 """评级试算的公开国债曲线采集；仅显式维护命令调用，不购权、不自动登记生产授权。"""
 
-import hashlib
 import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -9,6 +8,7 @@ from pathlib import Path
 import httpx
 
 from app.services.fund_exposure_common import read, save
+from app.services.material_content import content_digest, location_exists, source_bytes
 
 URL = "https://yield.chinabond.com.cn/cbweb-czb-web/czb/historyQuery"
 
@@ -37,11 +37,11 @@ def collect_risk_free(start: date, end: date, root: Path, *, client=None) -> dic
                 if len(raw) > 2_000_000:
                     raise ValueError("RATING_RISK_FREE_RESPONSE_LIMIT")
         raw = bytes(raw)
-        key = hashlib.sha256(raw).hexdigest()
+        key = content_digest(raw)
         path = root / "raw" / f"{key}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            if hashlib.sha256(path.read_bytes()).hexdigest() != key:
+        if location_exists(path):
+            if content_digest(source_bytes(path)) != key:
                 raise ValueError("RATING_RISK_FREE_HASH_MISMATCH")
         else:
             from app.services.fund_exposure_common import _publish
@@ -55,10 +55,7 @@ def collect_risk_free(start: date, end: date, root: Path, *, client=None) -> dic
             "received_at": datetime.now(UTC).isoformat(),
             "source_code": "CHINABOND_PUBLIC_RESEARCH",
         }
-        save(
-            root / "receipts" / f"{hashlib.sha256(json.dumps(receipt, sort_keys=True).encode()).hexdigest()}.json",
-            receipt,
-        )
+        save(root / "receipts" / f"{content_digest(json.dumps(receipt, sort_keys=True).encode())}.json", receipt)
         value = json.loads(raw)
         if value.get("flag") != "0" or not value.get("heList"):
             raise ValueError("RATING_RISK_FREE_SOURCE_EMPTY")
@@ -84,7 +81,7 @@ def collect_risk_free(start: date, end: date, root: Path, *, client=None) -> dic
     from app.services.fund_rating_inputs import digest
 
     archive = root / "versions" / f"{digest(result)}.json"
-    if not archive.exists():
+    if not location_exists(archive):
         save(archive, result)
     save(root / "risk-free.json", result, replace=True)
     return result
@@ -113,7 +110,7 @@ def risk_free_intervals(snapshot: dict, days: list[date], *, term: str) -> list[
 
 def read_risk_free(root: Path, frozen: datetime) -> dict | None:
     path = root / "risk-free.json"
-    if not path.exists():
+    if not location_exists(path):
         return None
     result = read(path)
     from app.services.fund_rating_materials import _raw

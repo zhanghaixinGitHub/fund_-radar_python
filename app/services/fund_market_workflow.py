@@ -1,6 +1,7 @@
 """一键同步的市场资料编排：按本次真实结果放行，月度评级不随日常同步重复执行。"""
 
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 
 from app.core.logging import get_logger
 from app.services.fund_exposure_common import now
@@ -61,6 +62,12 @@ class MarketSyncWorkflow:
 
     def materials(self, progress):
         funds = self.scope()
+        # 份额关系是公共资料的独立结果；全批限额，不改变原预测和评级的资格判断。
+        try:
+            share_classes = self.preparation.sync_share_classes(funds, progress=progress)
+        except Exception:
+            logger.exception("fund_market_workflow.materials   >>>   基金份额维护失败")
+            share_classes = {"status": "FAILED", "total": len(funds), "unverified": len(funds)}
         # 共用持仓维护会话新增的采集入口、来源缓存和排他锁；不另建后台循环。
         checked = self.preparation.sync_holdings(funds, progress=progress)
         checked_codes = {f["fund_code"] for f in checked.get("funds", []) if f["status"] == "SUCCEEDED"}
@@ -83,6 +90,9 @@ class MarketSyncWorkflow:
         result["holdings_check"] = checked.get("status")
         result["holdings_reused"] = checked.get("reused", False)
         result["holdings_checked_at"] = checked.get("source_checked_at") or checked.get("finished_at")
+        result["share_classes"] = share_classes
+        if share_classes["status"] != "SUCCEEDED":
+            result["status"] = "PARTIAL_SUCCESS"
         return result
 
     def inputs(self, progress):
@@ -118,7 +128,8 @@ class MarketSyncWorkflow:
         from app.services.fund_rating_inputs import prepare
 
         frozen = now()
-        month_end = frozen.date().replace(day=1) - timedelta(days=1)
+        # 00:30北京时间仍属于前一UTC日期；月界必须统一按北京时间截取。
+        month_end = frozen.astimezone(ZoneInfo("Asia/Shanghai")).date().replace(day=1) - timedelta(days=1)
         # prepare 会再次检查分类、完整八维原件、估值日及来源有效性。仅有页面持仓不算齐备。
         with Session(get_engine()) as session:
             groups = prepare(session, self.scope(), month_end, frozen)
@@ -134,18 +145,36 @@ class MarketSyncWorkflow:
             and self.material_results[m["fund_code"]]["status"] != "FAILED"
         }
         result = (updater or update_ratings)(
-            None, as_of=month_end, due_only=True, ready_codes=ready, progress_reporter=progress
+            None,
+            as_of=month_end,
+            due_only=True,
+            ready_codes=ready,
+            progress_reporter=progress,
+            new_rule_ready_codes={
+                row["fund_code"]
+                for row in self.scope()
+                if self.news_results.get(row["fund_code"], {}).get("status") == "SUCCEEDED"
+                and not self.news_results[row["fund_code"]].get("candidate_events")
+                and row["fund_code"] in self.material_results
+                and self.material_results[row["fund_code"]]["status"] != "FAILED"
+                and "本次持仓披露检查尚未完成" not in self.material_results[row["fund_code"]].get("gaps", [])
+            },
         )
         pending_events = [code for code, value in self.news_results.items() if value.get("candidate_events")]
         deferred = result.get("deferred", [])
         return {
             **result,
-            "status": "PARTIAL_SUCCESS" if deferred or result["failures"] or pending_events else "SUCCEEDED",
-            "created": result["rated"],
+            "status": "PARTIAL_SUCCESS"
+            if deferred
+            or result["failures"]
+            or pending_events
+            or (result.get("newRule") and result["newRule"]["notRated"])
+            else "SUCCEEDED",
+            "created": result["newRule"]["published"] if result.get("newRule") else result["rated"],
             "skipped": result["notRated"],
             "review_required": pending_events,
             "message": (
-                f"月度评级：更新{result['rated']}只，{len(result.get('alreadyCurrent', []))}类本月已有结果；"
+                f"月度评分：完整{result['rated']}只，{len(result.get('alreadyCurrent', []))}类本月已有结果；"
                 f"{len(deferred)}类资料待补充，{len(pending_events)}只基金有事项待复核"
             ),
         }

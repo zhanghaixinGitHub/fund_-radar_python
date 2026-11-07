@@ -4,13 +4,14 @@
 本模块不改变现行正式评级适配，也不将未识别的表格当作零。
 """
 
-import hashlib
 import re
 from collections import Counter
+from collections.abc import Callable
 from decimal import Decimal
 
 from app.services.fund_rating_public_market import compact, section
 from app.services.fund_rating_rules import decimal
+from app.services.material_content import content_digest
 
 
 def restriction_page_header_view(pages: list[str]) -> tuple[str, dict]:
@@ -29,14 +30,19 @@ def restriction_page_header_view(pages: list[str]) -> tuple[str, dict]:
     # 某些发行人把页码以裸整数写在每页首个抽取行。只有报告身份存在，且
     # 同一数字=实际页序的规则在相邻三页连续成立，才将对应位置认作页码。
     # 页面内部股数/金额、首行但不满足连续页序的整数均原样保留。
-    first_lines = {i: next(((n, line.strip()) for n, line in enumerate(lines, 1) if line.strip()), (0, ""))
-                   for i, lines in enumerate(page_lines, 1)}
+    first_lines = {
+        i: next(((n, line.strip()) for n, line in enumerate(lines, 1) if line.strip()), (0, ""))
+        for i, lines in enumerate(page_lines, 1)
+    }
     page_numbers = {i for i, (_, value) in first_lines.items() if value == str(i)}
-    report_identity = re.search(r"(?:20\d{2}|[〇零一二三四五六七八九0]{4})年(?:年度|中期)报告",
-                                compact("\n".join(pages[:2])))
-    sequential = {i for i in page_numbers if report_identity and any(
-        {start, start + 1, start + 2} <= page_numbers for start in (i - 2, i - 1, i)
-    )}
+    report_identity = re.search(
+        r"(?:20\d{2}|[〇零一二三四五六七八九0]{4})年(?:年度|中期)报告", compact("\n".join(pages[:2]))
+    )
+    sequential = {
+        i
+        for i in page_numbers
+        if report_identity and any({start, start + 1, start + 2} <= page_numbers for start in (i - 2, i - 1, i))
+    }
     view, edits = [], []
     for page_number, page in enumerate(pages, 1):
         lines = []
@@ -44,17 +50,26 @@ def restriction_page_header_view(pages: list[str]) -> tuple[str, dict]:
             stripped = line.strip()
             is_sequential_page = page_number in sequential and number == first_lines[page_number][0]
             if stripped in repeated or re.fullmatch(r"第\s*\d+\s*页\s*共\s*\d+\s*页", stripped) or is_sequential_page:
-                edits.append({"page": page_number, "line": number, "removed_header": line,
-                              **({"position_rule": "FIRST_NONEMPTY_LINE_EQUALS_PHYSICAL_PAGE_IN_CONSECUTIVE_RUN"}
-                                 if is_sequential_page else {})})
+                edits.append(
+                    {
+                        "page": page_number,
+                        "line": number,
+                        "removed_header": line,
+                        **(
+                            {"position_rule": "FIRST_NONEMPTY_LINE_EQUALS_PHYSICAL_PAGE_IN_CONSECUTIVE_RUN"}
+                            if is_sequential_page
+                            else {}
+                        ),
+                    }
+                )
             else:
                 lines.append(line)
         view.append("\n".join(lines))
     original, text = "\n".join(pages), "\n".join(view)
     return text, {
         "removed_headers": edits,
-        "original_text_sha256": hashlib.sha256(original.encode()).hexdigest(),
-        "parser_text_sha256": hashlib.sha256(text.encode()).hexdigest(),
+        "original_text_sha256": content_digest(original.encode()),
+        "parser_text_sha256": content_digest(text.encode()),
         "scope": "REPEATED_REPORT_HEADERS_EXPLICIT_OR_VERIFIED_SEQUENTIAL_PAGE_NUMBERS_ONLY",
         "sequential_bare_page_numbers": sorted(sequential),
     }
@@ -205,12 +220,19 @@ def _serial_stock_rows(stock_part: str, positions: list[dict]) -> list[dict]:
 
 
 def restricted_securities(
-    pages: list[str], positions: list[dict], bond_amount: str | None = None, *, scope: str = "ALL_ASSETS"
+    pages: list[str],
+    positions: list[dict],
+    bond_amount: str | None = None,
+    *,
+    scope: str = "ALL_ASSETS",
+    stock_row_parser: Callable[[str, list[dict]], list[dict]] | None = None,
 ) -> dict:
     """默认核对全部受限资产；显式股票研究范围仅核股票，不把未核债券记为零。
 
     ALL_ASSETS沿用现行V2受限比例的严格边界。STOCKS_ONLY仅供独立股票
     成交候选，返回明确范围、未评估项目及原文，不能生成全资产受限比例。
+    stock_row_parser仅供已核原件的特殊股票版式适配；缺省仍用原解析器，
+    适配结果继续通过本函数的同证券批次金额/数量及全资产范围校验。
     """
     if scope not in {"ALL_ASSETS", "STOCKS_ONLY"}:
         raise ValueError("QUALITY_RESTRICTION_SCOPE_UNSUPPORTED")
@@ -232,7 +254,7 @@ def restricted_securities(
     stock_part, separator, bond_part = restricted.partition("受限证券类别：债券")
     stock_layout = None
     try:
-        rows = _serial_stock_rows(stock_part, positions)
+        rows = (stock_row_parser or _serial_stock_rows)(stock_part, positions)
     except ValueError as serial_error:
         recoverable = (
             "RATING_MARKET_RESTRICTED_VALUE:",
@@ -308,14 +330,29 @@ def restricted_securities(
         if not bond_rows and not re.search(r"(?:未持有|无).*?(?:债券|证券)", compact(bond_part)):
             # 完整空表与缺表不同：必须保留所有列标题、无任何证券条目，且五个
             # 数值列都明确以横杠表示无项目。只有几个横杠或少一列仍不能认作0。
-            pattern = (
+            header = (
                 r"证券代码证券名称成功认购日受限期流通受限类型认购价格期末估值单价"
-                r"数量[（(]单位[:：]张[）)]期末成本总额期末估值总额备注[-－—]{5}"
+                r"数量[（(]单位[:：]张[）)]期末成本总额期末估值总额备注"
             )
-            if not re.fullmatch(pattern, compact(bond_part)):
+            # 原表另有十一列全部写横杠的版式，不仅五个数值列。只认完整
+            # 十一列、恰好十一横杠和该标准股票权益说明；缺列、少横杠或
+            # 其他未解析备注仍拒绝，不能把缺表或被截断的债券表认成0。
+            note = (
+                r"(?:注[：:]基金持有的股票在流通受限期内[，,]如获得股票红利[、，,]送股"
+                r"[、，,]转增股[、，,]配股的[，,]则此新增股票的流通受限期和估值价格"
+                r"与相应原股票一致[。.]?)?"
+            )
+            body = compact(bond_part)
+            numeric_only = re.fullmatch(header + r"[-－—]{5}", body)
+            all_columns = re.fullmatch(header + r"[-－—]{11}" + note, body)
+            if not numeric_only and not all_columns:
                 raise ValueError("QUALITY_RESTRICTED_BOND_TABLE_UNVERIFIED")
             empty_bond_table = {
-                "basis": "COMPLETE_EMPTY_BOND_TABLE_FIVE_NUMERIC_DASHES_NO_SECURITY_ROW",
+                "basis": (
+                    "COMPLETE_EMPTY_BOND_TABLE_FIVE_NUMERIC_DASHES_NO_SECURITY_ROW"
+                    if numeric_only
+                    else "COMPLETE_EMPTY_BOND_TABLE_ELEVEN_COLUMNS_EXPLICIT_DASHES_NO_SECURITY_ROW"
+                ),
                 "numeric_columns": ["认购价格", "期末估值单价", "数量（张）", "期末成本总额", "期末估值总额"],
                 "excerpt": bond_part,
             }

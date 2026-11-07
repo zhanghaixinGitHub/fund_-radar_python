@@ -9,6 +9,7 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import httpx
 from sqlalchemy import text
 
 from app.core.config import get_settings
@@ -33,7 +34,7 @@ class MarketNewsClient(MarketReportClient):
     def news_catalog(self, code: str, lower: str) -> list[dict]:
         if not re.fullmatch(r"[0-9]{6}", code):
             raise ValueError("MARKET_NEWS_FUND_CODE")
-        entries, seen, expected = [], set(), None
+        entries, seen, expected, previous_day = [], set(), None, None
         for page in range(1, 21):
             params = {"fundcode": code, "pageIndex": page, "pageSize": 100, "type": 0}
             raw = self._get(CATALOG_URL, params)
@@ -42,9 +43,10 @@ class MarketNewsClient(MarketReportClient):
             if value.get("ErrCode") != 0 or not isinstance(rows, list) or type(total) is not int:
                 raise ValueError("MARKET_NEWS_CATALOG_SCHEMA")
             expected = total if expected is None else expected
-            if total != expected or value.get("PageIndex") != page or not 0 <= total <= 2000 or len(rows) > 100:
+            if total != expected or value.get("PageIndex") != page or total < 0 or len(rows) > 100:
                 raise ValueError("MARKET_NEWS_CATALOG_CHANGED_OR_LIMIT")
             catalog_source = self._archive(raw, ".json", CATALOG_URL, params)
+            dates = []
             for row in rows:
                 article = row.get("ID", "")
                 published = str(row.get("PUBLISHDATEDesc", ""))[:10]
@@ -58,24 +60,56 @@ class MarketNewsClient(MarketReportClient):
                 ):
                     raise ValueError("MARKET_NEWS_CATALOG_IDENTITY_DATE")
                 seen.add(article)
+                dates.append(published)
                 if published >= lower:
                     entries.append(
                         {"id": article, "title": row["TITLE"], "published": published, "catalog_source": catalog_source}
                     )
-            if len(seen) == total:
+            # 任务要求核验最近30日，不应因为基金多年历史公告超过两千条而失败。
+            # 只有确认页内及跨页日期倒序、总数稳定后，才可在越过下界时提前结束；
+            # 若顺序异常或窗口内仍超过20页，继续明确失败，不把截断当成覆盖完整。
+            if dates != sorted(dates, reverse=True) or (previous_day and dates and dates[0] > previous_day):
+                raise ValueError("MARKET_NEWS_CATALOG_ORDER")
+            if len(seen) > total:
+                raise ValueError("MARKET_NEWS_CATALOG_CHANGED_OR_LIMIT")
+            if len(seen) == total or dates and dates[-1] < lower:
                 return entries
             if not rows:
                 raise ValueError("MARKET_NEWS_CATALOG_INCOMPLETE")
+            previous_day = dates[-1]
         raise ValueError("MARKET_NEWS_CATALOG_LIMIT")
 
     def news_body(self, code: str, entry: dict, old: dict | None = None) -> dict:
         """已取得的同一公告版本复用原文；目录标题或日期变化时重新取得并保留旧版。"""
-        # 正文可能在同一公告编号下修订，每日重新确认一次，旧版本仍由内容摘要保存。
+        # 身份核验失败时正文回执仍已归档，不能因为尚未进入items就重复下载。
+        # 只以原响应中的公告号、标题和公开日期重新绑定；身份仍由下方逐篇核验。
+        receipt = self.root / "body-receipts" / code / (entry["id"] + ".json")
+        if (
+            not old or any(old.get("entry", {}).get(key) != entry.get(key) for key in ("id", "title", "published"))
+        ) and receipt.exists():
+            archived = read(receipt)
+            data = json.loads(read_source(self.root, archived)).get("data") or {}
+            identity_matches = all(
+                data.get(field, "") == entry.get(key) for field, key in (("art_code", "id"), ("notice_title", "title"))
+            )
+            same_publication_day = str(data.get("notice_date", ""))[:10] == entry.get("published")
+            reviewed_directory_link = False
+            if identity_matches and not same_publication_day:
+                # 正文日期与份额目录收录日可能不同。只有已经逐篇核实并同时绑定
+                # 当前目录和该原文摘要的适用凭据，才能复用首次原件；日期变化没有
+                # 对应凭据时仍重取并重新审阅，不能用此兼容跳过修订或身份冲突。
+                from app.services.fund_news_identity import checked_applicability
+
+                reviewed_directory_link = checked_applicability(self.root, code, entry, archived) is not None
+            if identity_matches and (same_publication_day or reviewed_directory_link):
+                old = {"entry": entry, "source": archived}
+        # 本轮目录核验编号、标题及公开日期未变时，复用真实原件与原取得时刻。
+        # 目录有修订信号才重新取得；不宣称能发现来源未提示的原地改写。
         if (
             old
             and all(old.get("entry", {}).get(key) == entry.get(key) for key in ("id", "title", "published"))
             and old.get("source")
-            and now() - datetime.fromisoformat(old["source"]["received_at"]) < timedelta(hours=24)
+            and datetime.fromisoformat(old["source"]["received_at"]) <= now()
         ):
             raw = read_source(self.root, old["source"])
             received = old["source"]["received_at"]
@@ -157,7 +191,7 @@ def collect(code: str, *, client=None, root: Path | None = None, progress=lambda
                     event = {"fund_code": code, "article_id": entry["id"], "source_hash": item["source"]["sha256"]}
                     if event not in result["candidate_events"]:
                         result["candidate_events"].append(event)
-            except (ValueError, OSError, KeyError, TypeError) as error:
+            except (ValueError, OSError, KeyError, TypeError, httpx.HTTPError) as error:
                 logger.exception(
                     "fund_market_news.collect >>> 公告原文核验未完成, fund_code=%s, article_id=%s", code, entry["id"]
                 )

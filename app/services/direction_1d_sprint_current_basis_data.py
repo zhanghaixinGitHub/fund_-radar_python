@@ -1,6 +1,6 @@
 """第95轮取T日价差；历史开发与17日实际提前采集分开，不能相互冒充。"""
 
-import hashlib
+# 原始响应统一归档外接盘；历史路径只作为数据库别名，不生成C盘源文件。
 import time
 from datetime import date, datetime, timedelta
 from time import monotonic
@@ -13,6 +13,7 @@ from app.integrations import tushare_sprint_futures as parser
 from app.services import direction_1d_sprint as base
 from app.services import direction_1d_sprint_futures_basis_data as old
 from app.services import direction_1d_sprint_market_only_data as market_data
+from app.services import material_content as _sources
 
 root, history, scope, original_row, require = old.root, old.history, old.scope, old.original_row, old.require
 TARGET = "2026-09-17"
@@ -94,7 +95,7 @@ def reconstruct_live(t, u, ph, saved_at):
     for q in queries(t):
         api = q["api"]
         req_path, response_path = folder / "requests" / f"{api}.json", folder / "responses" / f"{api}.json"
-        if not req_path.exists():
+        if not _sources.location_exists(req_path):
             continue
         request = base.read(req_path)
         require(
@@ -103,14 +104,14 @@ def reconstruct_live(t, u, ph, saved_at):
         requested = datetime.fromisoformat(request["at"])
         require(in_window(t, u, requested) and requested <= saved_at, "LIVE_REQUEST_TIME_INVALID")
         reservations[api] = base.digest(request)
-        if not response_path.exists():
+        if not _sources.location_exists(response_path):
             continue
         meta = base.read(response_path)
-        raw = (folder / "raw" / f"{api}.json").read_bytes()
+        raw = _sources.source_bytes(folder / "raw" / f"{api}.json")
         received = datetime.fromisoformat(meta["received_at"])
         require(
             meta["request_hash"] == base.digest(request)
-            and meta["sha256"] == hashlib.sha256(raw).hexdigest()
+            and meta["sha256"] == _sources.content_digest(raw)
             and meta["bytes"] == len(raw),
             "LIVE_RAW_CHANGED",
         )
@@ -146,7 +147,7 @@ def load_live(t, u, ph):
 def capture(t, u, ph):
     """只在实际时间窗口预约一次；已预约请求不可重试，失败留痕并交给原模型回退。"""
     target = live_root() / u / "snapshot.json"
-    if target.exists():
+    if _sources.location_exists(target):
         return load_live(t, u, ph)
     if not in_window(t, u, base.now()):
         return None
@@ -198,8 +199,7 @@ def capture(t, u, ph):
                 require(token.encode() not in raw, "LIVE_RESPONSE_CONTAINS_SECRET")
                 path = folder / "raw" / f"{api}.json"
                 path.parent.mkdir(parents=True, exist_ok=True)
-                with path.open("xb") as f:
-                    f.write(raw)
+                _sources.write_source(path, raw)
                 base.save(
                     folder / "responses" / f"{api}.json",
                     {
@@ -207,7 +207,7 @@ def capture(t, u, ph):
                         "request_hash": base.digest(request),
                         "http_status": status,
                         "bytes": len(raw),
-                        "sha256": hashlib.sha256(raw).hexdigest(),
+                        "sha256": _sources.content_digest(raw),
                     },
                 )
                 require(status == 200, "LIVE_HTTP_FAILED")

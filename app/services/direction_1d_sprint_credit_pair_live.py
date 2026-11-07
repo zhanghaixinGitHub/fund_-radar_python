@@ -1,12 +1,13 @@
 """HYG/IEF双腿一次实收：保留当时请求、原文及失败，禁止历史回填和请求重试。"""
 
-import hashlib
+# 原始响应统一归档外接盘；历史路径只作为数据库别名，不生成C盘源文件。
 from datetime import date, datetime, time
 
 from app.integrations import sina_sprint_credit_pair_etf as parser
 from app.services import direction_1d_sprint as b
 from app.services import direction_1d_sprint_credit_pair_etf_data as data
 from app.services import direction_1d_sprint_overnight as overnight
+from app.services import material_content as _sources
 
 
 def root():
@@ -41,10 +42,10 @@ def fetch(t, symbol):
 
 
 def raw_identity(path):
-    if not path.exists():
+    if not _sources.location_exists(path):
         return None
-    raw = path.read_bytes()
-    return {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    raw = _sources.source_bytes(path)
+    return {"bytes": len(raw), "sha256": _sources.content_digest(raw)}
 
 
 def reconstruct_leg(t, u, ph, symbol):
@@ -73,7 +74,7 @@ def reconstruct_leg(t, u, ph, symbol):
     require(all(datetime.fromisoformat(v) <= started for v in aligned["close_events"].values()), "UNCLOSED_SESSION")
     points, error = {}, None
     if receipt["status"] == "RECEIVED":
-        raw = (r / "raw.bin").read_bytes()
+        raw = _sources.source_bytes(r / "raw.bin")
         require(
             0 < len(raw) <= parser.MAX_BYTES
             and receipt["raw"] == raw_identity(r / "raw.bin")
@@ -131,12 +132,12 @@ def capture_leg(t, u, ph, symbol):
     """最多一个请求；共用研究run锁，另以独占请求文件保留预算，断电后也不补发。"""
     require(symbol in parser.SYMBOLS, "SYMBOL_INVALID")
     r = root() / u / symbol
-    if (r / "snapshot.json").exists():
+    if _sources.location_exists(r / "snapshot.json"):
         return load_leg(t, u, ph, symbol)
     if not in_window(t, u, b.now()):
         return None
     r.mkdir(parents=True, exist_ok=True)
-    if not (r / "request.json").exists():
+    if not _sources.location_exists(r / "request.json"):
         request = {
             "at": b.now().isoformat(),
             "t": t,
@@ -159,8 +160,7 @@ def capture_leg(t, u, ph, symbol):
             }
         else:
             # 写盘失败必须显式抛出；后续仅能记录中断，不能伪造网络失败或再次查询。
-            with (r / "raw.bin").open("xb") as f:
-                f.write(raw)
+            _sources.write_source(r / "raw.bin", raw)
             receipt = {
                 "at": b.now().isoformat(),
                 "request_hash": b.digest(request),
@@ -169,7 +169,7 @@ def capture_leg(t, u, ph, symbol):
                 "raw": raw_identity(r / "raw.bin"),
             }
         b.save(r / "response.json", receipt)
-    elif not (r / "response.json").exists():
+    elif not _sources.location_exists(r / "response.json"):
         request = b.read(r / "request.json")
         require(request["t"] == t and request["u"] == u and request["plan_hash"] == ph, "REQUEST_CHANGED")
         b.save(
@@ -224,7 +224,7 @@ def load_live(t, u, ph):
 
 def capture(t, u, ph):
     """目标日每只ETF恰一份请求槽，共最多2个GET；与父模型共用研究运行锁。"""
-    if (root() / u / "snapshot.json").exists():
+    if _sources.location_exists(root() / u / "snapshot.json"):
         return load_live(t, u, ph)
     if not in_window(t, u, b.now()):
         return None

@@ -142,6 +142,14 @@ def verified_qdii_window(
             return False
         for quote in quotes:
             market = quote.get("valuation_market")
+            if market == "JP" and quote.get("date") != base:
+                from app.services.fund_valuation_sessions import verified_jp_holiday_reference
+
+                security = next((c["code"] for c in companies if c.get("quote") == quote), None)
+                security = security or next((k for k, q in material.get("market", {}).items() if q == quote), "")
+                if verified_jp_holiday_reference(material, documents, security, quote, window):
+                    continue
+                return False
             if multi_listed and market in {"UK", "CH"}:
                 if (
                     quote.get("currency") != "USD"
@@ -238,8 +246,20 @@ def verified_qdii_window(
                 parsed = json.loads(body)
                 if host != "www.jpx.co.jp" or parsed["year"] != date.fromisoformat(target).year:
                     return False
-                if len(parsed["closed_dates"]) < 20 or any(day in parsed["closed_dates"] for day in (base, target)):
+                if len(parsed["closed_dates"]) < 20 or target in parsed["closed_dates"]:
                     return False
+                if base in parsed["closed_dates"]:
+                    # 上方已逐证券/指数核实真实参考日；不能只看日历便放行旧报价。
+                    from app.services.fund_valuation_sessions import verified_jp_holiday_reference
+
+                    jp_quotes = [(c["code"], c.get("quote") or {}) for c in companies if c["code"].endswith(".JP")]
+                    jp_quotes += [
+                        (k, q) for k, q in material.get("market", {}).items() if q.get("valuation_market") == "JP"
+                    ]
+                    if not jp_quotes or not all(
+                        verified_jp_holiday_reference(material, documents, k, q, window) for k, q in jp_quotes
+                    ):
+                        return False
                 if (
                     "3:30 pm" not in parsed["hours_source_text"]
                     or urlparse(parsed["hours_source_url"]).hostname != host

@@ -2,25 +2,24 @@
 
 import json
 import re
-import threading
 import time
 from datetime import date, datetime
 from decimal import Decimal
 from urllib.parse import urljoin, urlparse
 
 import httpx
-import pypdfium2 as pdfium
 from bs4 import BeautifulSoup
 
+from app.core.pdf import PDF_LOCK
 from app.integrations.dbfund_reports import CATALOG, ORIGIN, PRODUCT, bounded_get
 from app.services.direction_1d_protocol import digest
 from app.services.fund_exposure_common import ROOT, blob, now, read, save
 from app.services.fund_exposure_supplement import SUPPLEMENT, verified_bytes
 from app.services.fund_materials_store import LIVE, source_path, versioned_save
+from app.services.material_content import document_pdfium, location_exists
 
 NAV_URL = ORIGIN + "/common-web/chart/fundnettable/getFundNetTableJson"
 NEWS_URL = ORIGIN + "/news/media/index.html"
-PDF_LOCK = threading.Lock()
 
 
 def client():
@@ -40,7 +39,7 @@ def fetch(c, url, suffix="json", params=None, *, reuse=True):
         raise ValueError("EXPOSURE_PUBLIC_HOST_NOT_ALLOWED")
     request = {"url": url, "params": params}
     path = SUPPLEMENT / "public-receipts" / (digest(request) + ".json")
-    if reuse and path.exists():
+    if reuse and location_exists(path):
         receipt = read(path)
         return verified_bytes(receipt), receipt
     for attempt in range(2):
@@ -94,7 +93,7 @@ def parse_nav_page(value, page, cutoff):
 def acquire_nav(*, latest_only=False):
     """历史全页留存，日常只刷新第一页；各日保留首次取得时间而非假造历史采集时刻。"""
     output = SUPPLEMENT / "official-nav.json"
-    previous = read(output) if output.exists() else {"rows": []}
+    previous = read(output) if location_exists(output) else {"rows": []}
     previous_rows = {row["date"]: row for row in previous["rows"]}
     rows, receipts = {}, []
     cutoff = now().date()
@@ -152,7 +151,7 @@ def fill_live_nav_gap(nav, required, asof):
     if [r["nav_date"] for r in nav] == list(required):
         return nav
     output = SUPPLEMENT / "official-nav.json"
-    if not output.exists():
+    if not location_exists(output):
         return nav
     official = {date.fromisoformat(r["date"]): r for r in read(output)["rows"]}
     existing = {r["nav_date"]: r for r in nav}
@@ -211,7 +210,7 @@ def article_text(raw, pdf):
         if not raw.startswith(b"%PDF"):
             raise ValueError("EXPOSURE_PUBLIC_NOT_PDF")
         # PDFium 不支持并发调用。网络可多线程，文档解析用同一个锁，并显式释放页面资源。
-        with PDF_LOCK, pdfium.PdfDocument(raw) as reader:
+        with PDF_LOCK, document_pdfium(raw) as reader:
             if len(reader) > 2000:
                 raise ValueError("EXPOSURE_PUBLIC_PDF_PAGE_LIMIT")
             pages = []
@@ -288,7 +287,7 @@ def acquire_documents(*, live=False, progress=None):
             if urlparse(url).netloc != "www.dbfund.com.cn":
                 result["external_links"].append({"content_id": key, "title": item["title"], "url": url})
                 # 微信公开正文不可读时，保留已独立核对的媒体转载，不能重跑目录后把它丢掉。
-                if not previous.exists():
+                if not location_exists(previous):
                     result["missing"].append({"content_id": key, "reason": "PUBLIC_BODY_NOT_AVAILABLE"})
                     # 历史已知缺口继续留证；新出现的不可读正文必须使本轮显示部分失败。
                     baseline = read(SUPPLEMENT / "public-catalog.json")["items"] if live else items
@@ -296,7 +295,7 @@ def acquire_documents(*, live=False, progress=None):
                         result["errors"].append({"content_id": key, "reason": "PUBLIC_BODY_NOT_AVAILABLE"})
                     continue
             try:
-                old = read(previous) if previous.exists() else None
+                old = read(previous) if location_exists(previous) else None
                 unchanged = old and same_document_catalog(old["catalog"], item)
                 if unchanged:
                     document = old
@@ -417,7 +416,7 @@ def recover_public_documents():
                     "training_eligible": False,
                 }
                 path = SUPPLEMENT / "documents" / (digest(key) + ".json")
-                if not path.exists():
+                if not location_exists(path):
                     save(path, value)
                 result["recovered"].append({"content_id": key, "url": url, "receipt": receipt})
             except Exception as exc:

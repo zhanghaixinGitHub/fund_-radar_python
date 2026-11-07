@@ -272,6 +272,15 @@ class LocalSyncJobManager:
             result_status = (
                 ("PARTIAL_SUCCESS" if result["rated"] + result["notRated"] else "FAILED") if failures else "SUCCEEDED"
             )
+            if result.get("newRule") and result["newRule"]["notRated"] and result_status == "SUCCEEDED":
+                result_status = "PARTIAL_SUCCESS"
+            if result.get("newRule"):
+                new = result["newRule"]
+                message = (
+                    f"检查{result['target']}只，完整评分{result['rated']}只，"
+                    f"部分评分{new['partial']}只；本次新发布{new['published']}只，"
+                    f"其余具体缺项已记录"
+                )
             self._replace_job(
                 job_id,
                 status=result_status,
@@ -281,7 +290,7 @@ class LocalSyncJobManager:
                 result_summary=result,
                 finished_at=datetime.now(UTC),
                 fetched_count=result["target"],
-                created_count=result["rated"],
+                created_count=result["newRule"]["published"] if result.get("newRule") else result["rated"],
                 skipped_count=result["notRated"],
                 error_code="RATING_CATEGORY_FAILED" if failures else None,
                 error_message="部分评级类别检查失败，请重试。" if failures else None,
@@ -331,17 +340,24 @@ class LocalSyncJobManager:
     def _run_fund_managers(self, job_id: UUID, manager_ids: tuple[UUID, ...], request_id: str):
         """与原资料任务共用单执行器；单经理失败保留成果，摘要不含来源正文。"""
         from app.services.fund_manager_directory_sync import synchronize
+
         self._replace_job(job_id, status="RUNNING", started_at=datetime.now(UTC))
         try:
             result = (self._manager_synchronizer or synchronize)(
-                manager_ids, fetch=True,
+                manager_ids,
+                fetch=True,
                 progress=lambda index, total, code, message: self._replace_job(
-                    job_id, progress_current=index, progress_total=total,
-                    current_fund_code=code, progress_message=message,
+                    job_id,
+                    progress_current=index,
+                    progress_total=total,
+                    current_fund_code=code,
+                    progress_message=message,
                 ),
             )
             self._replace_job(
-                job_id, status=result["status"], finished_at=datetime.now(UTC),
+                job_id,
+                status=result["status"],
+                finished_at=datetime.now(UTC),
                 fetched_count=result.get("fetchedRows", 0),
                 created_count=result.get("created", 0),
                 updated_count=result.get("updated", 0),
@@ -352,8 +368,13 @@ class LocalSyncJobManager:
             )
         except Exception:
             logger.exception("sync_jobs._run_fund_managers >>> manager sync failed, job_id=%s", job_id)
-            self._replace_job(job_id, status="FAILED", finished_at=datetime.now(UTC),
-                              error_code="MANAGER_SYNC_FAILED", error_message="经理资料更新未完成，请稍后重试。")
+            self._replace_job(
+                job_id,
+                status="FAILED",
+                finished_at=datetime.now(UTC),
+                error_code="MANAGER_SYNC_FAILED",
+                error_message="经理资料更新未完成，请稍后重试。",
+            )
         finally:
             with self._lock:
                 if self._active_job_id == job_id:
@@ -528,7 +549,8 @@ class LocalSyncJobManager:
                 current_fund_code=None,
                 result_summary={
                     "predictionOutcomes": {
-                        "jobId": str(outcome_job.job_id), "status": outcome_job.status,
+                        "jobId": str(outcome_job.job_id),
+                        "status": outcome_job.status,
                         "summary": outcome_job.result_summary,
                     }
                 },
@@ -563,22 +585,31 @@ class LocalSyncJobManager:
         """核对已保存的多周期预测；使用现有净值、分红和日历，不生成新判断。"""
         from app.services.prediction_generation import verify_all_outcomes
 
-        self._replace_job(job_id, status="RUNNING", started_at=datetime.now(UTC),
-                          progress_message="正在核对已到期的历史预测")
+        self._replace_job(
+            job_id, status="RUNNING", started_at=datetime.now(UTC), progress_message="正在核对已到期的历史预测"
+        )
         try:
             result = (self._outcome_verifier or verify_all_outcomes)(
                 progress_reporter=lambda c, t, f, m: self._update_progress(job_id, c, t, f, m)
             )
             incomplete = result["pending"] + result["failed"] + result["remaining"]
             self._replace_job(
-                job_id, status="PARTIAL_SUCCESS" if incomplete else "SUCCEEDED",
-                progress_current=result["checked"], progress_total=result["total"], current_fund_code=None,
-                fetched_count=result["checked"], created_count=result["created"],
-                updated_count=result["completed"] - result["created"], skipped_count=incomplete,
-                result_summary=result, finished_at=datetime.now(UTC),
-                progress_message=(f"已核对 {result['checked']} 条历史预测，结果齐备 {result['completed']} 条，"
-                                  f"新增结果 {result['created']} 条，等待资料 {result['pending']} 条，"
-                                  f"异常 {result['failed']} 条，未核对 {result['remaining']} 条"),
+                job_id,
+                status="PARTIAL_SUCCESS" if incomplete else "SUCCEEDED",
+                progress_current=result["checked"],
+                progress_total=result["total"],
+                current_fund_code=None,
+                fetched_count=result["checked"],
+                created_count=result["created"],
+                updated_count=result["completed"] - result["created"],
+                skipped_count=incomplete,
+                result_summary=result,
+                finished_at=datetime.now(UTC),
+                progress_message=(
+                    f"已核对 {result['checked']} 条历史预测，结果齐备 {result['completed']} 条，"
+                    f"新增结果 {result['created']} 条，等待资料 {result['pending']} 条，"
+                    f"异常 {result['failed']} 条，未核对 {result['remaining']} 条"
+                ),
                 error_code="PREDICTION_OUTCOMES_INCOMPLETE" if incomplete else None,
                 error_message="部分已到期预测仍缺少资料或核对未完成，已保存的结果保留。" if incomplete else None,
             )

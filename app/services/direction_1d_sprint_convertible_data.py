@@ -4,7 +4,7 @@
 特征只命中基准日及之前五个国内交易日；缺失拒绝，不以前值或未来值填补。
 """
 
-import hashlib
+# 原始响应统一归档外接盘；历史路径只作为数据库别名，不生成C盘源文件。
 import json
 import math
 import time as sleep_time
@@ -16,6 +16,7 @@ import numpy as np
 from app.integrations.tushare_sprint_convertible import CODES, FIELDS, MAX_BYTES, URL, fetch_convertible
 from app.services import direction_1d_sprint as base
 from app.services import direction_1d_sprint_market as market
+from app.services import material_content as _sources
 
 SOURCE = "TUSHARE_CB_BENCHMARK_EXISTING_PERMISSION_RESEARCH"
 SLOTS = ("0700", "0730", "0800")
@@ -115,7 +116,7 @@ def history():
         identity = identities["row"] if supplement else identities["rows"][symbol]
         names = {"000832": "中证可转换债券指数", "000906": "中证800指数", "H11001": "中证全债指数"}
         if (
-            hashlib.sha256((folder / "acquire.py").read_bytes()).hexdigest() != plan["script_sha256"]
+            _sources.content_digest(_sources.source_bytes(folder / "acquire.py")) != plan["script_sha256"]
             or identities["plan_hash"] != base.digest(plan)
             or identity["ts_code"] != code
             or identity["fullname"] != names[symbol]
@@ -135,7 +136,7 @@ def history():
         for label, start, end in pieces:
             request = base.read(folder / f"attempt-{label}.json")
             receipt = base.read(folder / f"receipt-{label}.json")
-            raw = (folder / f"response-{label}.json").read_bytes()
+            raw = _sources.source_bytes(folder / f"response-{label}.json")
             if (
                 request["plan_hash"] != base.digest(plan)
                 or request["api"] != "index_daily"
@@ -146,7 +147,7 @@ def history():
                 or receipt["request_hash"] != base.digest(request)
                 or receipt["status"] != "OK"
                 or receipt["bytes"] != len(raw)
-                or receipt["sha256"] != hashlib.sha256(raw).hexdigest()
+                or receipt["sha256"] != _sources.content_digest(raw)
             ):
                 raise ValueError("CB_HISTORICAL_RAW_CHANGED")
             parsed = parse(raw, code, start, end)
@@ -188,8 +189,8 @@ def load_piece(target, base_day, code, slot):
         or slot_for(request_at) != slot
     ):
         raise ValueError("CB_LIVE_RESPONSE_CHANGED_OR_LATE")
-    raw = (folder / f"raw/{slot}-{code}.response.json").read_bytes()
-    if meta["bytes"] != len(raw) or meta["body_sha256"] != hashlib.sha256(raw).hexdigest():
+    raw = _sources.source_bytes(folder / f"raw/{slot}-{code}.response.json")
+    if meta["bytes"] != len(raw) or meta["body_sha256"] != _sources.content_digest(raw):
         raise ValueError("CB_LIVE_RAW_CHANGED")
     points = parse(raw, code, needed[0], needed[-1])
     if any(day not in points for day in needed):
@@ -222,7 +223,7 @@ def capture(at):
         raise ValueError("CB_LIVE_WINDOW_CLOSED")
     target, base_day = window["target_nav_date"], window["base_nav_date"]
     folder = root() / target
-    if (folder / "input.json").exists():
+    if _sources.location_exists(folder / "input.json"):
         return load(target)
     deadline = datetime.combine(date.fromisoformat(target), time(8, 30), base.ZONE)
     needed = required(base_day, target)
@@ -238,8 +239,8 @@ def capture(at):
                 or slot_for(request_at) != slot
             ):
                 raise ValueError("CB_LIVE_REQUEST_TIME_INVALID")
-            if not meta_path.exists():
-                if attempt.exists() or len(list((folder / "requests").glob("*.json"))) >= 9:
+            if not _sources.location_exists(meta_path):
+                if _sources.location_exists(attempt) or len(list((folder / "requests").glob("*.json"))) >= 9:
                     raise ValueError("CB_LIVE_SLOT_OR_BUDGET_EXHAUSTED")
                 request = {
                     "at": request_at.isoformat(),
@@ -257,15 +258,14 @@ def capture(at):
                     received = base.now().isoformat()
                     raw_path = folder / f"raw/{slot}-{code}.response.json"
                     raw_path.parent.mkdir(parents=True, exist_ok=True)
-                    with raw_path.open("xb") as file:
-                        file.write(raw)
+                    _sources.write_source(raw_path, raw)
                     base.save(
                         meta_path,
                         {
                             "received_at": received,
                             "source": SOURCE,
                             "request_hash": base.digest(request),
-                            "body_sha256": hashlib.sha256(raw).hexdigest(),
+                            "body_sha256": _sources.content_digest(raw),
                             "bytes": len(raw),
                         },
                     )

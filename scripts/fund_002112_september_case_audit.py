@@ -32,7 +32,7 @@ def raw_verified(receipt):
 
 def core_engine():
     cfg = {}
-    for line in Path("C:/ideaProject/workSpace12/.env").read_text(encoding="utf-8-sig").splitlines():
+    for line in Path("D:/Project-FullStack/workSpace01/02-java/.env").read_text(encoding="utf-8-sig").splitlines():
         if "=" in line and not line.lstrip().startswith("#"):
             key, value = line.split("=", 1)
             cfg[key.strip()] = value.strip()

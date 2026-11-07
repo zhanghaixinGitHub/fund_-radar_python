@@ -37,8 +37,8 @@ def market_scope() -> list[dict]:
         connection.execute(text("SET LOCAL statement_timeout='15000'"))
         rows = connection.execute(
             text(
-                "SELECT fund_code,fund_name FROM fund_share_class "
-                "WHERE source_code='TUSHARE_PRO_FUND' AND status='ACTIVE' ORDER BY fund_code"
+                "SELECT fund_code,fund_name,fund_type FROM fund_share_class "
+                "WHERE status='ACTIVE' ORDER BY fund_code"
             )
         )
         values = [dict(row) for row in rows.mappings()]

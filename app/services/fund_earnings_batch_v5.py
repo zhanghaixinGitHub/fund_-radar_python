@@ -4,12 +4,14 @@
 目录覆盖沿革和可复用正文来源，定向参考目录不冒充训练历史完整窗口。
 """
 
+# 原件路径只是数据库别名；业务读取不再打开C/D盘源文件。
 import json
 from datetime import datetime
 from pathlib import Path
 
 import pypdfium2 as pdfium
 
+from app.services import material_content as _source_store
 from app.services.fund_earnings_batch_v4 import (
     OLD,
     PYTHON,
@@ -53,7 +55,7 @@ class EarningsBatchV5(EarningsBatch):
     """新版本只扩展来源保护；原请求上限、缺失处理、分类和验证门槛不变。"""
 
     def prepare(self, previous_name):
-        if (self.out / "plan.json").exists():
+        if _source_store.location_exists(self.out / "plan.json"):
             plan = self.check_plan()
             if Path(plan["previous_run"]).name != previous_name:
                 raise ValueError("RESUME_PREDECESSOR_CHANGED")
@@ -91,7 +93,7 @@ class EarningsBatchV5(EarningsBatch):
         if any(sha(p) != h for p, h in protected.items()):
             raise ValueError("PROTECTED_EVIDENCE_CHANGED")
         for p in previous.rglob("*"):
-            if p.is_file():
+            if _source_store.source_exists(p):
                 protected.setdefault(str(p), sha(p))
         ledger = list((OLD / "fit-ledger").glob("*.json"))
         if len(ledger) != 12 or not all(read(p)["budget_consumed"] for p in ledger):
@@ -183,7 +185,7 @@ class EarningsBatchV5(EarningsBatch):
 
     def collect(self):
         plan = self.check_plan()
-        if (self.out / "collection-stop.json").exists():
+        if _source_store.location_exists(self.out / "collection-stop.json"):
             raise ValueError("BATCH_STOPPED_USE_AUDIT")
         stocks = read(ROOT / "supplement/cninfo-stock-map.json")["rows"]
         reader = BoundedPublicReader(self.out, plan["limits"])
@@ -191,7 +193,7 @@ class EarningsBatchV5(EarningsBatch):
         try:
             for i, window in enumerate(plan["windows"], 1):
                 target = self.out / "catalogs" / (digest(window) + ".json")
-                if target.exists():
+                if _source_store.location_exists(target):
                     continue
                 pages, receipts = [], []
                 try:
@@ -249,7 +251,7 @@ class EarningsBatchV5(EarningsBatch):
             save(self.out / "body-stop-intersections.json", intersections)
             for i, row in enumerate(work, 1):
                 target = self.out / "documents" / (row["announcementId"] + ".json")
-                if target.exists():
+                if _source_store.location_exists(target):
                     continue
                 try:
                     if document_stop(row, plan["source_stop_entries"]):
@@ -264,7 +266,7 @@ class EarningsBatchV5(EarningsBatch):
                         receipt = previous[0]
                         if sha(receipt["path"]) != receipt["sha256"]:
                             raise ValueError("CACHED_SOURCE_CHANGED")
-                        raw = Path(receipt["path"]).read_bytes()
+                        raw = _source_store.source_bytes(Path(receipt["path"]))
                     else:
                         raw, receipt = reader.fetch(url, group="body", maximum_bytes=plan["maximum_pdf_bytes"])
                     if len(raw) > plan["maximum_pdf_bytes"]:

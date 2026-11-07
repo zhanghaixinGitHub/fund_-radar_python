@@ -22,8 +22,8 @@ from app.services.direction_1d_protocol import ZONE, digest
 from sqlalchemy import create_engine, text
 
 PY = Path(__file__).resolve().parents[1]
-WEB = Path("C:/WebStormProject/workSpace05")
-JAVA = Path("C:/ideaProject/workSpace12")
+WEB = Path("D:/Project-FullStack/workSpace01/01-vue")
+JAVA = Path("D:/Project-FullStack/workSpace01/02-java")
 ROOT = PY / ".local-runs/fund-exposure-002112"
 OUT = ROOT / "recent-input-completion/20260930-v1"
 SECTORS = ("399998.SZ", "399986.SZ", "980017.SZ", "000819.SH", "980030.SZ")

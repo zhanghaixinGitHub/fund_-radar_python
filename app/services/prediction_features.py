@@ -163,7 +163,7 @@ def feature_values(series, lookback):
     return result
 
 
-def read_fund_data(fund_code, cutoff, *, replay=False, start=None, legacy_calendar=False):
+def read_fund_data(fund_code, cutoff, *, replay=False, start=None, legacy_calendar=False, verified_calendar=None):
     """一次事务批量读取净值、分红和公共资料；不读取账号、仓位或金额。"""
     with get_engine().connect().execution_options(isolation_level="REPEATABLE READ") as c, c.begin():
         fund = one(
@@ -182,7 +182,11 @@ def read_fund_data(fund_code, cutoff, *, replay=False, start=None, legacy_calend
             source=fund["source_id"],
         )
         fund.update({k: v for k, v in (profile or {}).items() if k in {"benchmark", "invest_type", "source_fund_type"}})
-        calendar = public_calendar(fund, legacy=legacy_calendar)
+        if verified_calendar is not None and not isinstance(verified_calendar, ValuationCalendar):
+            raise ValueError("VERIFIED_OUTCOME_CALENDAR_REQUIRED")
+        # 到期核对传入的日历已由同一原预测快照及原目标逐项重建验证；
+        # 新预测与其他调用默认仍走原公开产品准入，不扩大普通境内假设范围。
+        calendar = verified_calendar or public_calendar(fund, legacy=legacy_calendar)
         navs = rows(
             c,
             """SELECT * FROM nav_daily WHERE fund_code=:code AND source_id=:source

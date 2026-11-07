@@ -4,7 +4,6 @@
 维度分或总分。资料包不可变、原件逐次核验，发布复用现有事务、类别锁和审计。
 """
 
-import hashlib
 import re
 from collections import Counter
 from datetime import UTC, date, datetime, timedelta
@@ -15,6 +14,7 @@ from urllib.parse import urlsplit
 
 from app.core.config import get_settings
 from app.services.fund_rating_rules import DIMENSIONS, GRADES, grade, stored_score
+from app.services.material_content import content_digest, source_bytes, source_exists, source_size, source_text
 
 ACTIVE_BASIS = "PUBLIC_REVIEWED_ACTIVE_QUALITY_V2"
 PASSIVE_BASIS = "PUBLIC_REVIEWED_PASSIVE_QUALITY_V2"
@@ -237,9 +237,9 @@ def validate_sources(bundle: dict, frozen: datetime, *, root: Path | None = None
         received = datetime.fromisoformat(source["acquired_at"])
         if received.tzinfo is None or received > frozen:
             raise ValueError("RATING_QUALITY_SOURCE_FUTURE")
-        if not path.is_relative_to(directory) or not path.is_file() or path.stat().st_size > 50_000_000:
+        if not path.is_relative_to(directory) or not source_exists(path) or source_size(path) > 50_000_000:
             raise ValueError("RATING_QUALITY_SOURCE_PATH")
-        if hashlib.sha256(path.read_bytes()).hexdigest() != source["sha256"]:
+        if content_digest(source_bytes(path)) != source["sha256"]:
             raise ValueError("RATING_QUALITY_SOURCE_HASH")
         if source["kind"] == "ORIGINAL":
             url = urlsplit(source["url"])
@@ -247,6 +247,9 @@ def validate_sources(bundle: dict, frozen: datetime, *, root: Path | None = None
 
             allowed = HOSTS | {
                 "www.dbfund.com.cn",
+                "www.jsfund.cn",
+                "oss-ch.csindex.com.cn",
+                "fund.pingan.com",
                 "dbfund.com.cn",
                 "static.cninfo.com.cn",
                 "www.cninfo.com.cn",
@@ -258,11 +261,25 @@ def validate_sources(bundle: dict, frozen: datetime, *, root: Path | None = None
                 "investor.szse.cn",
                 "www.csrc.gov.cn",
                 "sp.capco.org.cn",
+                "www.capco.org.cn",
+                "www.pbc.gov.cn",
                 "dataclouds.cninfo.com.cn",
                 "www.cnindex.com.cn",
                 "api.tushare.pro",
                 "np-cnotice-stock.eastmoney.com",
                 "epaper.stcn.com",
+                # 本轮已核实际字节的公开披露/转载及分类原域，仍逐件校验。
+                "hongdianfund.com",
+                "www.hongdianfund.com",
+                "stock.finance.sina.com.cn",
+                "www.stats.gov.cn",
+                "paper.cnstock.com",
+                "epaper.cs.com.cn",
+                "fund.eastmoney.com",
+                "disc.static.szse.cn",
+                "m.cgbchina.com.cn",
+                "www.cgbchina.com.cn",
+                "money.finance.sina.com.cn",
             }
             provider = (
                 source.get("source_code") == "TUSHARE_PRO_FUND" and source["url"] == get_settings().tushare_api_url
@@ -292,12 +309,11 @@ def validate_sources(bundle: dict, frozen: datetime, *, root: Path | None = None
             raise ValueError("RATING_QUALITY_IDENTITY_BINDINGS")
         path = paths[binding["source_ref"]]
         if path.suffix.lower() == ".pdf":
-            import pypdfium2 as pdfium
+            from app.services.fund_rating_pdf import text_pages
 
-            with pdfium.PdfDocument(path) as document:
-                body = "".join(document[i].get_textpage().get_text_range() for i in range(min(12, len(document))))
+            body = "".join(text_pages(path, limit=12))
         else:
-            body = path.read_text(encoding="utf-8")
+            body = source_text(path, encoding="utf-8")
         body = re.sub(r"\s+", "", body)
         if any(re.sub(r"\s+", "", text) not in body for text in binding["required_text"]):
             raise ValueError("RATING_QUALITY_IDENTITY_ORIGINAL_MISMATCH")

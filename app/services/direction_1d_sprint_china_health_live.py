@@ -1,12 +1,13 @@
 """KURE未来输入一次实收；只在08:00至08:30采集，不回填、不重试、不冒充历史为未来。"""
 
-import hashlib
+# 原始响应统一归档外接盘；历史路径只作为数据库别名，不生成C盘源文件。
 from datetime import date, datetime, time
 
 from app.integrations import sina_sprint_china_health_etf as api
 from app.services import direction_1d_sprint as b
 from app.services import direction_1d_sprint_china_health_data as data
 from app.services import direction_1d_sprint_overnight as overnight
+from app.services import material_content as _sources
 
 
 def root():
@@ -50,12 +51,12 @@ def reconstruct(t, u, ph):
     require(all(datetime.fromisoformat(s) <= started for s in aligned["close_events"].values()), "UNCLOSED_SESSION")
     points, error = {}, None
     if receipt["status"] == "RECEIVED":
-        raw = (r / "raw.bin").read_bytes()
+        raw = _sources.source_bytes(r / "raw.bin")
         require(
             receipt["http_status"] == 200
             and 0 < len(raw) <= api.MAX_BYTES
             and receipt["bytes"] == len(raw)
-            and hashlib.sha256(raw).hexdigest() == receipt["sha256"],
+            and _sources.content_digest(raw) == receipt["sha256"],
             "RAW_CHANGED",
         )
         try:
@@ -64,7 +65,9 @@ def reconstruct(t, u, ph):
         except (ValueError, TypeError, KeyError) as exc:
             error = type(exc).__name__ + ":" + str(exc)[:100]
     else:
-        require(receipt["status"] == "FAILED_NO_RETRY" and not (r / "raw.bin").exists(), "FAILURE_CHANGED")
+        require(
+            receipt["status"] == "FAILED_NO_RETRY" and not _sources.location_exists(r / "raw.bin"), "FAILURE_CHANGED"
+        )
         error = receipt["error_type"]
     feature = data.features(t, u, points)
     return {
@@ -94,12 +97,12 @@ def load_live(t, u, ph):
 def capture(t, u, ph):
     """一个目标日最多一次新GET；断电留下请求时不会再次请求，保持真实缺口。"""
     r = root() / u
-    if (r / "snapshot.json").exists():
+    if _sources.location_exists(r / "snapshot.json"):
         return load_live(t, u, ph)
     if not in_window(t, u, b.now()):
         return None
     r.mkdir(parents=True, exist_ok=True)
-    if not (r / "request.json").exists():
+    if not _sources.location_exists(r / "request.json"):
         request = {
             "at": b.now().isoformat(),
             "t": t,
@@ -112,20 +115,19 @@ def capture(t, u, ph):
         b.save(r / "request.json", request)
         try:
             raw, headers = api.fetch_etf("KURE")
-            with (r / "raw.bin").open("xb") as f:
-                f.write(raw)
+            _sources.write_source(r / "raw.bin", raw)
             receipt = {
                 "at": b.now().isoformat(),
                 "request_hash": b.digest(request),
                 "status": "RECEIVED",
                 "http_status": 200,
                 "bytes": len(raw),
-                "sha256": hashlib.sha256(raw).hexdigest(),
+                "sha256": _sources.content_digest(raw),
                 "headers": headers,
             }
         except Exception as exc:
             # 原文写盘异常不归为正常网络失败，保留可见错误而非生成虚假失败收据。
-            if (r / "raw.bin").exists():
+            if _sources.location_exists(r / "raw.bin"):
                 raise
             receipt = {
                 "at": b.now().isoformat(),
@@ -134,7 +136,7 @@ def capture(t, u, ph):
                 "error_type": type(exc).__name__,
             }
         b.save(r / "response.json", receipt)
-    if not (r / "response.json").exists():
+    if not _sources.location_exists(r / "response.json"):
         return None
     actual = reconstruct(t, u, ph)
     snapshot = actual | {"at": b.now().isoformat()}

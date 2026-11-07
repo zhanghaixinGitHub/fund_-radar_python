@@ -1,6 +1,6 @@
 """002112 已披露股票的行情补齐；复用有原文哈希的研究数据，新增调用有预算。"""
 
-import hashlib
+# 原件路径只是数据库别名；业务读取不再打开C/D盘源文件。
 import json
 import math
 import time
@@ -14,6 +14,7 @@ from sqlalchemy import text
 from app.core.config import get_settings
 from app.db.session import get_engine
 from app.integrations.tushare_sprint_stock_breadth_v2 import FIELDS, parse
+from app.services import material_content as _source_store
 from app.services.direction_1d_protocol import ZONE, calendar, digest
 from app.services.fund_exposure_common import ROOT, blob, initialize, now, read, save
 
@@ -70,15 +71,15 @@ class Provider:
         request = {"api": api, "params": params, "fields": fields}
         key = digest(request)
         path = ROOT / "quote-receipts" / (key + ".json")
-        if path.exists():
+        if _source_store.location_exists(path):
             receipt = read(path)
             query_end = params.get("end_date", params.get("trade_date", ""))
             refresh_recent = query_end >= (now().date() - timedelta(days=7)).strftime("%Y%m%d") and (
                 now() - datetime.fromisoformat(receipt["received_at"]) >= timedelta(minutes=30)
             )
             if datetime.fromisoformat(receipt["expires_at"]) > now() and not refresh_recent:
-                raw = (ROOT / receipt["file"]).read_bytes()
-                if hashlib.sha256(raw).hexdigest() != receipt["sha256"]:
+                raw = _source_store.source_bytes(ROOT / receipt["file"])
+                if _source_store.content_digest(raw) != receipt["sha256"]:
                     raise ValueError("EXPOSURE_RAW_HASH_MISMATCH")
                 return json.loads(raw), receipt
             if datetime.fromisoformat(receipt["expires_at"]) <= now():
@@ -162,19 +163,19 @@ def reuse_stock_history(codes, retention_days):
     ):
         for path in sorted((root / directory / "raw").glob("*.json")):
             receipt_path = path.parent.parent / "responses" / path.name
-            if not receipt_path.exists():
+            if not _source_store.location_exists(receipt_path):
                 continue
             receipt = read(receipt_path)
             expires = datetime.fromisoformat(receipt["received_at"]) + timedelta(days=retention_days)
             if expires <= now():
                 raise ValueError("EXPOSURE_EVIDENCE_EXPIRED")
-            raw = path.read_bytes()
-            if hashlib.sha256(raw).hexdigest() != receipt["sha256"]:
+            raw = _source_store.source_bytes(path)
+            if _source_store.content_digest(raw) != receipt["sha256"]:
                 raise ValueError("EXPOSURE_RAW_HASH_MISMATCH")
             content = json.loads(raw)
             target = datetime.strptime(content["data"]["items"][0][1], "%Y%m%d").date().isoformat()
             target_path = ROOT / "stock-days" / (target + ".json")
-            if target_path.exists():
+            if _source_store.location_exists(target_path):
                 days[target] = read(target_path)
                 continue
             evidence = {**receipt, "raw_path": str(path), "expires_at": expires.isoformat(), "reused": True}
@@ -212,13 +213,13 @@ def acquire_quotes(*, incremental=False):
     for day in (d for d in sessions if start_day <= d <= end):
         key = str(day)
         path = ROOT / "stock-days" / (key + ".json")
-        if path.exists():
+        if _source_store.location_exists(path):
             existing = read(path)
             if incremental and existing.get("universe_hash") != digest(codes):
                 receipt = existing["receipt"]
                 raw_path = ROOT / receipt["file"] if "file" in receipt else Path(receipt["raw_path"])
-                raw = raw_path.read_bytes()
-                if hashlib.sha256(raw).hexdigest() != receipt["sha256"]:
+                raw = _source_store.source_bytes(raw_path)
+                if _source_store.content_digest(raw) != receipt["sha256"]:
                     raise ValueError("EXPOSURE_RAW_HASH_MISMATCH")
                 save(path, stock_day(raw, receipt, codes, key), replace=True)
             if not incremental or day < end - timedelta(days=7):
@@ -226,7 +227,7 @@ def acquire_quotes(*, incremental=False):
         try:
             value, receipt = provider.query("daily", {"trade_date": day.strftime("%Y%m%d")}, FIELDS)
             parsed = stock_day(json.dumps(value).encode(), receipt, codes, key)
-            save(path, parsed, replace=path.exists())
+            save(path, parsed, replace=_source_store.location_exists(path))
             days[key] = parsed
         except Exception as exc:
             errors.append({"kind": "daily", "date": key, "reason": safe_error(exc)})
@@ -238,11 +239,12 @@ def acquire_quotes(*, incremental=False):
     basic_codes = [h["stock_code"] for h in latest_report["holdings"]] if incremental else codes
     for code in basic_codes:
         path = ROOT / "stock-basic" / (code + ".json")
-        if path.exists() and read(path)["through"] >= str(end) and not incremental:
+        if _source_store.location_exists(path) and read(path)["through"] >= str(end) and not incremental:
             continue
         try:
-            previous = read(path) if path.exists() else {"rows": {}, "receipts": []}
-            start = date.fromisoformat(previous["through"]) - timedelta(days=7) if path.exists() else date(2021, 1, 1)
+            previous = read(path) if _source_store.location_exists(path) else {"rows": {}, "receipts": []}
+            start = (date.fromisoformat(previous["through"]) - timedelta(days=7)
+                     if _source_store.location_exists(path) else date(2021, 1, 1))
             value, receipt = provider.query(
                 "daily_basic",
                 {"ts_code": code, "start_date": start.strftime("%Y%m%d"), "end_date": end.strftime("%Y%m%d")},
@@ -279,11 +281,12 @@ def acquire_quotes(*, incremental=False):
                 break
     for code in INDICES:
         path = ROOT / "indices" / (code + ".json")
-        if path.exists() and read(path)["through"] >= str(end) and not incremental:
+        if _source_store.location_exists(path) and read(path)["through"] >= str(end) and not incremental:
             continue
         try:
-            previous = read(path) if path.exists() else {"rows": {}, "receipts": []}
-            start = date.fromisoformat(previous["through"]) - timedelta(days=7) if path.exists() else date(2021, 1, 1)
+            previous = read(path) if _source_store.location_exists(path) else {"rows": {}, "receipts": []}
+            start = (date.fromisoformat(previous["through"]) - timedelta(days=7)
+                     if _source_store.location_exists(path) else date(2021, 1, 1))
             value, receipt = provider.query(
                 "index_daily",
                 {"ts_code": code, "start_date": start.strftime("%Y%m%d"), "end_date": end.strftime("%Y%m%d")},

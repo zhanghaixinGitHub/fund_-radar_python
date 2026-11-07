@@ -4,7 +4,6 @@
 历史合同或策略容量。合同的现金加短债下限也不冒充现金目标区间。
 """
 
-import hashlib
 import json
 import re
 import unicodedata
@@ -22,6 +21,7 @@ from app.services.fund_rating_public_market import (
     section,
 )
 from app.services.fund_rating_rules import decimal
+from app.services.material_content import content_digest, source_bytes, source_size
 
 
 def normalize_number_lines(value: str) -> str:
@@ -44,18 +44,23 @@ def holder_pressure(text: str) -> tuple[Decimal, str, list[dict]]:
         r"(?m)^[ \t]*报告期内单一投资者持有基金份额比例达到(?:或|或者)超过\s*20\s*[%％]的情况[ \t]*$",
         text,
     ):
-        if re.search(r"(?m)^[ \t]*影响投资者决策的其他重要信息[ \t]*$",
-                     text[max(0, match.start() - 300):match.start()]):
+        if re.search(
+            r"(?m)^[ \t]*影响投资者决策的其他重要信息[ \t]*$", text[max(0, match.start() - 300) : match.start()]
+        ):
             matches.append(match)
     matches.sort(key=lambda match: match.start())
     if not matches:
         raise ValueError("HOLDER_PERIOD_SECTION_MISSING")
     raw = text[matches[-1].start() :][:8000]
-    raw = re.split(r"产品特有风险|\d+\.2\s*影响投资者|§\s*12|12\.1\s*备查|"
-                   r"(?m:^[ \t]*(?:影响投资者决策的其他重要信息|备查文件目录)[ \t]*$)", raw)[0]
+    raw = re.split(
+        r"产品特有风险|\d+\.2\s*影响投资者|§\s*12|12\.1\s*备查|"
+        r"(?m:^[ \t]*(?:影响投资者决策的其他重要信息|备查文件目录)[ \t]*$)",
+        raw,
+    )[0]
     normalized = compact(raw).replace("％", "%")
-    statement = re.sub(r"^(?:\d+\.\d+)?报告期内单一投资者持有基金份额比例达到(?:或|或者)超过20%的情况[：:]?",
-                       "", normalized)
+    statement = re.sub(
+        r"^(?:\d+\.\d+)?报告期内单一投资者持有基金份额比例达到(?:或|或者)超过20%的情况[：:]?", "", normalized
+    )
     first = statement.split("。", 1)[0]
     # “无”只在该项正文中有效，不读取产品特有风险中的假设描述。
     negative_claim = re.match(
@@ -123,9 +128,13 @@ def holder_pressure(text: str) -> tuple[Decimal, str, list[dict]]:
             begin, buy, sell, final = values
         balances_known = begin is not None and final is not None
         gross_known = buy is not None and sell is not None
-        if (not balances_known and not gross_known
-                or any(value is not None and value < 0 for value in (begin, final))
-                or percent is not None and not 0 <= percent <= 100):
+        if (
+            not balances_known
+            and not gross_known
+            or any(value is not None and value < 0 for value in (begin, final))
+            or percent is not None
+            and not 0 <= percent <= 100
+        ):
             raise ValueError("HOLDER_FLOW_VALUE_MISSING")
         if balances_known and buy is None and sell is not None:
             buy = final - begin + sell
@@ -135,8 +144,11 @@ def holder_pressure(text: str) -> tuple[Decimal, str, list[dict]]:
         # 期初和期末明确时，净申赎=期末-期初已唯一确定；两项总发生额仍保留未知。
         # 这不会把“－”补成0，也不能据此声称总申购、总赎回已经逐项对账。
         if not net_only and (
-            buy is None or sell is None or min(buy, sell) < 0
-            or balances_known and abs(begin + buy - sell - final) > Decimal("0.01")
+            buy is None
+            or sell is None
+            or min(buy, sell) < 0
+            or balances_known
+            and abs(begin + buy - sell - final) > Decimal("0.01")
         ):
             raise ValueError("HOLDER_FLOW_NOT_RECONCILED")
         # 已有余额完整时维持原有“期末-期初”及一分钱对账口径；两端均未披露
@@ -235,41 +247,62 @@ def source_documents(code: str, refs: list[dict], root: Path, as_of: date | None
                 # 创金合信仅接纳实际已核的定期报告下载路径，并重读同批保存的
                 # 官网目录原响应。域名、布尔标志或可打开PDF都不能单独证明
                 # 公告归属/公开日期；不扩展第一版正式评级的来源名单。
-                if (ref.get("label") not in periodic_labels or address.scheme != "https"
-                        or address.username or address.password or address.port not in {None, 443}
-                        or not address.path.startswith("/plat_files/uploadProdAd/importFile/")):
+                if (
+                    ref.get("label") not in periodic_labels
+                    or address.scheme != "https"
+                    or address.username
+                    or address.password
+                    or address.port not in {None, 443}
+                    or not address.path.startswith("/plat_files/uploadProdAd/importFile/")
+                ):
                     raise ValueError("CJHX_PERIODIC_ORIGINAL_ROUTE_UNVERIFIED")
-                catalogs = [r for r in refs if r.get("sha256") == ref.get("issuer_catalog_sha256")
-                            and r.get("label") == "issuer-periodic-catalog"]
+                catalogs = [
+                    r
+                    for r in refs
+                    if r.get("sha256") == ref.get("issuer_catalog_sha256")
+                    and r.get("label") == "issuer-periodic-catalog"
+                ]
                 if len(catalogs) != 1:
                     raise ValueError("CJHX_PERIODIC_CATALOG_ORIGINAL_REQUIRED")
                 catalog_ref = catalogs[0]
                 catalog_address = urlsplit(catalog_ref["url"])
-                if (catalog_address.scheme != "https" or catalog_address.hostname != host
-                        or catalog_address.path != "/servlet/json" or catalog_address.query
-                        or catalog_address.username or catalog_address.password
-                        or catalog_address.port not in {None, 443}
-                        or catalog_ref.get("params", {}).get("funcNo") != "742006"):
+                if (
+                    catalog_address.scheme != "https"
+                    or catalog_address.hostname != host
+                    or catalog_address.path != "/servlet/json"
+                    or catalog_address.query
+                    or catalog_address.username
+                    or catalog_address.password
+                    or catalog_address.port not in {None, 443}
+                    or catalog_ref.get("params", {}).get("funcNo") != "742006"
+                ):
                     raise ValueError("CJHX_PERIODIC_CATALOG_ROUTE_UNVERIFIED")
                 catalog_path = (root / catalog_ref["file"]).resolve()
-                if (not catalog_path.is_relative_to(root.resolve() / "sources")
-                        or catalog_path.stat().st_size > 2_000_000):
+                if not catalog_path.is_relative_to(root.resolve() / "sources") or source_size(catalog_path) > 2_000_000:
                     raise ValueError("CJHX_PERIODIC_CATALOG_PATH_OR_SIZE")
-                catalog_raw = catalog_path.read_bytes()
-                if hashlib.sha256(catalog_raw).hexdigest() != catalog_ref["sha256"]:
+                catalog_raw = source_bytes(catalog_path)
+                if content_digest(catalog_raw) != catalog_ref["sha256"]:
                     raise ValueError("CJHX_PERIODIC_CATALOG_HASH_CHANGED")
                 catalog = json.loads(catalog_raw)
-                if (not isinstance(catalog, dict) or catalog.get("error_no") != "0"
-                        or not isinstance(catalog.get("results"), list) or len(catalog["results"]) != 1
-                        or not isinstance(catalog["results"][0], dict)
-                        or not isinstance(catalog["results"][0].get("data"), list)
-                        or not all(isinstance(entry, dict) for entry in catalog["results"][0]["data"])):
+                if (
+                    not isinstance(catalog, dict)
+                    or catalog.get("error_no") != "0"
+                    or not isinstance(catalog.get("results"), list)
+                    or len(catalog["results"]) != 1
+                    or not isinstance(catalog["results"][0], dict)
+                    or not isinstance(catalog["results"][0].get("data"), list)
+                    or not all(isinstance(entry, dict) for entry in catalog["results"][0]["data"])
+                ):
                     raise ValueError("CJHX_PERIODIC_CATALOG_BUSINESS_OR_SCHEMA")
-                entries = [entry for entry in catalog["results"][0]["data"]
-                           if entry.get("attachment_url") and urljoin(catalog_ref["url"], entry["attachment_url"])
-                           == ref["url"] and code in {entry.get("main_product_code"), entry.get("product_code")}
-                           and entry.get("pub_date") == ref.get("published_on")
-                           and entry.get("title") == ref.get("title")]
+                entries = [
+                    entry
+                    for entry in catalog["results"][0]["data"]
+                    if entry.get("attachment_url")
+                    and urljoin(catalog_ref["url"], entry["attachment_url"]) == ref["url"]
+                    and code in {entry.get("main_product_code"), entry.get("product_code")}
+                    and entry.get("pub_date") == ref.get("published_on")
+                    and entry.get("title") == ref.get("title")
+                ]
                 if len(entries) != 1:
                     raise ValueError("CJHX_PERIODIC_CATALOG_IDENTITY_DATE_OR_ATTACHMENT_UNBOUND")
             elif host not in HOSTS | {"www.dbfund.com.cn", "dbfund.com.cn", "www.nffund.com", "www.bosera.com"}:
@@ -279,7 +312,7 @@ def source_documents(code: str, refs: list[dict], root: Path, as_of: date | None
             is_periodic = kind.startswith("periodic_")
             report_kind = "annual" if "annual" in ref.get("label", "") else "half"
             pages, metadata = public_document(
-                (root / ref["file"]).read_bytes(),
+                source_bytes(root / ref["file"]),
                 ref,
                 code,
                 ("年度报告" if report_kind == "annual" else "中期报告")
@@ -299,13 +332,21 @@ def source_documents(code: str, refs: list[dict], root: Path, as_of: date | None
             if cninfo:
                 from app.services.fund_quality_v2_periodic_sources import verify_cninfo_periodic
 
-                original = (root/ref["file"]).read_bytes()
+                original = source_bytes(root / ref["file"])
                 proof = verify_cninfo_periodic(original, pages, ref, refs=refs, root=root, code=code, as_of=as_of)
-                result[kind].update(regulatory_source_evidence=proof, source_authority="REGULATORY_DISCLOSURE_PDF",
-                                    source_format="REGULATORY_DISCLOSURE_PDF")
+                result[kind].update(
+                    regulatory_source_evidence=proof,
+                    source_authority="REGULATORY_DISCLOSURE_PDF",
+                    source_format="REGULATORY_DISCLOSURE_PDF",
+                )
             else:
-                result[kind]["source_authority"] = ("FULL_PUBLIC_REPRINT" if metadata is not None
-                    else "BOUND_PROVIDER_PDF" if host == ATTACHMENT_HOST else "ISSUER_ORIGINAL")
+                result[kind]["source_authority"] = (
+                    "FULL_PUBLIC_REPRINT"
+                    if metadata is not None
+                    else "BOUND_PROVIDER_PDF"
+                    if host == ATTACHMENT_HOST
+                    else "ISSUER_ORIGINAL"
+                )
             if kind == "prospectus" and (fallback or "publication_evidence" in ref):
                 from app.services.fund_quality_v2_publication_sources import verify_prospectus_publication
 
@@ -397,8 +438,11 @@ def locate(document: dict, quote: str) -> dict:
     needle = compact(quote)
     pages = [i + 1 for i, page in enumerate(document["pages"]) if needle and needle[:80] in compact(page)]
     return {
-        "source_hashes": [document["ref"]["sha256"], *document.get("identity_source_hashes", []),
-                          *document.get("publication_source_hashes", [])],
+        "source_hashes": [
+            document["ref"]["sha256"],
+            *document.get("identity_source_hashes", []),
+            *document.get("publication_source_hashes", []),
+        ],
         "pages": pages,
         "excerpt": quote[:2500],
         "source_url": document["ref"]["url"],
@@ -611,7 +655,7 @@ def historical_report_facts(code: str, refs: list[dict], root: Path, start: date
                 raise ValueError("HISTORICAL_REPORT_PUBLICATION_DATE_UNVERIFIED")
             if date.fromisoformat(str(ref["published_on"])[:10]) > end:
                 raise ValueError("HISTORICAL_REPORT_PUBLISHED_AFTER_AS_OF")
-            pages, _ = public_document((root / ref["file"]).read_bytes(), ref, code, "报告")
+            pages, _ = public_document(source_bytes(root / ref["file"]), ref, code, "报告")
             text = "\n".join(pages)
             normalized = compact(text)
             sent = re.search(r"(?:报告)?送出日期[:：]?(20\d{2})年(\d{1,2})月(\d{1,2})日", normalized)
@@ -696,10 +740,12 @@ def historical_report_facts(code: str, refs: list[dict], root: Path, start: date
 
             try:
                 record["allocation_asset_point"] = report_allocation_point(
-                    block, amounts, industry_text=normalize_number_lines(asset_text[starts[-1].end():]))
+                    block, amounts, industry_text=normalize_number_lines(asset_text[starts[-1].end() :])
+                )
                 try:
                     record["allocation_asset_point"]["net_asset_evidence"] = report_product_net_assets(
-                        pages, observed_on=observed, total_assets=amounts["合计"])
+                        pages, observed_on=observed, total_assets=amounts["合计"]
+                    )
                 except ValueError as exc:
                     # 净资产尚未识别不抹掉已核总资产点；也不把总资产坐标当
                     # 合同分母。按具名缺口阻止净资产条件演算。
@@ -853,13 +899,16 @@ def extract_disclosures(
 
                 accounting = accounting_observations(report.get("pages", []), period[1])
                 facts["accounting_observations"] = {
-                    **accounting, "source_hashes": [report["ref"]["sha256"]],
-                    "source_url": report["ref"]["url"], "published_on": report["ref"].get("published_on"),
+                    **accounting,
+                    "source_hashes": [report["ref"]["sha256"]],
+                    "source_url": report["ref"]["url"],
+                    "published_on": report["ref"].get("published_on"),
                     "source_format": report.get("source_format"),
                 }
             except ValueError as exc:
                 facts["accounting_observation_gap"] = {
-                    "reason": str(exc), "source_hashes": [report["ref"]["sha256"]],
+                    "reason": str(exc),
+                    "source_hashes": [report["ref"]["sha256"]],
                     "scope": "ORIGINAL_AVAILABLE_ACCOUNTING_LAYOUT_UNRESOLVED_NOT_MISSING_REPORT",
                 }
             # 治理原文先提取并保留；半年度未受处罚不等于三年完整核查或独立评审。
@@ -899,7 +948,11 @@ def extract_disclosures(
     report_name = re.search(r"基金名称[:：]?([^:：。]{4,100}?证券投资基金)", compact(report.get("text", ""))[:16000])
     if report_name:
         facts["contract_benchmark_transitions"] = benchmark_transitions(
-            refs=refs, root=root, legal_name=report_name[1], as_of=as_of, code=code,
+            refs=refs,
+            root=root,
+            legal_name=report_name[1],
+            as_of=as_of,
+            code=code,
         )
     literal = facts.get("contract_benchmark_expression", {}).get("expression")
     if literal and urlsplit(prospectus.get("ref", {}).get("url", "")).hostname == "static.cmfchina.com":
@@ -908,7 +961,8 @@ def extract_disclosures(
             facts["contract_benchmark_calculation"] = calculation | locate(prospectus, calculation["method_excerpt"])
         except ValueError as exc:
             facts["contract_benchmark_calculation_gap"] = {
-                "reason": str(exc), "source_hashes": [prospectus["ref"]["sha256"]],
+                "reason": str(exc),
+                "source_hashes": [prospectus["ref"]["sha256"]],
                 "scope": "EXISTING_CONTRACT_ORIGINAL_METHOD_UNRESOLVED_NOT_MISSING_DOCUMENT",
             }
     for document in contracts:
@@ -952,7 +1006,7 @@ def extract_disclosures(
     manager_hashes = []
     provider = next((r for r in refs if r.get("label") == "provider"), None)
     if provider:
-        snapshot = json.loads((root / provider["file"]).read_bytes())
+        snapshot = json.loads(source_bytes(root / provider["file"]))
         if snapshot.get("fund_code") != code:
             raise ValueError("MANAGER_PROVIDER_PRODUCT_MISMATCH")
         records = snapshot.get("manager_records", [])
@@ -978,7 +1032,7 @@ def extract_disclosures(
         from app.services.fund_quality_v2_database_nav import database_nav_coverage
 
         nav_ref = database_nav_refs[-1]
-        snapshot = json.loads((root / nav_ref["file"]).read_bytes())
+        snapshot = json.loads(source_bytes(root / nav_ref["file"]))
         database_snapshot = snapshot
         facts["own_nav_coverage"] = database_nav_coverage(
             snapshot, fund_code=code, as_of=as_of, frozen=frozen or datetime.fromisoformat(nav_ref["acquired_at"])
@@ -994,20 +1048,22 @@ def extract_disclosures(
         own_curve = facts.get("own_nav_coverage", {}).get("curve", {})
         required_days = own_curve.get("dates", [])
         component_result = component_histories(
-            refs=refs, root=root, required_from=date.fromisoformat(required_days[0]) if required_days else start,
-            as_of=as_of, required_fund_dates=required_days,
+            refs=refs,
+            root=root,
+            required_from=date.fromisoformat(required_days[0]) if required_days else start,
+            as_of=as_of,
+            required_fund_dates=required_days,
             frozen=frozen,
         )
         bound_contract = facts.get("contract_benchmark_expression", {})
         if "恒生综合指数收益率" not in bound_contract.get("expression", ""):
             component_result = {"error": "COMPONENT_NOT_IN_BOUND_CONTRACT_EXPRESSION", "scoring_metric": None}
         facts["contract_component_price_history"] = component_result | {
-            "contract_source_hashes": bound_contract.get("source_hashes", [])}
+            "contract_source_hashes": bound_contract.get("source_hashes", [])
+        }
     # 成对历史不再被旧版八维整包准入阻断。这里只复用真实本份额净值和
     # 发行人日合同基准，旧包已有成对曲线时保持原路径及来源绑定不变。
-    benchmark_refs = sorted(
-        [r for r in refs if r.get("label") == "benchmark"], key=lambda r: r.get("acquired_at", "")
-    )
+    benchmark_refs = sorted([r for r in refs if r.get("label") == "benchmark"], key=lambda r: r.get("acquired_at", ""))
     own = facts.get("own_nav_coverage", {})
     contract = facts.get("contract_benchmark_expression", {})
     if not bundle and own.get("curve") and contract.get("expression") and benchmark_refs:
@@ -1019,24 +1075,36 @@ def extract_disclosures(
             transitions = facts.get("contract_benchmark_transitions", {})
             if transitions.get("events") or transitions.get("unresolved_originals"):
                 raise ValueError("QUALITY_PAIRED_KNOWN_BENCHMARK_CHANGE_EFFECTIVE_HISTORY_UNVERIFIED")
-            benchmark_raw = (root / benchmark_ref["file"]).read_bytes()
+            benchmark_raw = source_bytes(root / benchmark_ref["file"])
             reconciliation, cash_ref = None, None
             try:
                 paired = paired_history(own["curve"], benchmark_raw, benchmark_ref, fund_code=code)
             except ValueError as conflict:
-                cash_refs = sorted([r for r in refs if r.get("label") == "cash-event-snapshot"],
-                                   key=lambda r: r["acquired_at"])
+                cash_refs = sorted(
+                    [r for r in refs if r.get("label") == "cash-event-snapshot"], key=lambda r: r["acquired_at"]
+                )
                 notice_refs = [r for r in refs if r.get("label") == "cash-dividend-notice"]
-                if (str(conflict) != "QUALITY_PAIRED_PROVIDER_PUBLISHER_NAV_CONFLICT"
-                        or database_snapshot is None or not cash_refs or not notice_refs):
+                if (
+                    str(conflict) != "QUALITY_PAIRED_PROVIDER_PUBLISHER_NAV_CONFLICT"
+                    or database_snapshot is None
+                    or not cash_refs
+                    or not notice_refs
+                ):
                     raise
                 from app.services.fund_quality_v2_cash_reconciliation import reconcile_cash_history
 
                 cash_ref = cash_refs[-1]
-                cash_snapshot = json.loads((root / cash_ref["file"]).read_bytes())
+                cash_snapshot = json.loads(source_bytes(root / cash_ref["file"]))
                 reconciliation = reconcile_cash_history(
-                    own["curve"], database_snapshot, benchmark_raw, benchmark_ref, cash_snapshot,
-                    notice_refs, root, fund_code=code, as_of=as_of,
+                    own["curve"],
+                    database_snapshot,
+                    benchmark_raw,
+                    benchmark_ref,
+                    cash_snapshot,
+                    notice_refs,
+                    root,
+                    fund_code=code,
+                    as_of=as_of,
                 )
                 # 派生序列单独保留，不能把它写回own_nav_coverage或供应商原件。
                 paired = paired_history(reconciliation["curve"], benchmark_raw, benchmark_ref, fund_code=code)
@@ -1046,7 +1114,8 @@ def extract_disclosures(
                 hashes = sorted(set(hashes + reconciliation["event_source_hashes"] + [cash_ref["sha256"]]))
             facts["paired_contract_history"] = {
                 "status": "PAIRED_OWN_NAV_ISSUER_CONTRACT_BENCHMARK_REBUILT",
-                "history": paired, "source_hashes": hashes,
+                "history": paired,
+                "source_hashes": hashes,
                 "scope": "RETROSPECTIVE_ORIGINAL_RECONSTRUCTION_NOT_PRIOR_PUBLICATION_OR_REVISION_PROOF",
                 "valuation_end": paired["dates"][-1],
                 "availability_cutoff": str(as_of),
@@ -1061,13 +1130,17 @@ def extract_disclosures(
                 }
             for name, value in values.items():
                 metrics[name] = {
-                    **contract, "value": str(value), "observed_on": paired["dates"][-1], "source_hashes": hashes,
+                    **contract,
+                    "value": str(value),
+                    "observed_on": paired["dates"][-1],
+                    "source_hashes": hashes,
                     "publisher_cross_check": paired["publisher_cross_check"],
                     **({"return_source_basis": reconciliation["derived_source"]} if reconciliation else {}),
                 }
         except (ValueError, KeyError, TypeError, OSError) as exc:
             facts["paired_contract_history"] = {
-                "error": str(exc), "source_hashes": [benchmark_ref["sha256"], *own.get("source_hashes", [])],
+                "error": str(exc),
+                "source_hashes": [benchmark_ref["sha256"], *own.get("source_hashes", [])],
             }
     manager_refs = sorted([r for r in refs if r.get("label") == "manager-api"], key=lambda r: r["acquired_at"])
     if manager_refs:
@@ -1075,7 +1148,7 @@ def extract_disclosures(
 
         latest_manager = manager_refs[-1]
         records = manager_api_records(
-            json.loads((root / latest_manager["file"]).read_bytes()), fund_code=code, ts_code=latest_manager["ts_code"]
+            json.loads(source_bytes(root / latest_manager["file"])), fund_code=code, ts_code=latest_manager["ts_code"]
         )
         manager_hashes = [latest_manager["sha256"]]
         facts["public_manager_history"] = {
@@ -1094,7 +1167,7 @@ def extract_disclosures(
             if not master or master != master_ref.get("master_code") or master_ref["ts_code"].split(".")[0] != master:
                 raise ValueError("MANAGER_MASTER_NOT_BOUND_BY_ORIGINAL_PRODUCT")
             product_records = manager_api_records(
-                json.loads((root / master_ref["file"]).read_bytes()), fund_code=master, ts_code=master_ref["ts_code"]
+                json.loads(source_bytes(root / master_ref["file"])), fund_code=master, ts_code=master_ref["ts_code"]
             )
             validate_product_manager_scope(product_records, records)
             records = product_records
@@ -1120,7 +1193,7 @@ def extract_disclosures(
             }:
                 raise ValueError("APPOINTMENT_SOURCE_HOST_NOT_REGISTERED")
             master = facts.get("product_identity", {}).get("product_id", "").rsplit(":", 1)[-1] or code
-            pages, _ = public_document((root / ref["file"]).read_bytes(), ref, master, "基金经理")
+            pages, _ = public_document(source_bytes(root / ref["file"]), ref, master, "基金经理")
             notice = new_team_from_appointment("\n".join(pages), fund_code=master, as_of=as_of)
             if ref.get("published_on") and ref["published_on"] != notice["published_on"]:
                 raise ValueError("APPOINTMENT_NOTICE_PUBLICATION_MISMATCH")
@@ -1238,7 +1311,7 @@ def extract_disclosures(
             or origin.path != "/www/illegal/listQuery"
         ):
             raise ValueError("GOVERNANCE_UNTRUSTED_REGULATOR_SOURCE")
-        decision = safe_decision((root / ref["file"]).read_bytes())
+        decision = safe_decision(source_bytes(root / ref["file"]))
         if not current_manager or decision["legal_entity"] != current_manager:
             facts.setdefault("governance_source_scope_gaps", []).append(
                 {
@@ -1301,29 +1374,39 @@ def extract_disclosures(
     )
     from app.services.fund_quality_v2_allocation import allocation_history
 
-    allocation = allocation_history(
-        refs=refs, root=root, reports=history["reports"], required_dates=expected,
-        legal_name=report_name[1] if report_name else "", as_of=as_of, code=code,
-    ) if report_name else {"observations": [], "reason": "REPORT_LEGAL_NAME_UNPARSED", "scoring_metric": None}
+    allocation = (
+        allocation_history(
+            refs=refs,
+            root=root,
+            reports=history["reports"],
+            required_dates=expected,
+            legal_name=report_name[1] if report_name else "",
+            as_of=as_of,
+            code=code,
+        )
+        if report_name
+        else {"observations": [], "reason": "REPORT_LEGAL_NAME_UNPARSED", "scoring_metric": None}
+    )
     facts["historical_allocation_constraints"] = allocation
     for name in ("allocation_deviation", "mandate_deviation"):
         required = {
-                "expected_report_dates": expected,
-                "available_report_dates": actual,
-                "missing_report_dates": sorted(set(expected) - set(actual)),
-                "disclosure_wait_or_unverified_dates": [
-                    r for r in availability["checkpoints"] if r["observed_on"] not in expected
-                ],
-                "source": "各期正式季度/中期/年度完整资产配置、同期生效合同、投资范围及穿透合规事实",
-                "contract_versions_available": len(history["contract_sources"]),
-                "remaining_contract_gap": "各版本生效日与历史披露逐期匹配；当前合同不能倒用",
-                "allocation_constraint_evidence": allocation,
-                "remaining_asset_gap": "配置需完整合同允许集合；投资范围偏离另需完整穿透资产及逐项范围核验",
-            }
+            "expected_report_dates": expected,
+            "available_report_dates": actual,
+            "missing_report_dates": sorted(set(expected) - set(actual)),
+            "disclosure_wait_or_unverified_dates": [
+                r for r in availability["checkpoints"] if r["observed_on"] not in expected
+            ],
+            "source": "各期正式季度/中期/年度完整资产配置、同期生效合同、投资范围及穿透合规事实",
+            "contract_versions_available": len(history["contract_sources"]),
+            "remaining_contract_gap": "各版本生效日与历史披露逐期匹配；当前合同不能倒用",
+            "allocation_constraint_evidence": allocation,
+            "remaining_asset_gap": "配置需完整合同允许集合；投资范围偏离另需完整穿透资产及逐项范围核验",
+        }
         missing(
             name,
             "SOURCE_WINDOW_INCOMPLETE" if required["missing_report_dates"] else "SOURCE_VALUE_UNRESOLVED",
-            "HISTORICAL_REPORTS_MISSING" if required["missing_report_dates"]
+            "HISTORICAL_REPORTS_MISSING"
+            if required["missing_report_dates"]
             else "COMPLETE_ALLOWED_SET_EFFECTIVE_CONTRACT_AND_DENOMINATOR_BINDING_REQUIRED"
             if name == "allocation_deviation"
             else "FULL_ASSET_SCOPE_CLASSIFICATION_AND_EFFECTIVE_CONTRACT_BINDING_REQUIRED",
@@ -1342,9 +1425,7 @@ def extract_disclosures(
         """从本次实际原件取得点账簿；保留横杠原值及唯一推导，不走V1金额默认值。"""
         from app.services.fund_quality_v2_balance_proofs import strict_balance_proof
 
-        proof = strict_balance_proof(
-            report_pages, observed_on=str(period[1]), source_hash=report["ref"]["sha256"]
-        )
+        proof = strict_balance_proof(report_pages, observed_on=str(period[1]), source_hash=report["ref"]["sha256"])
         facts["strict_balance_proof"] = proof
         if proof["point_book"] is None:
             raise ValueError("QUALITY_RESTRICTED_EXACT_BALANCE_POINT_NOT_IDENTIFIED")
@@ -1422,7 +1503,8 @@ def extract_disclosures(
                     facts["restricted_original_rebuild"] = {
                         "source_hashes": [report["ref"]["sha256"]],
                         "parser_header_view": rebuilt.get("parser_header_view"),
-                        "parsed_tables_amount_cny": rebuilt["restricted_amount"], "parsed_row_count": len(rows),
+                        "parsed_tables_amount_cny": rebuilt["restricted_amount"],
+                        "parsed_row_count": len(rows),
                         "subtotal_scope": "PARSED_DISCLOSURE_TABLES_NOT_PROOF_OF_ALL_ASSET_SCOPE",
                         "pledged_bond_evidence": rebuilt.get("pledged_bond_evidence"),
                     }
@@ -1529,10 +1611,14 @@ def extract_disclosures(
         # 策略有效容量。仅进入parsed_facts；不补RAW4缺项、不改变权重或评级。
         from app.services.fund_quality_v2_observable_liquidity import observable_liquidity_facts
 
-        facts.update(observable_liquidity_facts(
-            report["pages"], observed_on=str(period[1]), source_ref=report["ref"],
-            restricted_metric=metrics.get("restricted_ratio"),
-        ))
+        facts.update(
+            observable_liquidity_facts(
+                report["pages"],
+                observed_on=str(period[1]),
+                source_ref=report["ref"],
+                restricted_metric=metrics.get("restricted_ratio"),
+            )
+        )
     return {
         "metrics": metrics,
         "findings": findings,

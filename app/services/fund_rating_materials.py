@@ -4,8 +4,6 @@
 原始净值、持仓、报价和引用一并冻结进评级批次，避免仅保存一个无法复核的状态文本。
 """
 
-import hashlib
-import io
 import json
 import re
 from copy import deepcopy
@@ -15,12 +13,13 @@ from pathlib import Path
 from statistics import median
 from zoneinfo import ZoneInfo
 
-from pypdf import PdfReader
 from sqlalchemy import text
 
 from app.services.fund_exposure_common import ROOT, read
 from app.services.fund_rating_disclosures import appointed_teams, compact, equity_balance, key_information
 from app.services.fund_rating_metrics import equity_structure, history_metrics
+from app.services.material_content import content_digest, location_exists, source_bytes, source_exists, source_size
+from app.services.material_content import document_reader as PdfReader
 
 
 def _raw(root: Path, receipt: dict, frozen: datetime) -> bytes:
@@ -28,19 +27,19 @@ def _raw(root: Path, receipt: dict, frozen: datetime) -> bytes:
     # 已有行情回执复用相邻研究目录原文；只允许同一 .local-runs 根，不接受任意本机路径。
     path = (root / receipt["file"]).resolve() if "file" in receipt else Path(receipt["raw_path"]).resolve()
     allowed_root = root if "file" in receipt else root.parent
-    if not path.is_relative_to(allowed_root.resolve()) or not path.is_file() or path.stat().st_size > 20_000_000:
+    if not path.is_relative_to(allowed_root.resolve()) or not source_exists(path) or source_size(path) > 20_000_000:
         raise ValueError("RATING_MATERIAL_PATH_SIZE")
     acquired = datetime.fromisoformat(receipt["received_at"])
     if acquired.tzinfo is None or acquired > frozen:
         raise ValueError("RATING_MATERIAL_FUTURE")
-    raw = path.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != receipt["sha256"]:
+    raw = source_bytes(path)
+    if content_digest(raw) != receipt["sha256"]:
         raise ValueError("RATING_MATERIAL_HASH_MISMATCH")
     return raw
 
 
 def _pages(root, receipt, frozen):
-    reader = PdfReader(io.BytesIO(_raw(root, receipt, frozen)))
+    reader = PdfReader(_raw(root, receipt, frozen))
     if len(reader.pages) > 150:
         raise ValueError("RATING_DOCUMENT_PAGE_LIMIT")
     return [p.extract_text() or "" for p in reader.pages]
@@ -61,9 +60,9 @@ def _metric(name, value, unit, period):
 def _documents(root: Path, as_of: date):
     """只枚举已收录的基金法律文件；不扫描公司新闻全文，也不改历史指针。"""
     index = root / "materials-live/supplement/public-result.json"
-    if not index.exists():
+    if not location_exists(index):
         index = root / "supplement/public-result.json"
-    if not index.exists():
+    if not location_exists(index):
         return []
     result = []
     for item in read(index)["documents"]:
@@ -88,7 +87,7 @@ def _no_distribution_events(root, nav_rows, days, frozen):
     """
     catalog_path = root / "materials-live/supplement/public-catalog.json"
     nav_path = root / "supplement/official-nav.json"
-    if not catalog_path.exists() or not nav_path.exists():
+    if not location_exists(catalog_path) or not location_exists(nav_path):
         return None
     catalog, official = read(catalog_path), read(nav_path)
     checked = datetime.fromisoformat(catalog["at"])
@@ -161,7 +160,7 @@ def inspect_case(session, as_of: date, frozen: datetime, *, source_root: Path = 
     仅进入内部冻结输入；这些结果不能越过完整原件、同类样本和规则激活门槛。
     """
     report_index = source_root / "report-result.json"
-    if not report_index.exists():
+    if not location_exists(report_index):
         return None
     reports = []
     for name in read(report_index)["report_files"]:
@@ -372,7 +371,7 @@ def inspect_case(session, as_of: date, frozen: datetime, *, source_root: Path = 
     quotes, missing_quotes = [], []
     for day in days[-20:]:
         path = source_root / "stock-days" / f"{day}.json"
-        daily = read(path) if path.exists() else None
+        daily = read(path) if location_exists(path) else None
         if daily:
             _raw(source_root, daily["receipt"], frozen)
             data["sources"].append(daily["receipt"])
@@ -579,7 +578,7 @@ def archive_materials(material: dict, root: Path, frozen: datetime) -> list[dict
         try:
             _publish(path, raw)
         except FileExistsError:
-            if hashlib.sha256(path.read_bytes()).hexdigest() != key:
+            if content_digest(source_bytes(path)) != key:
                 raise ValueError("RATING_ARCHIVED_SOURCE_CORRUPT") from None
         archived[key] = {"sha256": key, "file": relative}
     return sorted(archived.values(), key=lambda item: item["sha256"])

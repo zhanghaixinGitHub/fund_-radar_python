@@ -9,6 +9,9 @@ from app.services.fund_market_workflow import MarketSyncWorkflow
 
 
 class Preparation:
+    def sync_share_classes(self, funds, **kwargs):
+        return {"status": "SUCCEEDED", "total": len(funds), "unverified": 0}
+
     def sync_news(self, code, **kwargs):
         if code == "000001":
             raise ValueError("source failure")

@@ -29,8 +29,8 @@ from app.services.fund_information_history_v1 import (
 )
 
 PYTHON = Path(__file__).resolve().parents[1]
-FRONT = Path("C:/WebStormProject/workSpace05")
-JAVA = Path("C:/ideaProject/workSpace12")
+FRONT = Path("D:/Project-FullStack/workSpace01/01-vue")
+JAVA = Path("D:/Project-FullStack/workSpace01/02-java")
 
 
 def old_bundle():

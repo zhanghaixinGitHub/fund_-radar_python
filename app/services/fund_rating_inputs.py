@@ -1,6 +1,5 @@
 """从现有库准备真实覆盖清单，从经核验原始包准备八维；页面不会调用此模块。"""
 
-import hashlib
 import json
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
@@ -16,6 +15,7 @@ from app.models.fund_rating import RatingClassification, RatingEvidence
 from app.services.fund_rating_metrics import history_metrics, holdings_metrics, standard_cost, total_return
 from app.services.fund_rating_rules import CATEGORY_LABELS, DIMENSIONS
 from app.services.fund_rating_specialized import distance, distribution_index, ratio, specialized_holdings, tracking
+from app.services.material_content import content_digest
 
 
 def canonical(value) -> str:
@@ -23,7 +23,7 @@ def canonical(value) -> str:
 
 
 def digest(value) -> str:
-    return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
+    return content_digest(canonical(value).encode("utf-8"))
 
 
 def catalog(session: Session, *, limit: int = 5000) -> list[dict]:

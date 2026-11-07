@@ -4,7 +4,7 @@
 特征只命中基准日及前一国内交易日；缺失拒绝，不以前值或未来值填补。
 """
 
-import hashlib
+# 原始响应统一归档外接盘；历史路径只作为数据库别名，不生成C盘源文件。
 import json
 import math
 import time as sleep_time
@@ -16,6 +16,7 @@ import numpy as np
 from app.integrations.tushare_sprint_sector import CODES, FIELDS, MAX_BYTES, URL, fetch_sector
 from app.services import direction_1d_sprint as base
 from app.services import direction_1d_sprint_market as market
+from app.services import material_content as _sources
 
 SOURCE = "TUSHARE_SECTOR_EXISTING_PERMISSION_RESEARCH"
 SLOTS = ("0700", "0730", "0800")
@@ -102,8 +103,9 @@ def history():
     proposal = base.read(base.ROOT / "round-37/proposal-before-training.json")
     if (
         plan["codes"] != list(CODES)
-        or hashlib.sha256((folder / "acquire.py").read_bytes()).hexdigest() != plan["script_sha256"]
-        or hashlib.sha256((folder / "check_coverage.py").read_bytes()).hexdigest() != coverage_plan["script_sha256"]
+        or _sources.content_digest(_sources.source_bytes(folder / "acquire.py")) != plan["script_sha256"]
+        or _sources.content_digest(_sources.source_bytes(folder / "check_coverage.py"))
+        != coverage_plan["script_sha256"]
         or coverage_plan["acquisition_plan_hash"] != base.digest(plan)
         or coverage_plan["calendar_hash"] != base.calendar()[1]
         or snapshot["plan_hash"] != base.digest(plan)
@@ -122,14 +124,14 @@ def history():
         pieces += [(f"{code}-{y}", f"{y}-01-01", f"{y}-12-31" if y < 2026 else "2026-09-14") for y in range(2021, 2027)]
         for label, start, end in pieces:
             request, meta = base.read(folder / f"attempt-{label}.json"), base.read(folder / f"receipt-{label}.json")
-            raw = (folder / f"response-{label}.json").read_bytes()
+            raw = _sources.source_bytes(folder / f"response-{label}.json")
             if (
                 request["plan_hash"] != base.digest(plan)
                 or request["api_name"] != "index_daily"
                 or request["params"]
                 != {"ts_code": code, "start_date": start.replace("-", ""), "end_date": end.replace("-", "")}
                 or meta["request_hash"] != base.digest(request)
-                or meta["sha256"] != hashlib.sha256(raw).hexdigest()
+                or meta["sha256"] != _sources.content_digest(raw)
                 or meta["bytes"] != len(raw)
                 or meta["provider_code"] != 0
             ):
@@ -175,8 +177,8 @@ def load_piece(target, base_day, code, slot):
         or slot_for(request_at) != slot
     ):
         raise ValueError("SECTOR_LIVE_RESPONSE_CHANGED_OR_LATE")
-    raw = (folder / f"raw/{slot}-{code}.response.json").read_bytes()
-    if meta["bytes"] != len(raw) or meta["body_sha256"] != hashlib.sha256(raw).hexdigest():
+    raw = _sources.source_bytes(folder / f"raw/{slot}-{code}.response.json")
+    if meta["bytes"] != len(raw) or meta["body_sha256"] != _sources.content_digest(raw):
         raise ValueError("SECTOR_LIVE_RAW_CHANGED")
     points = parse(raw, code, *needed)
     if any(day not in points for day in needed):
@@ -209,7 +211,7 @@ def capture(at):
         raise ValueError("SECTOR_LIVE_WINDOW_CLOSED")
     target, base_day = window["target_nav_date"], window["base_nav_date"]
     folder = root() / target
-    if (folder / "input.json").exists():
+    if _sources.location_exists(folder / "input.json"):
         return load(target)
     deadline = datetime.combine(date.fromisoformat(target), time(8, 30), base.ZONE)
     needed = required(base_day, target)
@@ -225,8 +227,8 @@ def capture(at):
                 or slot_for(request_at) != slot
             ):
                 raise ValueError("SECTOR_LIVE_REQUEST_TIME_INVALID")
-            if not meta_path.exists():
-                if attempt.exists() or len(list((folder / "requests").glob("*.json"))) >= 15:
+            if not _sources.location_exists(meta_path):
+                if _sources.location_exists(attempt) or len(list((folder / "requests").glob("*.json"))) >= 15:
                     raise ValueError("SECTOR_LIVE_SLOT_OR_BUDGET_EXHAUSTED")
                 request = {
                     "at": request_at.isoformat(),
@@ -244,15 +246,14 @@ def capture(at):
                     received = base.now().isoformat()
                     raw_path = folder / f"raw/{slot}-{code}.response.json"
                     raw_path.parent.mkdir(parents=True, exist_ok=True)
-                    with raw_path.open("xb") as file:
-                        file.write(raw)
+                    _sources.write_source(raw_path, raw)
                     base.save(
                         meta_path,
                         {
                             "received_at": received,
                             "source": SOURCE,
                             "request_hash": base.digest(request),
-                            "body_sha256": hashlib.sha256(raw).hexdigest(),
+                            "body_sha256": _sources.content_digest(raw),
                             "bytes": len(raw),
                         },
                     )

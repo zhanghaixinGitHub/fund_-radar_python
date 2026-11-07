@@ -5,24 +5,33 @@
 正文、API请求身份和日期分别核验，旧原件绝不覆盖。
 """
 
-import hashlib
 import json
 from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from app.services.fund_exposure_common import _publish
+from app.services.material_content import (
+    content_digest,
+    location_exists,
+    same_content,
+    source_bytes,
+    source_exists,
+    source_glob,
+    source_size,
+    source_text,
+)
 
 
 def reuse_database_nav(code: str, source_root: Path, rating_root: Path, frozen: datetime, as_of: date) -> list[dict]:
     """接纳同一只读事务冻结的本份额规范净值，明确区别于原始HTTP回执。"""
     source_root = source_root.resolve()
     manifest = source_root / "quality-database-nav.json"
-    if not manifest.exists():
+    if not location_exists(manifest):
         return []
-    if manifest.stat().st_size > 1_000_000:
+    if source_size(manifest) > 1_000_000:
         raise ValueError("DATABASE_NAV_MANIFEST_SIZE")
-    data = json.loads(manifest.read_text(encoding="utf-8"))
+    data = json.loads(source_text(manifest, encoding="utf-8"))
     data = data.get("payload", data)
     if data.get("schema") != "QUALITY_DATABASE_NAV_SNAPSHOTS_V1" or len(data.get("items", [])) > 500:
         raise ValueError("DATABASE_NAV_MANIFEST_SCHEMA")
@@ -34,10 +43,10 @@ def reuse_database_nav(code: str, source_root: Path, rating_root: Path, frozen: 
             raise ValueError("DATABASE_NAV_SOURCE_KIND")
         receipt = item["receipt"]
         path = (source_root / receipt["file"]).resolve()
-        if not path.is_relative_to(source_root / "raw") or not path.is_file() or path.stat().st_size > 5_000_000:
+        if not path.is_relative_to(source_root / "raw") or not source_exists(path) or source_size(path) > 5_000_000:
             raise ValueError("DATABASE_NAV_SOURCE_PATH_SIZE")
-        raw = path.read_bytes()
-        key = hashlib.sha256(raw).hexdigest()
+        raw = source_bytes(path)
+        key = content_digest(raw)
         if key != receipt["sha256"]:
             raise ValueError("DATABASE_NAV_SOURCE_HASH")
         snapshot = json.loads(raw)
@@ -48,8 +57,8 @@ def reuse_database_nav(code: str, source_root: Path, rating_root: Path, frozen: 
         database_nav_coverage(snapshot, fund_code=code, as_of=as_of, frozen=frozen)
         target = rating_root / "sources" / (key + ".json")
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
-            if target.read_bytes() != raw:
+        if location_exists(target):
+            if not same_content(source_bytes(target), raw):
                 raise ValueError("DATABASE_NAV_DESTINATION_CONFLICT")
         else:
             _publish(target, raw)
@@ -74,11 +83,11 @@ def reuse_regulatory_originals(
 ) -> list[dict]:
     """登记公开监管决定原件；基金列表仅作路由，适用对象由转换器与正式管理人核对。"""
     manifest = source_root / "quality-governance-originals.json"
-    if not manifest.exists():
+    if not location_exists(manifest):
         return []
-    if manifest.stat().st_size > 1_000_000:
+    if source_size(manifest) > 1_000_000:
         raise ValueError("GOVERNANCE_SOURCE_MANIFEST_SIZE")
-    data = json.loads(manifest.read_text(encoding="utf-8"))
+    data = json.loads(source_text(manifest, encoding="utf-8"))
     data = data.get("payload", data)
     if (
         data.get("schema") != "QUALITY_GOVERNANCE_SOURCE_RECEIPTS_V1"
@@ -100,13 +109,13 @@ def reuse_regulatory_originals(
         ):
             raise ValueError("GOVERNANCE_REGULATOR_SOURCE_UNSUPPORTED")
         path = (source_root / receipt["file"]).resolve()
-        if not path.is_relative_to(source_root / "raw") or not path.is_file() or path.stat().st_size > 2_000_000:
+        if not path.is_relative_to(source_root / "raw") or not source_exists(path) or source_size(path) > 2_000_000:
             raise ValueError("GOVERNANCE_SOURCE_PATH_SIZE")
         acquired = datetime.fromisoformat(receipt["received_at"])
         if acquired.tzinfo is None or acquired > frozen:
             raise ValueError("GOVERNANCE_SOURCE_RECEIPT_TIME")
-        raw = path.read_bytes()
-        key = hashlib.sha256(raw).hexdigest()
+        raw = source_bytes(path)
+        key = content_digest(raw)
         if key != receipt["sha256"] or receipt.get("status") != 200:
             raise ValueError("GOVERNANCE_SOURCE_HASH_OR_HTTP_STATUS")
         from app.services.fund_quality_v2_governance import safe_decision
@@ -116,8 +125,8 @@ def reuse_regulatory_originals(
             continue
         target = rating_root / "sources" / (key + ".html")
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
-            if hashlib.sha256(target.read_bytes()).hexdigest() != key:
+        if location_exists(target):
+            if content_digest(source_bytes(target)) != key:
                 raise ValueError("REUSED_SOURCE_DESTINATION_HASH")
         else:
             _publish(target, raw)
@@ -146,11 +155,11 @@ def reuse_api_originals(code: str, source_root: Path, rating_root: Path, frozen:
     这里只接受既有供应商的fund_manager，不把任意JSON当作可用原件。
     """
     manifest = source_root / "quality-originals.json"
-    if not manifest.exists():
+    if not location_exists(manifest):
         return []
-    if manifest.stat().st_size > 1_000_000:
+    if source_size(manifest) > 1_000_000:
         raise ValueError("SUPPLEMENTAL_ORIGINAL_MANIFEST_SIZE")
-    content = json.loads(manifest.read_text(encoding="utf-8"))
+    content = json.loads(source_text(manifest, encoding="utf-8"))
     content = content.get("payload", content)
     if (
         content.get("schema") != "QUALITY_SOURCE_RECEIPTS_V1"
@@ -172,13 +181,13 @@ def reuse_api_originals(code: str, source_root: Path, rating_root: Path, frozen:
         ):
             raise ValueError("SUPPLEMENTAL_ORIGINAL_API_UNSUPPORTED")
         path = (source_root / receipt["file"]).resolve()
-        if not path.is_relative_to(source_root / "raw") or not path.is_file() or path.stat().st_size > 5_000_000:
+        if not path.is_relative_to(source_root / "raw") or not source_exists(path) or source_size(path) > 5_000_000:
             raise ValueError("SUPPLEMENTAL_ORIGINAL_PATH_SIZE")
         acquired = datetime.fromisoformat(receipt["received_at"])
         if acquired.tzinfo is None or acquired > frozen:
             raise ValueError("SUPPLEMENTAL_ORIGINAL_RECEIPT_TIME")
-        raw = path.read_bytes()
-        key = hashlib.sha256(raw).hexdigest()
+        raw = source_bytes(path)
+        key = content_digest(raw)
         if key != receipt["sha256"]:
             raise ValueError("SUPPLEMENTAL_ORIGINAL_HASH")
         from app.services.fund_quality_v2_manager_sources import manager_api_records
@@ -192,8 +201,8 @@ def reuse_api_originals(code: str, source_root: Path, rating_root: Path, frozen:
         manager_api_records(json.loads(raw), fund_code=source_code, ts_code=item["ts_code"])
         target = rating_root / "sources" / (key + ".json")
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
-            if hashlib.sha256(target.read_bytes()).hexdigest() != key:
+        if location_exists(target):
+            if content_digest(source_bytes(target)) != key:
                 raise ValueError("REUSED_SOURCE_DESTINATION_HASH")
         else:
             _publish(target, raw)
@@ -214,16 +223,14 @@ def reuse_api_originals(code: str, source_root: Path, rating_root: Path, frozen:
     return result
 
 
-def reuse_cash_originals(
-    code: str, source_root: Path, rating_root: Path, frozen: datetime, as_of: date
-) -> list[dict]:
+def reuse_cash_originals(code: str, source_root: Path, rating_root: Path, frozen: datetime, as_of: date) -> list[dict]:
     """接纳显式现金原件清单；清单仅供路由，金额和实施情况仍由原文及日恒等式核验。"""
     manifest = source_root / "quality-cash-originals.json"
-    if not manifest.exists():
+    if not location_exists(manifest):
         return []
-    if manifest.stat().st_size > 1_000_000:
+    if source_size(manifest) > 1_000_000:
         raise ValueError("QUALITY_CASH_ORIGINAL_MANIFEST_SIZE")
-    value = json.loads(manifest.read_text(encoding="utf-8"))
+    value = json.loads(source_text(manifest, encoding="utf-8"))
     value = value.get("payload", value)
     if value.get("schema") != "QUALITY_CASH_ORIGINALS_V1" or len(value.get("items", [])) > 200:
         raise ValueError("QUALITY_CASH_ORIGINAL_MANIFEST_SCHEMA")
@@ -234,9 +241,7 @@ def reuse_cash_originals(
         label = item.get("label")
         if label not in {"cash-event-snapshot", "cash-dividend-notice"}:
             raise ValueError("QUALITY_CASH_ORIGINAL_ROLE")
-        if label == "cash-dividend-notice" and (
-            not item.get("published_on") or item["published_on"] > str(as_of)
-        ):
+        if label == "cash-dividend-notice" and (not item.get("published_on") or item["published_on"] > str(as_of)):
             continue
         ref = item["receipt"]
         origin = urlsplit(ref["url"])
@@ -246,11 +251,16 @@ def reuse_cash_originals(
             raise ValueError("QUALITY_CASH_ORIGINAL_SOURCE_HOST")
         acquired = datetime.fromisoformat(ref["received_at"])
         path = (source_root / ref["file"]).resolve()
-        if (acquired.tzinfo is None or acquired > frozen or not path.is_relative_to(source_root.resolve() / "raw")
-                or not path.is_file() or path.stat().st_size > 8_000_000):
+        if (
+            acquired.tzinfo is None
+            or acquired > frozen
+            or not path.is_relative_to(source_root.resolve() / "raw")
+            or not source_exists(path)
+            or source_size(path) > 8_000_000
+        ):
             raise ValueError("QUALITY_CASH_ORIGINAL_TIME_PATH_OR_SIZE")
-        raw = path.read_bytes()
-        sha = hashlib.sha256(raw).hexdigest()
+        raw = source_bytes(path)
+        sha = content_digest(raw)
         if sha != ref["sha256"]:
             raise ValueError("QUALITY_CASH_ORIGINAL_BYTES_CHANGED")
         if label == "cash-dividend-notice":
@@ -258,23 +268,34 @@ def reuse_cash_originals(
                 raise ValueError("QUALITY_CASH_NOTICE_PDF_REQUIRED")
         else:
             snapshot = json.loads(raw)
-            if (snapshot.get("fund_code") != code or not isinstance(snapshot.get("dividend_records"), list)
-                    or len(snapshot["dividend_records"]) > 200):
+            if (
+                snapshot.get("fund_code") != code
+                or not isinstance(snapshot.get("dividend_records"), list)
+                or len(snapshot["dividend_records"]) > 200
+            ):
                 raise ValueError("QUALITY_CASH_SNAPSHOT_SHARE_OR_SCHEMA")
         target = rating_root / "sources" / (sha + (".pdf" if label == "cash-dividend-notice" else ".json"))
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
-            if target.read_bytes() != raw:
+        if location_exists(target):
+            if not same_content(source_bytes(target), raw):
                 raise ValueError("QUALITY_CASH_SOURCE_DESTINATION_CONFLICT")
         else:
             _publish(target, raw)
-        result.append({
-            "file": target.relative_to(rating_root).as_posix(), "sha256": sha, "url": ref["url"],
-            "acquired_at": ref["received_at"], "published_on": item.get("published_on"), "label": label,
-            "source_kind": "ISSUER_ORIGINAL_CASH_DIVIDEND_PDF" if label == "cash-dividend-notice"
-            else "NORMALIZED_PROVIDER_EVENT_SNAPSHOT_NOT_RAW_HTTP_RESPONSE",
-            "origin_receipt_file": str(manifest), "title": item["title"],
-        })
+        result.append(
+            {
+                "file": target.relative_to(rating_root).as_posix(),
+                "sha256": sha,
+                "url": ref["url"],
+                "acquired_at": ref["received_at"],
+                "published_on": item.get("published_on"),
+                "label": label,
+                "source_kind": "ISSUER_ORIGINAL_CASH_DIVIDEND_PDF"
+                if label == "cash-dividend-notice"
+                else "NORMALIZED_PROVIDER_EVENT_SNAPSHOT_NOT_RAW_HTTP_RESPONSE",
+                "origin_receipt_file": str(manifest),
+                "title": item["title"],
+            }
+        )
     return result
 
 
@@ -304,14 +325,14 @@ def reuse_originals(
             path
             for archive_code in archive_codes
             for folder in ("reports", "fund-documents")
-            for path in (source_root / folder / archive_code).glob("*.json")
+            for path in source_glob(source_root / folder / archive_code, "*.json")
         }
     )
     if len(files) > 500:
         raise ValueError("ADDITIONAL_SOURCE_METADATA_LIMIT")
     result = {}
     for metadata_path in files:
-        item = json.loads(metadata_path.read_text(encoding="utf-8"))
+        item = json.loads(source_text(metadata_path, encoding="utf-8"))
         if item.get("fund_code") not in archive_codes:
             raise ValueError("ADDITIONAL_SOURCE_METADATA_IDENTITY")
         title = item.get("title", "")
@@ -348,15 +369,15 @@ def reuse_originals(
         raw_path = (source_root / receipt["file"]).resolve()
         if (
             not raw_path.is_relative_to(source_root / "raw")
-            or not raw_path.is_file()
-            or raw_path.stat().st_size > 20_000_000
+            or not source_exists(raw_path)
+            or source_size(raw_path) > 20_000_000
         ):
             raise ValueError("ADDITIONAL_SOURCE_PATH_SIZE")
         acquired = datetime.fromisoformat(receipt["received_at"])
         if acquired.tzinfo is None or acquired > frozen:
             raise ValueError("ADDITIONAL_SOURCE_RECEIPT_TIME")
-        raw = raw_path.read_bytes()
-        key = hashlib.sha256(raw).hexdigest()
+        raw = source_bytes(raw_path)
+        key = content_digest(raw)
         if key != receipt["sha256"]:
             raise ValueError("ADDITIONAL_SOURCE_HASH")
         article = None
@@ -394,12 +415,19 @@ def reuse_originals(
                         }
                     )
                 continue
-        suffix = (".html" if label == "contract-amendment-notice" else ".pdf" if raw.startswith(b"%PDF")
-                  else ".docx" if raw.startswith(b"PK\x03\x04") else ".json")
+        suffix = (
+            ".html"
+            if label == "contract-amendment-notice"
+            else ".pdf"
+            if raw.startswith(b"%PDF")
+            else ".docx"
+            if raw.startswith(b"PK\x03\x04")
+            else ".json"
+        )
         target = rating_root / "sources" / (key + suffix)
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
-            if hashlib.sha256(target.read_bytes()).hexdigest() != key:
+        if location_exists(target):
+            if content_digest(source_bytes(target)) != key:
                 raise ValueError("REUSED_SOURCE_DESTINATION_HASH")
         else:
             _publish(target, raw)
@@ -418,48 +446,63 @@ def reuse_originals(
             proof = item.get("contract_notice_receipt")
             if not isinstance(proof, dict) or set(proof) != {"file", "sha256"}:
                 raise ValueError("CONTRACT_NOTICE_DOWNLOAD_RECEIPT_REFERENCE_REQUIRED")
-            proof_path = (source_root/proof["file"]).resolve()
-            if (not proof_path.is_relative_to(source_root/"raw") or not proof_path.is_file()
-                    or proof_path.stat().st_size > 100_000):
+            proof_path = (source_root / proof["file"]).resolve()
+            if (
+                not proof_path.is_relative_to(source_root / "raw")
+                or not source_exists(proof_path)
+                or source_size(proof_path) > 100_000
+            ):
                 raise ValueError("CONTRACT_NOTICE_RECEIPT_SOURCE_PATH_SIZE")
-            proof_raw = proof_path.read_bytes()
-            if hashlib.sha256(proof_raw).hexdigest() != proof["sha256"]:
+            proof_raw = source_bytes(proof_path)
+            if content_digest(proof_raw) != proof["sha256"]:
                 raise ValueError("CONTRACT_NOTICE_RECEIPT_SOURCE_ACTUAL_HASH")
-            target_proof = rating_root/"sources"/(proof["sha256"]+".json")
-            if target_proof.exists():
-                if target_proof.read_bytes() != proof_raw:
+            target_proof = rating_root / "sources" / (proof["sha256"] + ".json")
+            if location_exists(target_proof):
+                if not same_content(source_bytes(target_proof), proof_raw):
                     raise ValueError("CONTRACT_NOTICE_RECEIPT_DESTINATION_CONFLICT")
             else:
                 _publish(target_proof, proof_raw)
-            result[proof["sha256"]] = {"label": "contract-notice-download-receipt", "sha256": proof["sha256"],
-                "file": target_proof.relative_to(rating_root).as_posix(), "url": receipt["url"],
-                "acquired_at": receipt["received_at"], "published_on": published,
-                "source_kind": "ORIGINAL_VERSIONED_DOWNLOAD_RECEIPT_NOT_CONTENT_ACCEPTANCE_FLAG"}
-            ref.update(contract_notice_receipt_sha256=proof["sha256"],
-                       source_kind="ISSUER_CMF_CONTRACT_AMENDMENT_HTML")
+            result[proof["sha256"]] = {
+                "label": "contract-notice-download-receipt",
+                "sha256": proof["sha256"],
+                "file": target_proof.relative_to(rating_root).as_posix(),
+                "url": receipt["url"],
+                "acquired_at": receipt["received_at"],
+                "published_on": published,
+                "source_kind": "ORIGINAL_VERSIONED_DOWNLOAD_RECEIPT_NOT_CONTENT_ACCEPTANCE_FLAG",
+            }
+            ref.update(contract_notice_receipt_sha256=proof["sha256"], source_kind="ISSUER_CMF_CONTRACT_AMENDMENT_HTML")
         if urlsplit(receipt["url"]).hostname == "static.cninfo.com.cn":
             # 巨潮新原件的真实下载收据单独按原字节复制，不能只登记verified标志。
             # 此处仅归档；主体、日期、HTTP结果与PDF的绑定在V2披露读取器重核。
             proof = item.get("cninfo_download_receipt")
             if not isinstance(proof, dict) or set(proof) != {"file", "sha256"}:
                 raise ValueError("CNINFO_DOWNLOAD_RECEIPT_REFERENCE_REQUIRED")
-            proof_path = (source_root/proof["file"]).resolve()
-            if (not proof_path.is_relative_to(source_root/"raw") or not proof_path.is_file()
-                    or proof_path.stat().st_size > 100_000):
+            proof_path = (source_root / proof["file"]).resolve()
+            if (
+                not proof_path.is_relative_to(source_root / "raw")
+                or not source_exists(proof_path)
+                or source_size(proof_path) > 100_000
+            ):
                 raise ValueError("CNINFO_DOWNLOAD_RECEIPT_SOURCE_PATH_SIZE")
-            proof_raw = proof_path.read_bytes()
-            if hashlib.sha256(proof_raw).hexdigest() != proof["sha256"]:
+            proof_raw = source_bytes(proof_path)
+            if content_digest(proof_raw) != proof["sha256"]:
                 raise ValueError("CNINFO_DOWNLOAD_RECEIPT_SOURCE_HASH")
-            proof_target = rating_root/"sources"/(proof["sha256"]+".json")
-            if proof_target.exists():
-                if proof_target.read_bytes() != proof_raw:
+            proof_target = rating_root / "sources" / (proof["sha256"] + ".json")
+            if location_exists(proof_target):
+                if not same_content(source_bytes(proof_target), proof_raw):
                     raise ValueError("CNINFO_DOWNLOAD_RECEIPT_DESTINATION_CONFLICT")
             else:
                 _publish(proof_target, proof_raw)
-            result[proof["sha256"]] = {"label": "cninfo-download-receipt",
-                "sha256": proof["sha256"], "file": proof_target.relative_to(rating_root).as_posix(),
-                "url": receipt["url"], "acquired_at": receipt["received_at"], "published_on": published,
-                "source_kind": "ORIGINAL_VERSIONED_DOWNLOAD_RECEIPT_NOT_PDF_CONTENT_OR_VALIDATION_FLAG"}
+            result[proof["sha256"]] = {
+                "label": "cninfo-download-receipt",
+                "sha256": proof["sha256"],
+                "file": proof_target.relative_to(rating_root).as_posix(),
+                "url": receipt["url"],
+                "acquired_at": receipt["received_at"],
+                "published_on": published,
+                "source_kind": "ORIGINAL_VERSIONED_DOWNLOAD_RECEIPT_NOT_PDF_CONTENT_OR_VALIDATION_FLAG",
+            }
             ref["cninfo_receipt_sha256"] = proof["sha256"]
         if "publication_evidence" in item:
             # 证明文件是原始目录/报告的独立收据；保留真实取得或本地复用观测日。
@@ -471,15 +514,15 @@ def reuse_originals(
             for proof_name in ("catalog", "notice_index"):
                 proof = evidence[proof_name]
                 proof_path = (source_root / proof["file"]).resolve()
-                if not proof_path.is_relative_to(source_root / "raw") or not proof_path.is_file():
+                if not proof_path.is_relative_to(source_root / "raw") or not source_exists(proof_path):
                     raise ValueError("PUBLICATION_EVIDENCE_SOURCE_PATH")
-                proof_raw = proof_path.read_bytes()
-                if len(proof_raw) > 20_000_000 or hashlib.sha256(proof_raw).hexdigest() != proof["sha256"]:
+                proof_raw = source_bytes(proof_path)
+                if len(proof_raw) > 20_000_000 or content_digest(proof_raw) != proof["sha256"]:
                     raise ValueError("PUBLICATION_EVIDENCE_SOURCE_HASH_SIZE")
                 proof_suffix = ".pdf" if proof_raw.startswith(b"%PDF") else ".json"
                 proof_target = rating_root / "sources" / (proof["sha256"] + proof_suffix)
-                if proof_target.exists():
-                    if proof_target.read_bytes() != proof_raw:
+                if location_exists(proof_target):
+                    if not same_content(source_bytes(proof_target), proof_raw):
                         raise ValueError("PUBLICATION_EVIDENCE_DESTINATION_CONFLICT")
                 else:
                     _publish(proof_target, proof_raw)

@@ -3,7 +3,7 @@
 复用已验收的SPX、FXI/CNYA成交价和CNYA估值差来源，未公告的基金净值不被伪装成输入。
 """
 
-import hashlib
+# 原始响应统一归档外接盘；历史路径只作为数据库别名，不生成C盘源文件。
 import json
 from datetime import date, datetime, time
 
@@ -12,6 +12,7 @@ from app.services import direction_1d_sprint_cnya_data as cnya
 from app.services import direction_1d_sprint_etf_joint as reference
 from app.services import direction_1d_sprint_overnight as overnight
 from app.services import direction_1d_sprint_us_etf_data as etfs
+from app.services import material_content as _sources
 
 SLOTS = ("0700", "0730", "0800")
 
@@ -55,7 +56,7 @@ def dataset():
         or spec["source_hashes"]["spx"] != base.digest(spx)
         or spec["source_hashes"]["r50plan"] != base.digest(reference.plan())
         or spec["calendar_hash"] != base.calendar()[1]
-        or spec["script_sha256"] != hashlib.sha256((folder / "check.py").read_bytes()).hexdigest()
+        or spec["script_sha256"] != _sources.content_digest(_sources.source_bytes(folder / "check.py"))
     ):
         raise ValueError("MARKET_ONLY_HISTORY_MANIFEST_CHANGED")
     if base.now() >= datetime.fromisoformat(history["expires_at"]) or base.now() >= datetime.fromisoformat(
@@ -129,8 +130,8 @@ def spx_observation(target, t, origin, slot):
         folder = root() / target / "spx"
         reservation = base.read(folder / f"{slot}-reserved.json")
         observation = base.read(folder / f"{slot}-response.json")
-        raw = (folder / f"{slot}-response.bin").read_bytes()
-        if hashlib.sha256(raw).hexdigest() != observation["body_sha256"] or len(raw) != observation["bytes"]:
+        raw = _sources.source_bytes(folder / f"{slot}-response.bin")
+        if _sources.content_digest(raw) != observation["body_sha256"] or len(raw) != observation["bytes"]:
             raise ValueError("MARKET_ONLY_SPX_RAW_CHANGED")
         body = raw.decode("utf-8")
     received, requested = datetime.fromisoformat(observation["received_at"]), datetime.fromisoformat(reservation["at"])
@@ -163,7 +164,7 @@ def capture_spx(at, t, target):
             ("ROUND3", overnight.root() / "live" / target),
             ("MARKET_ONLY", root() / target / "spx"),
         ):
-            if not (directory / f"{earlier}-response.json").exists():
+            if not _sources.location_exists(directory / f"{earlier}-response.json"):
                 continue
             try:
                 return spx_observation(target, t, origin, earlier)
@@ -171,7 +172,9 @@ def capture_spx(at, t, target):
                 continue
     folder = root() / target / "spx"
     reservation = folder / f"{slot}-reserved.json"
-    if reservation.exists() or (overnight.root() / "live" / target / f"{slot}-reserved.json").exists():
+    if _sources.location_exists(reservation) or _sources.location_exists(
+        overnight.root() / "live" / target / f"{slot}-reserved.json"
+    ):
         return None
     aligned = overnight.alignment(t, target)
     if any(datetime.fromisoformat(closed) >= at for closed in aligned["close_events"].values()):
@@ -185,13 +188,12 @@ def capture_spx(at, t, target):
         body = overnight.fetch_spx(date.fromisoformat(required[0]), date.fromisoformat(required[-1]))
         received = base.now()
         raw = body.encode("utf-8") if isinstance(body, str) else body
-        with (folder / f"{slot}-response.bin").open("xb") as output:
-            output.write(raw)
+        _sources.write_source(folder / f"{slot}-response.bin", raw)
         value = {
             "received_at": received.isoformat(),
             "plan": aligned,
             "parsed": overnight.validate_response(raw, required),
-            "body_sha256": hashlib.sha256(raw).hexdigest(),
+            "body_sha256": _sources.content_digest(raw),
             "bytes": len(raw),
         }
         base.save(folder / f"{slot}-response.json", value)
@@ -230,7 +232,7 @@ def capture(at):
     if ended(at) or slot is None or target not in days or days.index(target) == 0:
         return None
     path = root() / target / "input.json"
-    if path.exists():
+    if _sources.location_exists(path):
         return load(target)
     t = days[days.index(target) - 1]
     s = capture_spx(at, t, target)

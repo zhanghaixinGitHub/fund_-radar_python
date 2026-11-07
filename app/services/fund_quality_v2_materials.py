@@ -4,7 +4,6 @@
 可复算事实入口，绝不使用旧版维度分数；每次转换先运行既有原文重建校验。
 """
 
-import hashlib
 import json
 import re
 from copy import deepcopy
@@ -18,6 +17,7 @@ from app.services.fund_rating_inputs import digest
 from app.services.fund_rating_metrics import standard_cost, total_return
 from app.services.fund_rating_quality_v2 import VERSION, candidate_policy, metric_names
 from app.services.fund_rating_rules import decimal
+from app.services.material_content import content_digest, source_bytes, source_exists, source_size
 
 COMPILER = "QUALITY_ORIGINALS_20261017_57"
 ROLES = {
@@ -127,18 +127,18 @@ def inspect_sources(refs: list[dict], root: Path, frozen: datetime) -> list[dict
             path = (root / ref["file"]).resolve()
             if not path.is_relative_to(root.resolve() / "sources"):
                 raise ValueError("SOURCE_PATH")
-            if not path.is_file():
+            if not source_exists(path):
                 item.update(state="COLLECTION_REQUIRED", reason="ARCHIVE_FILE_MISSING")
                 result.append(item)
                 continue
-            if path.stat().st_size > 20_000_000:
+            if source_size(path) > 20_000_000:
                 raise ValueError("SOURCE_SIZE")
-            if hashlib.sha256(path.read_bytes()).hexdigest() != ref["sha256"]:
+            if content_digest(source_bytes(path)) != ref["sha256"]:
                 raise ValueError("SOURCE_HASH")
             received = datetime.fromisoformat(ref["acquired_at"])
             if received.tzinfo is None or received > frozen:
                 raise ValueError("SOURCE_TIME")
-            item.update(state="ORIGINAL_AVAILABLE_PARSE_REQUIRED", size_bytes=path.stat().st_size)
+            item.update(state="ORIGINAL_AVAILABLE_PARSE_REQUIRED", size_bytes=source_size(path))
         except PermissionError:
             item.update(state="PERMISSION_DENIED", reason="ARCHIVE_READ_PERMISSION_DENIED")
         except (ValueError, KeyError, OSError) as exc:
@@ -178,7 +178,7 @@ def _legacy_partial_cost(code: str, name: str, refs: list[dict], root: Path, as_
             attachment_identity(by_label, root, ref["label"], code)
 
     def document(ref, title):
-        return public_document((root / ref["file"]).read_bytes(), ref, code, title)[0]
+        return public_document(source_bytes(root / ref["file"]), ref, code, title)[0]
 
     pages = document(summary, "产品资料概要")
     summary_text = compact("\n".join(pages))
@@ -188,7 +188,7 @@ def _legacy_partial_cost(code: str, name: str, refs: list[dict], root: Path, as_
     prospectus = document(by_label["prospectus"], "招募说明书") if "prospectus" in by_label else None
     names = []
     if "provider" in by_label:
-        snapshot = json.loads((root / by_label["provider"]["file"]).read_bytes())
+        snapshot = json.loads(source_bytes(root / by_label["provider"]["file"]))
         if snapshot["fund_code"] != code:
             raise ValueError("QUALITY_V2_COST_PROVIDER_IDENTITY")
         names = [
@@ -418,7 +418,10 @@ def manager_supplements(
             or origin.hostname != "api.tushare.pro"
             or origin.port not in {None, 443}
             or origin.path not in {"", "/"}
-            or origin.query or origin.fragment or origin.username or origin.password
+            or origin.query
+            or origin.fragment
+            or origin.username
+            or origin.password
             or not isinstance(ts_code, str)
             or not re.fullmatch(r"[0-9]{6}\.(?:OF|SZ|SH)", ts_code)
             or ts_code.split(".")[0] != expected
@@ -429,8 +432,7 @@ def manager_supplements(
         raise ValueError("QUALITY_V2_MANAGER_SUPPLEMENT_SOURCE")
     for ref in refs:
         manager_api_records(
-            json.loads((root / ref["file"]).read_bytes()),
-            fund_code=ref["ts_code"].split(".")[0], ts_code=ref["ts_code"],
+            json.loads(source_bytes(root / ref["file"])), fund_code=ref["ts_code"].split(".")[0], ts_code=ref["ts_code"]
         )
     return refs, sources
 
@@ -501,7 +503,7 @@ def convert_bundle(
     sources += structure_sources
     refs = {r["sha256"]: r for r in bundle["raw_archive"]}
     summary = refs[bundle["summary_hash"]]
-    pages, _ = public_document((root / summary["file"]).read_bytes(), summary, bundle["fund_code"], "产品资料概要")
+    pages, _ = public_document(source_bytes(root / summary["file"]), summary, bundle["fund_code"], "产品资料概要")
     text = compact("\n".join(pages))
     # 细分类来自已核验原件标题，不能修改旧包的scope布尔字段后改变新方法分类。
     title = text.split("编制日期")[0].split("送出日期")[0][:180]
@@ -513,9 +515,7 @@ def convert_bundle(
     # 同产品正式报告已由上游重核身份；只读产品说明内的目标与风险范围，
     # 不借网站标签、境外持仓或经理履历推断基金类别。
     report_ref = refs[bundle["report_hash"]]
-    report_pages, _ = public_document(
-        (root / report_ref["file"]).read_bytes(), report_ref, bundle["fund_code"], "报告"
-    )
+    report_pages, _ = public_document(source_bytes(root / report_ref["file"]), report_ref, bundle["fund_code"], "报告")
     classification = classify_original(title, "\n".join(report_pages))
     kind = classification["kind"]
     if not kind:
@@ -624,7 +624,7 @@ def convert_bundle(
         try:
             report_ref = refs[bundle["report_hash"]]
             report_pages, _ = public_document(
-                (root / report_ref["file"]).read_bytes(), report_ref, bundle["fund_code"], ""
+                source_bytes(root / report_ref["file"]), report_ref, bundle["fund_code"], ""
             )
             observed = str(report_period("\n".join(report_pages))[1])
             if observed > str(as_of) or (as_of - date.fromisoformat(observed)).days > 210:
@@ -633,7 +633,7 @@ def convert_bundle(
                 report_pages,
                 benchmark=contract,
                 reference=structure_reference,
-                raw={role: (root / ref["file"]).read_bytes() for role, ref in structure_reference.items()},
+                raw={role: source_bytes(root / ref["file"]) for role, ref in structure_reference.items()},
                 observed_on=observed,
                 as_of=str(as_of),
             )
@@ -683,8 +683,15 @@ def apply_extraction(packet: dict, extracted: dict) -> None:
     late = nav.get("late_announcements", [])
     unknown_dates = nav.get("unknown_announcement_dates", [])
     unavailable = bool(late or unknown_dates)
-    nav_metrics = {"relative_return_1y", "relative_return_3y", "extra_drawdown", "extra_downside",
-                   "rolling_target_success", "monthly_target_success", "tracking_error"}
+    nav_metrics = {
+        "relative_return_1y",
+        "relative_return_3y",
+        "extra_drawdown",
+        "extra_downside",
+        "rolling_target_success",
+        "monthly_target_success",
+        "tracking_error",
+    }
     if unavailable:
         # 旧完整包已经重建出的数值也须遵守V2信息截止日。保留原件与原批次，
         # 只撤销本次候选包内不具备时间资格的字段，不能凭旧路径绕过新核验。
@@ -703,16 +710,25 @@ def apply_extraction(packet: dict, extracted: dict) -> None:
             packet["inventory"][name].update(finding)
     for name in packet["inventory"]:
         if unavailable and name in nav_metrics:
-            for stale in ("value", "observed_on", "formula_version", "publisher_cross_check",
-                          "return_source_basis", "missing_roles"):
+            for stale in (
+                "value",
+                "observed_on",
+                "formula_version",
+                "publisher_cross_check",
+                "return_source_basis",
+                "missing_roles",
+            ):
                 packet["inventory"][name].pop(stale, None)
             packet["inventory"][name].update(
                 state="SOURCE_NOT_AVAILABLE_AS_OF" if late else "SOURCE_PUBLICATION_UNVERIFIED",
                 reason="NAV_ANNOUNCEMENT_AFTER_AS_OF" if late else "NAV_ANNOUNCEMENT_DATE_REQUIRED",
-                required_data={"availability_cutoff": packet["as_of_date"],
-                               "late_announcements": late, "unknown_announcement_dates": unknown_dates,
-                               "required": "计算所用逐估值日净值的登记公布日不得晚于考察日；缺少公布日不推定已知。"
-                               "不回写旧日期，不删末期净值缩短窗口；需按真实可得日另建包或补充原始公布证据。"},
+                required_data={
+                    "availability_cutoff": packet["as_of_date"],
+                    "late_announcements": late,
+                    "unknown_announcement_dates": unknown_dates,
+                    "required": "计算所用逐估值日净值的登记公布日不得晚于考察日；缺少公布日不推定已知。"
+                    "不回写旧日期，不删末期净值缩短窗口；需按真实可得日另建包或补充原始公布证据。",
+                },
                 source_hashes=nav.get("source_hashes", []),
             )
             continue
@@ -742,18 +758,26 @@ def apply_extraction(packet: dict, extracted: dict) -> None:
             nav_complete = nav.get("status") == "OWN_ADJUSTED_NAV_WINDOW_REBUILT"
             paired_error = extracted["facts"].get("paired_contract_history", {}).get("error")
             packet["inventory"][name].update(
-                state="SOURCE_VALUE_CONFLICT" if paired_error and "NAV_CONFLICT" in paired_error
-                else "SOURCE_WINDOW_INCOMPLETE" if paired_error and "DATES_MISSING" in paired_error
-                else "SOURCE_VALUE_UNRESOLVED" if paired_error else "COLLECTION_REQUIRED",
-                reason=paired_error or ("CONTRACT_BENCHMARK_HISTORY_REQUIRED_OWN_NAV_REBUILT"
-                if nav_complete
-                else "ALIGNED_CONTRACT_BENCHMARK_AND_FUND_HISTORY_REQUIRED"),
+                state="SOURCE_VALUE_CONFLICT"
+                if paired_error and "NAV_CONFLICT" in paired_error
+                else "SOURCE_WINDOW_INCOMPLETE"
+                if paired_error and "DATES_MISSING" in paired_error
+                else "SOURCE_VALUE_UNRESOLVED"
+                if paired_error
+                else "COLLECTION_REQUIRED",
+                reason=paired_error
+                or (
+                    "CONTRACT_BENCHMARK_HISTORY_REQUIRED_OWN_NAV_REBUILT"
+                    if nav_complete
+                    else "ALIGNED_CONTRACT_BENCHMARK_AND_FUND_HISTORY_REQUIRED"
+                ),
                 required_data={
                     "own_nav_status": nav.get("status", nav.get("error", "OWN_NAV_ORIGINAL_NOT_REGISTERED")),
                     "own_nav_missing_dates": nav.get("missing_adjusted_nav_dates"),
                     "paired_source_error": paired_error,
-                    "required": ("两条基金收益曲线的原始分红/复权口径、冲突日期与供应商修订核验；"
-                                 "不能放宽容差或宣称未采集")
+                    "required": (
+                        "两条基金收益曲线的原始分红/复权口径、冲突日期与供应商修订核验；不能放宽容差或宣称未采集"
+                    )
                     if paired_error and "NAV_CONFLICT" in paired_error
                     else "完整37个月末、逐估值日合同基准；本份额净值已重建，不能重复报告为未采集"
                     if nav_complete
@@ -787,9 +811,7 @@ def convert_archived(code: str, name: str, refs: list[dict], root: Path, as_of: 
         "kind": kind,
         "as_of_date": str(as_of),
         "frozen_at": frozen.isoformat(),
-        "history_months": 36
-        if extracted["facts"].get("paired_contract_history", {}).get("history")
-        else 0,
+        "history_months": 36 if extracted["facts"].get("paired_contract_history", {}).get("history") else 0,
         "source_bundle": {
             "origin": "ARCHIVED_ORIGINALS_V2",
             "fund_code": code,

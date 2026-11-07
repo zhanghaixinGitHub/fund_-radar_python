@@ -62,10 +62,40 @@ def verified_domestic_window(profile: dict, material: dict, documents: dict, win
             return False
         codes = {row["stock_code"] for row in positions}
         companies = material.get("companies", [])
+        company_codes = {company["code"] for company in companies}
+        if company_codes != codes:
+            # 完整中报仍必须全部保留。新季报的独立披露可以增加需核验的证券，
+            # 不能因公司资料做了必要补充，就误把证券集合变化当作境外估值日历。
+            # 额外证券仅允许来自本基金、本报告期原文的实际解析；仍不拼成新全仓。
+            from app.services.market_holdings_parse import partial_stock_sections
+
+            latest = material.get("source_manifest", {}).get("latest_partial_report", {})
+            partial = latest.get("report", {})
+            original = documents.get(latest.get("source_ref"), {})
+            end = partial.get("endDate", "")
+            compact = re.sub(r"\s+", "", original.get("body", ""))
+            try:
+                period = date.fromisoformat(end)
+                rows, _ = partial_stock_sections(original["body"])
+            except (ValueError, KeyError, TypeError):
+                return False
+            new_codes = {row["stockCode"] for row in rows}
+            if (
+                original.get("kind") != "REPORT"
+                or material["fund_code"] not in original.get("codes", [])
+                or material["fund_code"] not in compact
+                or f"{period.year}年{period.month}月{period.day}日" not in compact
+                or end <= material.get("report", {}).get("endDate", "")
+                or end > str(base)
+                or partial.get("fullDisclosure") is not False
+                or new_codes != {row["stockCode"] for row in partial.get("holdings", [])}
+                or company_codes != codes | new_codes
+            ):
+                return False
         return (
             bool(codes)
-            and all(code.endswith((".SH", ".SZ", ".BJ")) for code in codes)
-            and codes == {company["code"] for company in companies}
+            and all(code.endswith((".SH", ".SZ", ".BJ")) for code in company_codes)
+            and codes <= company_codes
             and all(
                 company.get("quote", {}).get("date") == str(base)
                 and company.get("quote", {}).get("change_pct") is not None

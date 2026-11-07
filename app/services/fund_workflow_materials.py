@@ -7,6 +7,7 @@ from app.core.config import get_settings
 from app.services.direction_1d_protocol import digest
 from app.services.fund_exposure_common import read
 from app.services.fund_materials_store import versioned_save
+from app.services.material_content import location_exists
 
 
 def workflow_root(root=None) -> Path:
@@ -23,7 +24,7 @@ def receipt_path(code: str, root=None) -> Path:
 def registered_materials(code: str, *, root=None, at=None):
     """只复用当前来源版本的交接；路径、正文、基金身份或取得时间变化都重新审阅。"""
     path = receipt_path(code, root)
-    if not path.exists():
+    if not location_exists(path):
         return None
     receipt = read(path)
     material = read(workflow_root(root) / "materials" / (code + ".json"))

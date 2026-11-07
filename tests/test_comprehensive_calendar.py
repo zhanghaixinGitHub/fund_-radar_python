@@ -176,3 +176,48 @@ def test_unannounced_nav_is_excluded_from_real_freeze(monkeypatch, tmp_path):
     assert result["time_context"]["nav_status"] == "STALE"
     assert [row["nav_date"] for row in observed] == [date(2026, 10, 13)]
     assert rows == before
+
+
+def test_domestic_assets_accepts_only_own_new_partial_report_evidence_union(monkeypatch):
+    from datetime import date
+
+    from app.services import (
+        direction_1d_protocol,
+        fund_rating_public_market,
+        fund_rating_public_stock_tables,
+        market_holdings_parse,
+    )
+
+    profile, material, documents, window = sample()
+    material["calendar_evidence"].update(policy="CN_NAV_DISCLOSED_DOMESTIC_ASSETS_V1", prospectus_ref="own")
+    documents["own"] = {
+        "kind": "PROSPECTUS",
+        "codes": ["007356"],
+        "url": "https://np-cnotice-fund.eastmoney.com/api/content/ann",
+        "body": "本基金的估值日为本基金相关的证券/期货交易场所的交易日",
+    }
+    material["report"] = {"endDate": "2026-06-30"}
+    material["companies"] = [
+        {"code": code, "quote": {"date": "2026-10-14", "change_pct": 1}} for code in ["600000.SH", "300001.SZ"]
+    ]
+    documents["partial"] = {"kind": "REPORT", "codes": ["007356"], "body": "007356 2026年9月30日 本基金季度报告"}
+    material["source_manifest"] = {
+        "latest_partial_report": {
+            "source_ref": "partial",
+            "report": {"endDate": "2026-09-30", "fullDisclosure": False, "holdings": [{"stockCode": "300001.SZ"}]},
+        }
+    }
+    monkeypatch.setattr(direction_1d_protocol, "calendar", lambda: ((date(2026, 10, 14), date(2026, 10, 15)), "hash"))
+    monkeypatch.setattr(
+        fund_rating_public_market, "balance", lambda *a, **k: {"stock_amount": "100", "net_assets": "200"}
+    )
+    monkeypatch.setattr(
+        fund_rating_public_stock_tables, "parse_disclosed", lambda *a: {"holdings": [{"stock_code": "600000.SH"}]}
+    )
+    monkeypatch.setattr(market_holdings_parse, "partial_stock_sections", lambda *a: ([{"stockCode": "300001.SZ"}], []))
+    assert verified_domestic_window(profile, material, documents, window)
+    material["companies"].pop(0)
+    assert not verified_domestic_window(profile, material, documents, window)
+    material["companies"].insert(0, {"code": "600000.SH", "quote": {"date": "2026-10-14", "change_pct": 1}})
+    documents["partial"]["codes"] = ["000001"]
+    assert not verified_domestic_window(profile, material, documents, window)

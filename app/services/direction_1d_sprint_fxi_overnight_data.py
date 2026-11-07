@@ -3,7 +3,7 @@
 历史文件缺少首发时刻，只能作为重建开发数据；真实输入必须在08:30前取得并回读。
 """
 
-import hashlib
+# 原始响应统一归档外接盘；历史路径只作为数据库别名，不生成C盘源文件。
 import math
 from bisect import bisect_right
 from datetime import date, datetime, time
@@ -14,6 +14,7 @@ from app.integrations.ishares_sprint_fxi import MAX_BYTES, URL, fetch_fxi
 from app.services import direction_1d_sprint as base
 from app.services import direction_1d_sprint_fxi_gap_data as parent
 from app.services import direction_1d_sprint_overnight as overnight
+from app.services import material_content as _sources
 
 SOURCE = "ISHARES_FXI_LATEST_COMPLETED_US_VALUATION_GAP"
 SLOTS = ("0700", "0730", "0800")
@@ -75,7 +76,7 @@ def history():
     proposal = base.read(base.ROOT / "round-42/proposal-before-training.json")
     feasible = base.read(base.ROOT / "round-42/input-feasibility.json")
     if (
-        hashlib.sha256((base.ROOT / "round-42/feature-feasibility.py").read_bytes()).hexdigest()
+        _sources.content_digest(_sources.source_bytes(base.ROOT / "round-42/feature-feasibility.py"))
         != proposal["script_sha256"]
         or proposal["parent_history_plan_hash"]
         != base.digest(base.read(base.ROOT / "fxi-masked-feasibility-v2/plan.json"))
@@ -127,13 +128,13 @@ def raw_input(target, base_day, ref):
             raise ValueError("FXI_OVERNIGHT_RESPONSE_CHANGED_OR_LATE")
     else:
         raise ValueError("FXI_OVERNIGHT_RAW_OWNER_INVALID")
-    raw = (folder / f"raw/{slot}.xls").read_bytes()
+    raw = _sources.source_bytes(folder / f"raw/{slot}.xls")
     if (
         not raw
         or len(raw) > MAX_BYTES
         or ref["hash"] != base.digest(meta)
         or len(raw) != meta["bytes"]
-        or hashlib.sha256(raw).hexdigest() != meta["body_sha256"]
+        or _sources.content_digest(raw) != meta["body_sha256"]
     ):
         raise ValueError("FXI_OVERNIGHT_RAW_CHANGED")
     received = datetime.fromisoformat(meta["received_at"])
@@ -187,14 +188,14 @@ def capture(at):
         raise ValueError("FXI_OVERNIGHT_WINDOW_CLOSED")
     target, base_day = window["target_nav_date"], window["base_nav_date"]
     folder = root() / target
-    if (folder / "input.json").exists():
+    if _sources.location_exists(folder / "input.json"):
         return load(target)
     deadline = datetime.combine(date.fromisoformat(target), time(8, 30), base.ZONE)
     if base.now() >= deadline:
         raise ValueError("FXI_OVERNIGHT_DEADLINE_REACHED")
     closed_before(base.now(), base_day, target)
     needed = required(base_day, target)
-    if (parent.root() / target / "input.json").exists():
+    if _sources.location_exists(parent.root() / target / "input.json"):
         parent_input = parent.load(target)
         ref = {"kind": "ROUND31", "parent_input_hash": base.digest(parent_input)} | parent_input["raw_ref"]
         raw, _ = raw_input(target, base_day, ref)
@@ -203,7 +204,7 @@ def capture(at):
             return persist(target, base_day, ref, points)
     slot = "0800" if at.time() >= time(8) else "0730" if at.time() >= time(7, 30) else "0700"
     attempt = folder / f"requests/{slot}.json"
-    if attempt.exists() or len(list((folder / "requests").glob("*.json"))) >= 3:
+    if _sources.location_exists(attempt) or len(list((folder / "requests").glob("*.json"))) >= 3:
         raise ValueError("FXI_OVERNIGHT_SLOT_OR_BUDGET_EXHAUSTED")
     request = {"at": base.now().isoformat(), "url": URL, "target": target, "base": base_day, "required_dates": needed}
     base.save(attempt, request)
@@ -212,15 +213,14 @@ def capture(at):
         meta = {
             "received_at": base.now().isoformat(),
             "source": SOURCE,
-            "body_sha256": hashlib.sha256(body).hexdigest(),
+            "body_sha256": _sources.content_digest(body),
             "bytes": len(body),
             "headers": headers,
             "request_hash": base.digest(request),
         }
         raw_path = folder / f"raw/{slot}.xls"
         raw_path.parent.mkdir(parents=True, exist_ok=True)
-        with raw_path.open("xb") as file:
-            file.write(body)
+        _sources.write_source(raw_path, body)
         base.save(folder / f"raw/{slot}.json", meta)
         if datetime.fromisoformat(meta["received_at"]) >= deadline:
             raise ValueError("FXI_OVERNIGHT_RESPONSE_LATE")

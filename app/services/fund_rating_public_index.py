@@ -3,7 +3,6 @@
 不以指数涨跌推断完整合同基准，不借用其他份额净值。主题集中度只解释持仓风险。
 """
 
-import hashlib
 import json
 import math
 import re
@@ -16,6 +15,7 @@ from app.core.config import get_settings
 from app.services.fund_rating_public_market import balance, disclosures, key_information, provider_history
 from app.services.fund_rating_public_stock_tables import parse
 from app.services.fund_rating_rules import decimal
+from app.services.material_content import content_digest, source_bytes
 
 BASIS = "PUBLIC_DISCLOSURE_DOMESTIC_INDEX_V1"
 SCOPE = {"basis": BASIS, "asset": "DOMESTIC_EQUITY_INDEX", "currency": "CNY"}
@@ -46,8 +46,8 @@ def facts(refs: dict, root: Path, code: str, name: str, as_of: date, *, history_
 
     def raw(label):
         ref = refs[label]
-        value = (root / ref["file"]).read_bytes()
-        if hashlib.sha256(value).hexdigest() != ref["sha256"]:
+        value = source_bytes(root / ref["file"])
+        if content_digest(value) != ref["sha256"]:
             raise ValueError("RATING_INDEX_ORIGINAL_HASH")
         return value
 

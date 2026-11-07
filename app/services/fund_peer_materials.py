@@ -4,7 +4,7 @@
 报告、净值和版本；2025 标签及回算 2026 标签不进入本模块。
 """
 
-import hashlib
+# 原件路径只是数据库别名；业务读取不再打开C/D盘源文件。
 import json
 from collections import Counter, OrderedDict, defaultdict
 from datetime import date, datetime, time
@@ -15,6 +15,7 @@ from sqlalchemy import text
 from app.db.session import get_engine
 from app.integrations.public_fund_reports import PEERS, STORE, ReportClient, acquire_one, catalog
 from app.integrations.tushare_sprint_stock_breadth_v2 import FIELDS, parse
+from app.services import material_content as _source_store
 from app.services.direction_1d_protocol import ZONE, calendar, digest
 from app.services.direction_1d_training import build_samples, select_fit
 from app.services.fund_exposure_common import ROOT, now, read, save
@@ -47,7 +48,7 @@ def sync_reports(check_id, progress):
         for ordinal, code in enumerate(PEERS):
             progress(ordinal, len(PEERS), code, f"补充 {code} {PEERS[code]} 的历史报告")
             manifest_path = STORE / code / "manifest.json"
-            old = read(manifest_path) if manifest_path.exists() else {"documents": {}}
+            old = read(manifest_path) if _source_store.location_exists(manifest_path) else {"documents": {}}
             documents, errors = {}, []
             try:
                 entries, receipts = catalog(client, code)
@@ -218,18 +219,18 @@ class QuoteDays:
 
     def _load(self, day):
         path = ROOT / "stock-days" / (day + ".json")
-        receipt = read(path)["receipt"] if path.exists() else None
+        receipt = read(path)["receipt"] if _source_store.location_exists(path) else None
         rawpath = (
             (Path(receipt["raw_path"]) if receipt.get("raw_path") else ROOT / receipt["file"]) if receipt else None
         )
-        if rawpath is None or not rawpath.exists():
+        if rawpath is None or not _source_store.location_exists(rawpath):
             if not self.allow_fetch:
                 raise ValueError("TRAINING_QUOTE_EVIDENCE_MISSING")
             self.provider = self.provider or Provider()
             value, receipt = self.provider.query("daily", {"trade_date": day.replace("-", "")}, FIELDS)
             rawpath = ROOT / receipt["file"]
-        raw = rawpath.read_bytes()
-        if hashlib.sha256(raw).hexdigest() != receipt["sha256"]:
+        raw = _source_store.source_bytes(rawpath)
+        if _source_store.content_digest(raw) != receipt["sha256"]:
             raise ValueError("EXPOSURE_RAW_HASH_MISMATCH")
         if datetime.fromisoformat(receipt["expires_at"]) <= now():
             raise ValueError("EXPOSURE_EVIDENCE_EXPIRED")
@@ -269,7 +270,7 @@ def build_coverage(progress, *, retry_bj=True):
     reports = {}
     for code in PEERS:
         path = STORE / code / "manifest.json"
-        manifest = read(path) if path.exists() else {"documents": {}}
+        manifest = read(path) if _source_store.location_exists(path) else {"documents": {}}
         files = {f for d in manifest["documents"].values() for f in [d["file"], *d.get("previous_versions", [])]}
         reports[code] = [read(STORE / f) for f in sorted(files)]
     rows, excluded, gaps = [], [], defaultdict(set)
@@ -481,9 +482,9 @@ def supplement(*, check_id, progress=lambda *args: None):
         "train_automatically": False,
     }
     plan_path = STORE / "plan.json"
-    if plan_path.exists() and read(plan_path) != plan:
+    if _source_store.location_exists(plan_path) and read(plan_path) != plan:
         raise ValueError("REPORT_PEER_PLAN_CHANGED")
-    if not plan_path.exists():
+    if not _source_store.location_exists(plan_path):
         save(plan_path, plan)
     result = sync_reports(check_id, progress)
     progress(0, 1, "002112", "报告已保存，正在核对参照基金的历史净值和股票行情")

@@ -1,6 +1,5 @@
 """复用发行人逐日合同基准HTTP原响应；不采集、不发布、不用成功标志证明曲线齐全。"""
 
-import hashlib
 import json
 import re
 from datetime import datetime
@@ -11,6 +10,15 @@ from urllib.parse import parse_qs, urlsplit
 from app.services.fund_exposure_common import _publish
 from app.services.fund_quality_v2_paired_history import benchmark_records
 from app.services.fund_rating_rules import decimal
+from app.services.material_content import (
+    content_digest,
+    location_exists,
+    same_content,
+    source_bytes,
+    source_exists,
+    source_size,
+    source_text,
+)
 
 
 def reuse_benchmark_originals(code: str, source_root: Path, rating_root: Path, frozen: datetime) -> list[dict]:
@@ -23,15 +31,18 @@ def reuse_benchmark_originals(code: str, source_root: Path, rating_root: Path, f
     """
     source_root = source_root.resolve()
     manifest = source_root / "quality-benchmark-originals.json"
-    if not manifest.exists():
+    if not location_exists(manifest):
         return []
-    if not re.fullmatch(r"[0-9]{6}", code) or manifest.stat().st_size > 1_000_000:
+    if not re.fullmatch(r"[0-9]{6}", code) or source_size(manifest) > 1_000_000:
         raise ValueError("QUALITY_BENCHMARK_MANIFEST_CODE_OR_SIZE")
-    data = json.loads(manifest.read_text(encoding="utf-8"))
+    data = json.loads(source_text(manifest, encoding="utf-8"))
     data = data.get("payload", data)
-    if (data.get("schema") != "QUALITY_BENCHMARK_SOURCE_RECEIPTS_V1"
-            or not isinstance(data.get("items"), list) or len(data["items"]) > 200
-            or any(not isinstance(item, dict) for item in data["items"])):
+    if (
+        data.get("schema") != "QUALITY_BENCHMARK_SOURCE_RECEIPTS_V1"
+        or not isinstance(data.get("items"), list)
+        or len(data["items"]) > 200
+        or any(not isinstance(item, dict) for item in data["items"])
+    ):
         raise ValueError("QUALITY_BENCHMARK_MANIFEST_SCHEMA")
     result = []
     for item in data["items"]:
@@ -41,10 +52,16 @@ def reuse_benchmark_originals(code: str, source_root: Path, rating_root: Path, f
         if not isinstance(receipt, dict) or not isinstance(receipt.get("params"), dict):
             raise ValueError("QUALITY_BENCHMARK_RECEIPT_SCHEMA")
         address = urlsplit(receipt["url"])
-        if (item.get("source_kind") != "ISSUER_PRODUCT_DAILY_BENCHMARK"
-                or receipt.get("method") != "GET" or receipt.get("status") != 200
-                or address.scheme != "https" or address.port not in {None, 443}
-                or address.username or address.password or address.fragment):
+        if (
+            item.get("source_kind") != "ISSUER_PRODUCT_DAILY_BENCHMARK"
+            or receipt.get("method") != "GET"
+            or receipt.get("status") != 200
+            or address.scheme != "https"
+            or address.port not in {None, 443}
+            or address.username
+            or address.password
+            or address.fragment
+        ):
             raise ValueError("QUALITY_BENCHMARK_RECEIPT_OR_HTTPS")
         query = parse_qs(address.query, keep_blank_values=True)
         if (address.hostname, address.path) == ("www.fullgoal.com.cn", "/ws-business-server/fund/getIncomeList"):
@@ -57,16 +74,26 @@ def reuse_benchmark_originals(code: str, source_root: Path, rating_root: Path, f
             raise ValueError("QUALITY_BENCHMARK_SOURCE_ENDPOINT_UNSUPPORTED")
         acquired = datetime.fromisoformat(receipt["received_at"])
         path = (source_root / receipt["file"]).resolve()
-        if (acquired.tzinfo is None or acquired > frozen or not path.is_relative_to(source_root / "raw")
-                or not path.is_file() or path.stat().st_size > 2_000_000):
+        if (
+            acquired.tzinfo is None
+            or acquired > frozen
+            or not path.is_relative_to(source_root / "raw")
+            or not source_exists(path)
+            or source_size(path) > 2_000_000
+        ):
             raise ValueError("QUALITY_BENCHMARK_TIME_PATH_OR_SIZE")
-        raw = path.read_bytes()
-        sha = hashlib.sha256(raw).hexdigest()
+        raw = source_bytes(path)
+        sha = content_digest(raw)
         if sha != receipt["sha256"]:
             raise ValueError("QUALITY_BENCHMARK_ORIGINAL_HASH")
-        ref = {"label": "benchmark", "url": receipt["url"], "method": "GET",
-               "params": receipt["params"], "sha256": sha,
-               **({"format": item["format"]} if item.get("format") else {})}
+        ref = {
+            "label": "benchmark",
+            "url": receipt["url"],
+            "method": "GET",
+            "params": receipt["params"],
+            "sha256": sha,
+            **({"format": item["format"]} if item.get("format") else {}),
+        }
         try:
             records, adapter = benchmark_records(raw, ref, fund_code=code)
         except (KeyError, TypeError, AttributeError) as exc:
@@ -88,14 +115,21 @@ def reuse_benchmark_originals(code: str, source_root: Path, rating_root: Path, f
             raise ValueError("QUALITY_BENCHMARK_NO_OBSERVED_PAIR")
         target = rating_root / "sources" / (sha + ".json")
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
-            if target.read_bytes() != raw:
+        if location_exists(target):
+            if not same_content(source_bytes(target), raw):
                 raise ValueError("QUALITY_BENCHMARK_DESTINATION_CONFLICT")
         else:
             _publish(target, raw)
-        result.append({**ref, "file": target.relative_to(rating_root).as_posix(),
-            "acquired_at": receipt["received_at"], "title": item["title"],
-            "source_kind": "ISSUER_DAILY_BENCHMARK_HTTP_ORIGINAL", "adapter": adapter,
-            "origin_receipt_file": str(manifest),
-            "time_scope": "ACTUAL_RECEIPT_NOT_HISTORICAL_FIRST_PUBLICATION_OR_REVISION_PROOF"})
+        result.append(
+            {
+                **ref,
+                "file": target.relative_to(rating_root).as_posix(),
+                "acquired_at": receipt["received_at"],
+                "title": item["title"],
+                "source_kind": "ISSUER_DAILY_BENCHMARK_HTTP_ORIGINAL",
+                "adapter": adapter,
+                "origin_receipt_file": str(manifest),
+                "time_scope": "ACTUAL_RECEIPT_NOT_HISTORICAL_FIRST_PUBLICATION_OR_REVISION_PROOF",
+            }
+        )
     return result

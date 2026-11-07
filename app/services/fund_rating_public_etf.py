@@ -7,8 +7,6 @@
 原件，手动任务才发布。原文未披露的最大个人持有人比例保持未知。
 """
 
-import hashlib
-import io
 import json
 import math
 import re
@@ -18,13 +16,21 @@ from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from pypdf import PdfReader
-
 from app.core.config import get_settings
 from app.services.fund_rating_disclosures import compact
 from app.services.fund_rating_metrics import standard_cost, total_return
 from app.services.fund_rating_public_policy import ANCHORS, ETF_BASIS, TERMS
 from app.services.fund_rating_rules import DIMENSIONS, decimal
+from app.services.material_content import (
+    content_digest,
+    location_exists,
+    source_bytes,
+    source_exists,
+    source_glob,
+    source_size,
+    source_text,
+)
+from app.services.material_content import document_reader as PdfReader
 
 FUND_CODE = "016008"
 TARGET_CODE = "159779"
@@ -374,16 +380,16 @@ def appointed_teams(pages: list[str], info: dict, end: date) -> dict:
 
 def _read_archive(ref: dict, root: Path) -> bytes:
     p = (root / ref["file"]).resolve()
-    if not p.is_relative_to(root.resolve()) or not p.is_file() or p.stat().st_size > 20_000_000:
+    if not p.is_relative_to(root.resolve()) or not source_exists(p) or source_size(p) > 20_000_000:
         raise ValueError("RATING_ETF_ARCHIVE_PATH")
-    data = p.read_bytes()
-    if hashlib.sha256(data).hexdigest() != ref["sha256"]:
+    data = source_bytes(p)
+    if content_digest(data) != ref["sha256"]:
         raise ValueError("RATING_ETF_ARCHIVE_HASH")
     return data
 
 
 def _pages(raw: bytes) -> list[str]:
-    return [p.extract_text() or "" for p in PdfReader(io.BytesIO(raw)).pages]
+    return [p.extract_text() or "" for p in PdfReader(raw).pages]
 
 
 def original_facts(refs: dict, root: Path, as_of: date) -> dict:
@@ -496,8 +502,8 @@ def prepare_etf_bundle(source_root: Path, as_of: date, frozen: datetime) -> dict
     from app.services.fund_rating_inputs import canonical
 
     refs = {}
-    for p in source_root.glob("*-receipt.json"):
-        r = json.loads(p.read_text(encoding="utf-8"))
+    for p in source_glob(source_root, "*-receipt.json"):
+        r = json.loads(source_text(p, encoding="utf-8"))
         label = r.get("label") or p.name.removesuffix("-receipt.json")
         if label == "getFundNavPage-2":
             label = "official-nav-page2"
@@ -552,12 +558,13 @@ def prepare_etf_bundle(source_root: Path, as_of: date, frozen: datetime) -> dict
         relative = "sources/" + r["sha256"] + extension
         out = archive_root / relative
         out.parent.mkdir(parents=True, exist_ok=True)
-        if out.exists():
-            if hashlib.sha256(out.read_bytes()).hexdigest() != r["sha256"]:
+        if location_exists(out):
+            if content_digest(source_bytes(out)) != r["sha256"]:
                 raise ValueError("RATING_ETF_EXISTING_ARCHIVE_CORRUPT")
         else:
-            with out.open("xb") as stream:
-                stream.write(raw)
+            from app.services.material_content import write_source
+
+            write_source(out, raw)
         if r["sha256"] in archives:
             # 分红和折算的真实空响应可以同字节；保留两个请求回执，共用一份不可变原文。
             archives[r["sha256"]].setdefault("aliases", []).append({**r, "file": relative})
@@ -815,6 +822,7 @@ def reprint_balance(pages: list[str]) -> dict:
         r"\1",
         text,
     )
+
     # 管理人对零值科目可整行不列示；缺失行取零并以资产合计勾稽兜底，重复行仍然拒绝。
     def row_amount(label):
         lines = [x.strip() for x in cleaned.splitlines() if re.match(r"^\s*" + re.escape(label) + r"\s", x)]
@@ -866,7 +874,9 @@ def _benchmark_series(raw: dict, ref: dict, code: str, expression: str) -> dict:
     fmt = ref.get("format")
     if fmt == "ISSUER_DAILY_BENCHMARK_TH":
         payload = raw.get("payload") or {}
-        if str(raw.get("retCode")) != "0" or str(payload.get("retCode")) != "0":
+        # 该公开接口外层成功码为0，实际内层响应使用六位000000；只接纳
+        # 这两种已观测成功码，非零、缺码仍拒绝，后续逐行核份额与日期。
+        if str(raw.get("retCode")) != "0" or str(payload.get("retCode")) not in {"0", "000000"}:
             raise ValueError("RATING_ETF_BENCHMARK_RESPONSE")
         if compact(str(payload.get("benchMark") or "")).translate(_BENCHMARK_EXPRESSION_NORMALIZE) != expression:
             raise ValueError("RATING_ETF_BENCHMARK_IDENTITY")
@@ -938,12 +948,8 @@ def _benchmark_series(raw: dict, ref: dict, code: str, expression: str) -> dict:
             {
                 "navDate": iso(r["NAVDATE"]),
                 "productCode": code,
-                "publisher_cumulative": 1 + v
-                if (v := percent(r.get("YIELD"))) is not None
-                else None,
-                "benchmark_cumulative": 1 + w
-                if (w := percent(r.get("YIELD_BENCHMARK"))) is not None
-                else None,
+                "publisher_cumulative": 1 + v if (v := percent(r.get("YIELD"))) is not None else None,
+                "benchmark_cumulative": 1 + w if (w := percent(r.get("YIELD_BENCHMARK"))) is not None else None,
             }
             for r in sorted(rows_raw, key=lambda r: r["NAVDATE"])
         ]
@@ -981,10 +987,7 @@ def _reprint_key_information(
     # 两栏排版把份额名称尾字母拆到代码单元格之后；仍限定在原表格标签与短距离内。
     interleaved_share = re.search(r"下属基金代码" + code + r"[\u4e00-\u9fffA-Za-z（）()]{0,12}?C(?:基金|）)", text)
     share_ok = (
-        share_identity
-        or individual_share
-        or interleaved_share
-        or re.search(r"C(?:类)?(?:基金)?份额", text[:600])
+        share_identity or individual_share or interleaved_share or re.search(r"C(?:类)?(?:基金)?份额", text[:600])
     )
     if not share_ok:
         raise ValueError("RATING_ETF_SHARE_CLASS_IDENTITY")
@@ -1093,8 +1096,8 @@ def reprint_facts(refs: dict, root: Path, code: str, name: str, as_of: date, sco
 
     def read(label):
         ref = refs[label]
-        raw = (root / ref["file"]).read_bytes()
-        if hashlib.sha256(raw).hexdigest() != ref["sha256"]:
+        raw = source_bytes(root / ref["file"])
+        if content_digest(raw) != ref["sha256"]:
             raise ValueError("RATING_ETF_ORIGINAL_HASH")
         return raw
 

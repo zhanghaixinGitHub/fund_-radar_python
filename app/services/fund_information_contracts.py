@@ -57,9 +57,9 @@ def time_context(data: dict, sessions: list[str] | None = None) -> dict:
     for code, quote in data["market"].items():
         if markets[code]["status"] == "READY" and quote.get("change_pct") is None:
             markets[code]["status"] = "MISSING_VALUE"
-    # 只核验已有原文，不相信包内任意“就绪”布尔值。香港休市时保留原报价日期，
+    # 只核验已有原文，不相信包内任意“就绪”布尔值。境外休市时保留原报价日期，
     # 单独说明其为最近交易日参考；缺基金条款、官方汇率等证据仍视为过期。
-    from app.services.fund_valuation_sessions import verified_hk_holiday_reference
+    from app.services.fund_valuation_sessions import verified_hk_holiday_reference, verified_jp_holiday_reference
 
     documents = {d["id"]: d for d in data.get("documents", [])}
     for company in data["companies"]:
@@ -67,9 +67,16 @@ def time_context(data: dict, sessions: list[str] | None = None) -> dict:
         if row["status"] == "STALE":
             proof = verified_hk_holiday_reference(
                 data, documents, company["code"], company.get("quote") or {}, data["window"]
+            ) or verified_jp_holiday_reference(
+                data, documents, company["code"], company.get("quote") or {}, data["window"]
             )
             if proof:
                 row.update(status="READY_LAST_SESSION", valuation_reference=proof)
+    for code, quote in data["market"].items():
+        if markets[code]["status"] == "STALE":
+            proof = verified_jp_holiday_reference(data, documents, code, quote, data["window"])
+            if proof:
+                markets[code].update(status="READY_LAST_SESSION", valuation_reference=proof)
     nav_state = state(latest_nav)
     latest_quote = max((q["date"] for q in stocks.values() if q["date"]), default=None)
     from app.services.fund_corporate_actions import verified_security_quote_exception
@@ -89,7 +96,7 @@ def time_context(data: dict, sessions: list[str] | None = None) -> dict:
         for code, q in stocks.items()
         if q["status"] not in {"READY", "READY_LAST_SESSION", "READY_DOCUMENTED_NON_TRADING"}
     ]
-    missing_markets = [code for code, q in markets.items() if q["status"] != "READY"]
+    missing_markets = [code for code, q in markets.items() if q["status"] not in {"READY", "READY_LAST_SESSION"}]
     stock_applicable = data.get("stock_market_applicable", True)
     ready = (
         nav_state == "READY" and (bool(stocks) or not stock_applicable) and not missing_stocks and not missing_markets
@@ -106,7 +113,7 @@ def time_context(data: dict, sessions: list[str] | None = None) -> dict:
             )
         if any(q["status"] == "READY_LAST_SESSION" for q in stocks.values()):
             statements.append(
-                "香港比较基准日休市，香港持仓保留最近有效交易日参考报价；未推算休市日涨跌或本基金持仓正式估值。"
+                "相关境外市场比较基准日休市，保留最近有效交易日参考报价；未推算休市日涨跌或本基金持仓正式估值。"
             )
     else:
         if nav_state != "READY":

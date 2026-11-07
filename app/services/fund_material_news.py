@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 from app.core.config import get_settings
 from app.services.direction_1d_protocol import digest
 from app.services.fund_exposure_common import read
+from app.services.material_content import location_exists
 
 
 def current(code: str) -> dict:
@@ -27,7 +28,7 @@ def current(code: str) -> dict:
         raise ValueError("MATERIAL_NEWS_FUND_INVALID")
     root = Path(get_settings().fund_insight_directory) / code / "material-news"
     pointer = root / "current.json"
-    if not pointer.exists():
+    if not location_exists(pointer):
         return empty
     ref = read(pointer)
     snapshot_hash = ref.get("hash", "")

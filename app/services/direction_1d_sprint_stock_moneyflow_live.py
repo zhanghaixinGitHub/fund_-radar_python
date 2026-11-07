@@ -1,6 +1,6 @@
 """沪深订单分类金额一次实收：保留当时请求、原文及失败，禁止历史回填和请求重试。"""
 
-import hashlib
+# 原始响应统一归档外接盘；历史路径只作为数据库别名，不生成C盘源文件。
 import json
 import math
 from datetime import date, datetime, time
@@ -13,6 +13,7 @@ from app.integrations import tushare_sprint_stock_moneyflow as parser
 from app.services import direction_1d_sprint as b
 from app.services import direction_1d_sprint_stock_breadth_live as quote_live
 from app.services import direction_1d_sprint_stock_moneyflow_data as data
+from app.services import material_content as _sources
 
 URL = "https://api.tushare.pro"
 
@@ -61,14 +62,14 @@ def fetch(t):
 
 
 def raw_identity(path):
-    if not path.exists():
+    if not _sources.location_exists(path):
         return None
-    raw = path.read_bytes()
-    return {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    raw = _sources.source_bytes(path)
+    return {"bytes": len(raw), "sha256": _sources.content_digest(raw)}
 
 
 def ready(u):
-    return (root() / u / "snapshot.json").is_file()
+    return _sources.source_exists(root() / u / "snapshot.json")
 
 
 def quote_context(t, u, flow_raw):
@@ -78,10 +79,10 @@ def quote_context(t, u, flow_raw):
     require(source["available"], "ACTUAL_QUOTE_SOURCE_UNAVAILABLE")
     path = quote_live.root() / u
     receipt = b.read(path / "response.json")
-    raw = (path / "raw.bin").read_bytes()
+    raw = _sources.source_bytes(path / "raw.bin")
     require(b.digest(receipt) == source["receipt_hash"], "ACTUAL_QUOTE_RECEIPT_CHANGED")
     require(
-        receipt["raw"] == {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}, "ACTUAL_QUOTE_RAW_CHANGED"
+        receipt["raw"] == {"bytes": len(raw), "sha256": _sources.content_digest(raw)}, "ACTUAL_QUOTE_RAW_CHANGED"
     )
     flow_codes = {x[0] for x in json.loads(flow_raw)["data"]["items"] if x[0].endswith((".SH", ".SZ"))}
     quote_rows = {x[0]: x for x in json.loads(raw)["data"]["items"] if x[0].endswith((".SH", ".SZ")) and x[-1] > 0}
@@ -95,7 +96,7 @@ def quote_context(t, u, flow_raw):
         "source_hash": b.digest(source),
         "source_at": source["at"],
         "receipt_hash": source["receipt_hash"],
-        "raw_sha256": hashlib.sha256(raw).hexdigest(),
+        "raw_sha256": _sources.content_digest(raw),
         "count_coverage": count_coverage,
         "amount_coverage": amount_coverage,
         "missing_positive_quote_codes": sorted(set(quote_rows) - flow_codes),
@@ -125,7 +126,7 @@ def reconstruct(t, u, ph):
     )
     points, error, quote = {}, None, None
     if receipt["status"] == "RECEIVED":
-        raw = (r / "raw.bin").read_bytes()
+        raw = _sources.source_bytes(r / "raw.bin")
         require(
             0 < len(raw) <= parser.MAX_BYTES
             and receipt["raw"] == raw_identity(r / "raw.bin")
@@ -184,12 +185,12 @@ def load_live(t, u, ph):
 def capture(t, u, ph):
     """最多一个请求；共用研究run锁，另以独占请求文件保留预算，断电后也不补发。"""
     r = root() / u
-    if (r / "snapshot.json").exists():
+    if _sources.location_exists(r / "snapshot.json"):
         return load_live(t, u, ph)
     if not in_window(t, u, b.now()):
         return None
     r.mkdir(parents=True, exist_ok=True)
-    if not (r / "request.json").exists():
+    if not _sources.location_exists(r / "request.json"):
         request = {
             "at": b.now().isoformat(),
             "t": t,
@@ -212,8 +213,7 @@ def capture(t, u, ph):
             }
         else:
             # 写盘失败必须显式抛出；后续仅能记录中断，不能伪造网络失败或再次查询。
-            with (r / "raw.bin").open("xb") as f:
-                f.write(raw)
+            _sources.write_source(r / "raw.bin", raw)
             receipt = {
                 "at": b.now().isoformat(),
                 "request_hash": b.digest(request),
@@ -222,7 +222,7 @@ def capture(t, u, ph):
                 "raw": raw_identity(r / "raw.bin"),
             }
         b.save(r / "response.json", receipt)
-    elif not (r / "response.json").exists():
+    elif not _sources.location_exists(r / "response.json"):
         request = b.read(r / "request.json")
         require(request["t"] == t and request["u"] == u and request["plan_hash"] == ph, "REQUEST_CHANGED")
         b.save(

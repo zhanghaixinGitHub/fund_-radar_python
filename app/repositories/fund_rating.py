@@ -151,6 +151,8 @@ def verify_batch(
 
         if (batch.input_snapshot.get("method") or {}).get("basis") == SNAPSHOT_BASIS:
             verify_result(result, batch)
+        if result.status == "SCORED" and (batch.input_snapshot.get("method") or {}).get("basis") != SNAPSHOT_BASIS:
+            raise ValueError("RATING_COMPLETE_CALCULATION_REQUIRED")
         if result.status == "RATED":
             if not result.dimension_values or set(result.dimension_values) != set(DIMENSIONS):
                 raise ValueError("RATING_EIGHT_DIMENSIONS_REQUIRED")
@@ -250,7 +252,10 @@ def publish(session: Session, batch: RatingBatch, *, rollback_reason: str | None
         raise ValueError("RATING_REVIEWED_INPUT_REQUIRED")
     if batch.withdrawn or not inputs_valid(session, batch):
         raise ValueError("RATING_BATCH_WITHDRAWN")
-    if any(r.status in {"RATED", "PARTIAL"} for r in results) or basis == "PUBLIC_REVIEWED_QUALITY_SNAPSHOT_V3":
+    if (
+        any(r.status in {"RATED", "SCORED", "PARTIAL"} for r in results)
+        or basis == "PUBLIC_REVIEWED_QUALITY_SNAPSHOT_V3"
+    ):
         method = session.get(RatingMethodology, batch.methodology_id)
         if not method or not method.active or not method.validation or digest(method.config) != method.methodology_id:
             raise ValueError("RATING_METHOD_NOT_VALIDATED")
@@ -263,7 +268,7 @@ def publish(session: Session, batch: RatingBatch, *, rollback_reason: str | None
         old = session.get(RatingBatch, current.batch_id)
         if old.as_of_date > batch.as_of_date and not rollback_reason:
             raise RatingConflict("RATING_OLDER_BATCH")
-    if rollback_reason and any(r.status in {"RATED", "PARTIAL"} and r.valid_until <= now for r in results):
+    if rollback_reason and any(r.status in {"RATED", "SCORED", "PARTIAL"} and r.valid_until <= now for r in results):
         raise ValueError("RATING_ROLLBACK_EXPIRED")
     if not current:
         current = RatingCurrent(category_code=batch.category_code, batch_id=batch.batch_id, updated_at=now)
@@ -360,25 +365,36 @@ def summary(result: RatingResult, batch: RatingBatch, *, invalid: bool, now: dat
     if invalid:
         status = "WITHDRAWN"
     elif (
-        (status in {"RATED", "PARTIAL"} or result.public_evidence.get("scoreCoverage") is not None)
-        and result.valid_until and result.valid_until <= now
+        (status in {"RATED", "SCORED", "PARTIAL"} or result.public_evidence.get("scoreCoverage") is not None)
+        and result.valid_until
+        and result.valid_until <= now
     ):
         status = "STALE"
     rated = status == "RATED"
+    scored = status == "SCORED"
     output = {
         "fundCode": result.fund_code,
         "status": status,
         "grade": result.grade if rated else None,
         "gradeLabel": GRADES[result.grade] if rated else None,
+        "score": f"{result.score:.2f}" if scored else None,
         "asOfDate": str(batch.as_of_date),
         "validUntil": result.valid_until.isoformat() if result.valid_until else None,
         "ratingRef": batch.batch_id,
         "message": (
-            None if rated else "评级待更新" if status in {"STALE", "WITHDRAWN"}
-            else "部分维度已评分" if status == "PARTIAL" else "暂未评级"
+            None
+            if rated or scored
+            else "评级待更新"
+            if status in {"STALE", "WITHDRAWN"}
+            else "部分维度已评分"
+            if status == "PARTIAL"
+            else "暂未评级"
         ),
     }
     if status == "PARTIAL":
         for key in ("scoreRange", "partialScore", "scoreCoverage"):
             output[key] = result.public_evidence.get(key)
+    elif scored:
+        # 完整新分也透传封存的100%覆盖，使市场摘要与同批次详情一致。
+        output["scoreCoverage"] = result.public_evidence.get("scoreCoverage")
     return output

@@ -5,7 +5,7 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
-from app.services.fund_rating_public_market import amount, key_information, provider_history, provider_team
+from app.services.fund_rating_public_market import amount, balance, key_information, provider_history, provider_team
 
 
 def summary():
@@ -50,11 +50,42 @@ def test_explicit_statement_dash_is_zero_and_missing_row_rejects():
 
 def test_statement_note_and_previous_year_are_not_amount():
     assert amount("货币资金 6.4.7.1 820,541,601.28 602,079,224.85", "货币资金") == "820541601.28"
+    assert amount("货币资金 7.4.7.1 820,541,601.28 602,079,224.85", "货币资金") == "820541601.28"
 
 
 def test_duplicate_statement_label_is_ambiguous():
     with pytest.raises(ValueError, match="AMOUNT_ROW"):
         amount("货币资金 1.00 2.00\n货币资金 3.00 4.00", "货币资金")
+
+
+def annual_balance():
+    """标准年报第七节；金额和净资产必须仍可逐项对账。"""
+    rows = [
+        "7.1 资产负债表", "单位：人民币元", "货币资金 10.00 9.00",
+        "结算备付金 - -", "存出保证金 - -", "交易性金融资产 90.00 80.00",
+        "其中：股票投资 90.00 80.00", "基金投资 - -", "债券投资 - -",
+        "衍生金融资产 - -", "买入返售金融资产 - -", "应收清算款 - -",
+        "应收股利 - -", "应收申购款 - -", "递延所得税资产 - -", "其他资产 - -",
+        "资产总计 100.00 89.00", "负债合计 5.00 4.00", "净资产合计 95.00 85.00",
+        "7.2 利润表",
+    ]
+    return ["\n".join(rows)]
+
+
+def test_standard_annual_seventh_section_reconciles():
+    result = balance(annual_balance())
+    assert result["total_assets"] == "100.00"
+    assert result["net_assets"] == "95.00"
+
+
+@pytest.mark.parametrize("change,reason", [
+    (("人民币元", "人民币万元"), "BALANCE_UNIT"),
+    (("100.00", "101.00"), "BALANCE_RECONCILIATION"),
+    (("7.1 资产负债表", "10.1 合并资产负债表"), "SECTION"),
+])
+def test_annual_section_keeps_unit_reconciliation_and_reit_boundary(change, reason):
+    with pytest.raises(ValueError, match=reason):
+        balance([annual_balance()[0].replace(*change)])
 
 
 def test_manager_team_must_match_official_current_names():

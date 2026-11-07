@@ -85,7 +85,9 @@ def pledged_bond_table(section: str, *, bond_amount: str | None) -> dict:
                 markets=markets,
                 unresolved_market=market,
             )
-        if "单位：人民币元" not in normalized or not re.search(r"数量[（(]张[）)]", normalized):
+        # 管理人原件同时使用中文和ASCII冒号；只接受明确的人民币元，
+        # 不能把万元、缺失币种或融资余额当作同一质押资产单位。
+        if not re.search(r"单位[:：]人民币元", normalized) or not re.search(r"数量[（(]张[）)]", normalized):
             raise ValueError("QUALITY_PLEDGED_BONDS_UNIT_UNVERIFIED:" + market)
         money = r"[\d,]+\.\d{2}"
         pattern = (

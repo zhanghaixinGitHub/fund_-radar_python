@@ -35,8 +35,8 @@ from threadpoolctl import threadpool_info
 from scripts import fund_002112_existing_data_fit_v1 as fit
 
 PY = Path(__file__).resolve().parents[1]
-WEB = Path("C:/WebStormProject/workSpace05")
-JAVA = Path("C:/ideaProject/workSpace12")
+WEB = Path("D:/Project-FullStack/workSpace01/01-vue")
+JAVA = Path("D:/Project-FullStack/workSpace01/02-java")
 RESEARCH = PY / ".local-runs/fund-exposure-002112"
 ROOT = RESEARCH / "existing-data-experiment/20260930-v1"
 DOC = WEB / "docs_zhx/implementation/fund-002112-existing-data-training-implementation-2026-09-30.md"

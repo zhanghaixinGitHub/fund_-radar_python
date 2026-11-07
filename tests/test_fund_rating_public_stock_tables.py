@@ -1,6 +1,7 @@
 """完整金额、跨分表重复和缺失边界；不能用凑行或拆桶绕过持仓核验。"""
 
 import io
+import re
 import zipfile
 
 import pytest
@@ -105,14 +106,15 @@ def test_article_metadata_without_full_text_is_not_a_report():
 
 
 @pytest.mark.parametrize("increment", ["12.34", "-12.34"])
-def test_substitution_is_separate_and_requires_two_independent_tables(increment):
+@pytest.mark.parametrize("asset_label", ["股票投资", "权益投资项", "两表差异"])
+def test_substitution_is_separate_and_requires_two_independent_tables(increment, asset_label):
     """正负替代款差额都保留；缺一只证券、行业合计冲突、无注释均不能通过。"""
     from decimal import Decimal
 
     amount = str(Decimal("1500.00") + Decimal(increment))
     body = f"""7.1 期末基金资产组合情况
 其中：股票 {amount} 15.00
-注：股票投资的公允价值包含可退替代款的估值增值。
+注：{asset_label}的公允价值包含可退替代款的估值增值。
 7.2 报告期末按行业分类的股票投资组合
 J 金融业 1,500.00 15.00
 合计 1,500.00 15.00
@@ -121,6 +123,9 @@ J 金融业 1,500.00 15.00
 2 000001 平安银行 50 500.00 5.00
 7.4 报告期股票变动
 """
+    if asset_label == "两表差异":
+        body = body.replace("两表差异的公允价值包含可退替代款的估值增值。",
+            "投资组合报表中股票投资市值与按行业分类股票投资组合报表中股票总市值之间的差异是由于可退替代款估值增值引起的。")
     result = parse_disclosed([body], amount, "10000")
     assert result["substitution_increment_cny"] == increment
     assert result["stock_value_cny"] == "1500.00"
@@ -128,7 +133,8 @@ J 金融业 1,500.00 15.00
     with pytest.raises(ValueError, match="FULL_AMOUNT_MISMATCH"):
         parse_disclosed([body.replace("2 000001 平安银行 50 500.00 5.00\n", "")], amount, "10000")
     with pytest.raises(ValueError, match="NOTE_UNVERIFIED"):
-        parse_disclosed([body.replace("包含可退替代款的估值增值", "金额见上表")], amount, "10000")
+        invalid = re.sub(r"注：[^\n]+", "注：金额见上表。", body)
+        parse_disclosed([invalid], amount, "10000")
     with pytest.raises(ValueError, match="INDUSTRY_CONFLICT"):
         parse_disclosed([body.replace("J 金融业 1,500.00", "J 金融业 1,400.00")], amount, "10000")
 

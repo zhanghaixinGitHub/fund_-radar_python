@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pypdfium2 as pdfium
 
+from app.core.pdf import PDF_LOCK
 from app.services.fund_earnings_evidence_v1 import plan_groups
 from app.services.fund_earnings_history_v2 import identity, merge_windows
 from app.services.fund_earnings_titles_v3 import classify_catalog_row, identity_matching_text
@@ -29,6 +30,7 @@ from app.services.fund_information_history_v1 import (
     save,
     sha,
 )
+from app.services.material_content import document_pdfium, location_exists, source_bytes, source_exists, source_glob
 
 RUNS = ROOT / "information-research"
 PYTHON = Path(__file__).resolve().parents[2]
@@ -96,7 +98,7 @@ def extract_pdf(raw, maximum_pages):
     """对实际原件独立提取全文并关闭页资源；页数超限时不截断冒充完整正文。"""
     if not raw.startswith(b"%PDF"):
         raise ValueError("NOT_PDF_CONTENT")
-    with pdfium.PdfDocument(raw) as doc:
+    with PDF_LOCK, document_pdfium(raw) as doc:
         if len(doc) > maximum_pages:
             raise ValueError("PDF_PAGE_LIMIT")
         pages, metadata = [], doc.get_metadata_dict()
@@ -117,7 +119,7 @@ class EarningsBatch:
         self.out = run_path(name)
 
     def prepare(self, previous_name):
-        if (self.out / "plan.json").exists():
+        if location_exists(self.out / "plan.json"):
             saved = self.check_plan()
             if Path(saved["previous_run"]).name != previous_name:
                 raise ValueError("RESUME_PREDECESSOR_CHANGED")
@@ -136,10 +138,10 @@ class EarningsBatch:
         for p, expected in protected.items():
             if sha(p) != expected:
                 raise ValueError("PROTECTED_EVIDENCE_CHANGED:" + p)
-        for p in previous.rglob("*"):
-            if p.is_file():
+        for p in source_glob(previous, "*", recursive=True):
+            if source_exists(p):
                 protected.setdefault(str(p), sha(p))
-        ledger = sorted((OLD / "fit-ledger").glob("*.json"))
+        ledger = sorted(source_glob(OLD / "fit-ledger", "*.json"))
         if len(ledger) != 12 or not all(read(p)["budget_consumed"] for p in ledger):
             raise ValueError("FIT_LEDGER_NEEDS_RECONCILIATION")
         previous_plan = read(previous / "plan.json")
@@ -222,7 +224,7 @@ class EarningsBatch:
     def cached_sources(self, plan):
         values = defaultdict(list)
         for directory in plan["ancestor_runs"]:
-            for path in (Path(directory) / "receipts").glob("*.json"):
+            for path in source_glob(Path(directory) / "receipts", "*.json"):
                 item = read(path)
                 if item["ok"] and item.get("params") is None:
                     values[item["url"]].append(item)
@@ -240,7 +242,7 @@ class EarningsBatch:
         try:
             for i, window in enumerate(plan["windows"], 1):
                 target = self.out / "catalogs" / (digest(window) + ".json")
-                if target.exists():
+                if location_exists(target):
                     continue
                 pages, receipts = [], []
                 try:
@@ -287,12 +289,14 @@ class EarningsBatch:
                     ),
                     flush=True,
                 )
-            work, exclusions = catalog_admissions([read(p) for p in sorted((self.out / "catalogs").glob("*.json"))])
+            work, exclusions = catalog_admissions(
+                [read(p) for p in sorted(source_glob(self.out / "catalogs", "*.json"))]
+            )
             save(self.out / "title-exclusions.json", exclusions)
             save(self.out / "body-worklist.json", work)
             for i, row in enumerate(work, 1):
                 target = self.out / "documents" / (row["announcementId"] + ".json")
-                if target.exists():
+                if location_exists(target):
                     continue
                 try:
                     if i > plan["maximum_documents"]:
@@ -305,7 +309,7 @@ class EarningsBatch:
                         receipt = previous[0]
                         if sha(receipt["path"]) != receipt["sha256"]:
                             raise ValueError("CACHED_SOURCE_CHANGED")
-                        raw = Path(receipt["path"]).read_bytes()
+                        raw = source_bytes(Path(receipt["path"]))
                     else:
                         raw, receipt = reader.fetch(url, group="body", maximum_bytes=plan["maximum_pdf_bytes"])
                     if len(raw) > plan["maximum_pdf_bytes"]:
@@ -349,14 +353,14 @@ class EarningsBatch:
         for p, expected in protected.items():
             if sha(p) != expected:
                 raise ValueError("PROTECTED_FILE_CHANGED:" + p)
-        used = Counter(read(p)["group"] for p in (self.out / "requests").glob("*.json"))
+        used = Counter(read(p)["group"] for p in source_glob(self.out / "requests", "*.json"))
         if any(v > plan["limits"][k] for k, v in used.items()):
             raise ValueError("REQUEST_BUDGET_EXCEEDED")
-        for p in (self.out / "receipts").glob("*.json"):
+        for p in source_glob(self.out / "receipts", "*.json"):
             receipt = read(p)
             if receipt["ok"] and sha(receipt["path"]) != receipt["sha256"]:
                 raise ValueError("PUBLIC_RAW_CHANGED")
-        paths = sorted((self.out / "catalogs").glob("*.json"))
+        paths = sorted(source_glob(self.out / "catalogs", "*.json"))
         if {p.stem for p in paths} != {digest(w) for w in plan["windows"]}:
             raise ValueError("CATALOG_SCOPE_MISMATCH")
         current = [read(p) for p in paths]
@@ -374,8 +378,8 @@ class EarningsBatch:
         catalogs = list(current)
         for directory in plan["ancestor_runs"]:
             p = Path(directory)
-            folder = p / ("company-catalogs" if (p / "company-catalogs").exists() else "catalogs")
-            catalogs.extend(read(f) for f in folder.glob("*.json"))
+            folder = p / ("company-catalogs" if location_exists(p / "company-catalogs") else "catalogs")
+            catalogs.extend(read(f) for f in source_glob(folder, "*.json"))
         for c in catalogs:
             if c["catalog_complete"]:
                 w = c["window"]
@@ -421,14 +425,14 @@ class EarningsBatch:
                 }
             )
         save(self.out / "coverage-on-new-folds.json", {"folds": folds, "training_ready": False})
-        docs = [read(p) for p in sorted((self.out / "documents").glob("*.json"))]
+        docs = [read(p) for p in sorted(source_glob(self.out / "documents", "*.json"))]
         identities, hints = [], []
         for d in docs:
             if not d["body_saved"]:
                 continue
             if sha(d["receipt"]["path"]) != d["receipt"]["sha256"]:
                 raise ValueError("BODY_SOURCE_CHANGED")
-            pages, _ = extract_pdf(Path(d["receipt"]["path"]).read_bytes(), plan["maximum_pdf_pages"])
+            pages, _ = extract_pdf(source_bytes(Path(d["receipt"]["path"])), plan["maximum_pdf_pages"])
             if [normalize(p) for p in pages] != [normalize(p) for p in d["pages"]]:
                 raise ValueError("BODY_REPLAY_MISMATCH")
             proof = issuer_identity(d["row"], pages)
@@ -452,7 +456,7 @@ class EarningsBatch:
                 )
         save(self.out / "identity-audit.json", identities)
         save(self.out / "body-forecast-hints.json", hints)
-        ledger = list((OLD / "fit-ledger").glob("*.json"))
+        ledger = list(source_glob(OLD / "fit-ledger", "*.json"))
         if len(ledger) != 12:
             raise ValueError("OLD_FIT_LEDGER_CHANGED")
         result = {

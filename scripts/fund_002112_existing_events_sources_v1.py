@@ -13,8 +13,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 PY = Path(__file__).resolve().parents[1]
-WEB = Path("C:/WebStormProject/workSpace05")
-JAVA = Path("C:/ideaProject/workSpace12")
+WEB = Path("D:/Project-FullStack/workSpace01/01-vue")
+JAVA = Path("D:/Project-FullStack/workSpace01/02-java")
 RESEARCH = PY / ".local-runs/fund-exposure-002112"
 ROOT = RESEARCH / "existing-events-experiment/20260930-v1"
 COORD = WEB / ".local-runs/coordination/20260930-002112-and-narrative/event-training"

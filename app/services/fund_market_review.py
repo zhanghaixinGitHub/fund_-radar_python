@@ -179,15 +179,29 @@ def record_event_review(
                 .one_or_none()
             )
         member = next((m for m in row["input_snapshot"]["members"] if m["fund_code"] == code), None) if row else None
-        # 必须是包含该公告原文的新正式批次；不能用同基金的旧月末评级作为本次复核回执。
+        # 必须是包含该公告原文的新正式批次；不能用同基金旧评级代替。
+        # 管理变更可以在实际管理维度已重算后闭合；其他维度仍缺资料时
+        # 保留PARTIAL，不能为了完成事项复核强行要求生成八维总分。
         import json
 
+        bundle = member.get("bundle", {}) if member else {}
+        partial_manager_reviewed = (
+            _partial_manager_reviewed(bundle, item, sha) if row and row["status"] == "PARTIAL" else False
+        )
         if (
             not row
-            or row["status"] != "RATED"
+            or (row["status"] not in {"RATED", "SCORED"} and not partial_manager_reviewed)
             or str(row["as_of_date"]) < item["entry"]["published"]
             or not member
-            or sha not in json.dumps(member.get("bundle", {}).get("sources", []))
+            or (
+                not partial_manager_reviewed
+                and sha not in json.dumps(
+                    {
+                        "sources": bundle.get("sources", []),
+                        "r5_originals": bundle.get("r5_calculation", {}).get("packet", {}).get("raw_archive", []),
+                    }
+                )
+            )
         ):
             raise ValueError("MARKET_EVENT_RATING_RECEIPT_MISMATCH")
     value = {
@@ -199,6 +213,26 @@ def record_event_review(
     }
     versioned_save((root or review_root()) / code / (sha + ".json"), value)
     return value
+
+
+def _partial_manager_reviewed(bundle: dict, item: dict, sha: str) -> bool:
+    """仅接受管理变更原文已进入新管理原始观察且该维确定的部分批次。
+
+    费用等无关点值、只列摘要而未引用原文、区间管理分均不能解除任免复核。
+    其余事项仍走完整批次路径，不把局部重评推广为全维度复核完成。
+    """
+    if "基金经理变更" not in item.get("entry", {}).get("title", ""):
+        return False
+    raw = bundle.get("management_calculation", {}).get("inputs", {})
+    if sha not in raw.get("sources", {}) or not any(
+        c.get("source_hash") == sha and c.get("quote") == item.get("body") for c in raw.get("claims", [])
+    ):
+        return False
+    from app.services.fund_rating_reviewed_snapshot import calculate, validate_sources
+
+    validate_sources(bundle, now())
+    result = calculate(bundle)
+    return result["dimensions"]["management"]["candidate"] is not None
 
 
 def approve_comprehensive(code: str, note: str, *, root=None, materials_path=None, resolutions=None):

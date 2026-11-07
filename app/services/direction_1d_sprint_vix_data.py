@@ -1,7 +1,7 @@
 """滞后VIX历史与实际到达证据；只使用基准日15:00前已结束的现金交易日。"""
 
+# 原始响应统一归档外接盘；历史路径只作为数据库别名，不生成C盘源文件。
 import csv
-import hashlib
 import io
 import math
 from bisect import bisect_right
@@ -13,6 +13,7 @@ import numpy as np
 from app.integrations.cboe_sprint_vix import MAX_BYTES, URL, fetch_vix
 from app.services import direction_1d_sprint as base
 from app.services import direction_1d_sprint_overnight as overnight
+from app.services import material_content as _sources
 
 SOURCE = "CBOE_VIX_PUBLIC_CSV_PERSONAL_RESEARCH"
 SLOTS = ("0700", "0730", "0800")
@@ -87,8 +88,8 @@ def history():
     """复用已采集文件，验证原始字节、响应清单与解析快照；不重复下载历史数据。"""
     folder = base.ROOT / "vix-data-feasibility-v1"
     record, response = base.read(folder / "result.json"), base.read(folder / "response.json")
-    raw = (folder / "response.csv").read_bytes()
-    if record["response_hash"] != base.digest(response) or hashlib.sha256(raw).hexdigest() != response["sha256"]:
+    raw = _sources.source_bytes(folder / "response.csv")
+    if record["response_hash"] != base.digest(response) or _sources.content_digest(raw) != response["sha256"]:
         raise ValueError("VIX_HISTORICAL_RAW_CHANGED")
     points = parse(raw)
     expected = {day: row for day, row in record["selected_rows"].items() if day in overnight.sessions()}
@@ -122,8 +123,8 @@ def load(target):
         or datetime.fromisoformat(meta["received_at"]) > datetime.fromisoformat(value["at"])
     ):
         raise ValueError("VIX_LIVE_RESPONSE_CHANGED_OR_LATE")
-    raw = (folder / f"raw/{slot}.csv").read_bytes()
-    if hashlib.sha256(raw).hexdigest() != meta["body_sha256"] or len(raw) != meta["bytes"]:
+    raw = _sources.source_bytes(folder / f"raw/{slot}.csv")
+    if _sources.content_digest(raw) != meta["body_sha256"] or len(raw) != meta["bytes"]:
         raise ValueError("VIX_LIVE_RAW_CHANGED")
     points = parse(raw)
     if any(day not in points for day in needed) or {d: points[d] for d in needed} != value["rows"]:
@@ -139,14 +140,14 @@ def capture(at):
         raise ValueError("VIX_LIVE_WINDOW_CLOSED")
     target, base_day = window["target_nav_date"], window["base_nav_date"]
     folder = root() / target
-    if (folder / "input.json").exists():
+    if _sources.location_exists(folder / "input.json"):
         return load(target)
     deadline = datetime.combine(date.fromisoformat(target), time(8, 30), base.ZONE)
     if base.now() >= deadline:
         raise ValueError("VIX_LIVE_DEADLINE_REACHED")
     slot = "0800" if at.time() >= time(8) else "0730" if at.time() >= time(7, 30) else "0700"
     attempt = folder / f"requests/{slot}.json"
-    if attempt.exists() or len(list((folder / "requests").glob("*.json"))) >= 3:
+    if _sources.location_exists(attempt) or len(list((folder / "requests").glob("*.json"))) >= 3:
         raise ValueError("VIX_LIVE_SLOT_OR_BUDGET_EXHAUSTED")
     needed = required(base_day, target)
     request = {"at": base.now().isoformat(), "url": URL, "target": target, "base": base_day, "required_dates": needed}
@@ -156,15 +157,14 @@ def capture(at):
         meta = {
             "received_at": base.now().isoformat(),
             "source": SOURCE,
-            "body_sha256": hashlib.sha256(body).hexdigest(),
+            "body_sha256": _sources.content_digest(body),
             "bytes": len(body),
             "headers": headers,
             "request_hash": base.digest(request),
         }
         raw_path = folder / f"raw/{slot}.csv"
         raw_path.parent.mkdir(parents=True, exist_ok=True)
-        with raw_path.open("xb") as file:
-            file.write(body)
+        _sources.write_source(raw_path, body)
         base.save(folder / f"raw/{slot}.json", meta)
         if datetime.fromisoformat(meta["received_at"]) >= deadline:
             raise ValueError("VIX_LIVE_RESPONSE_LATE")

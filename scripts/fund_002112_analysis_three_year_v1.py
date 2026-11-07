@@ -58,8 +58,8 @@ def prepare() -> dict:
     workspaces = {}
     for name, directory in {
         "python": data.PY,
-        "java": Path("C:/ideaProject/workSpace12"),
-        "vue": Path("C:/WebStormProject/workSpace05"),
+        "java": Path("D:/Project-FullStack/workSpace01/02-java"),
+        "vue": Path("D:/Project-FullStack/workSpace01/01-vue"),
     }.items():
         status = subprocess.check_output(["git", "status", "--porcelain", "-z"], cwd=directory).decode("utf-8")
         files = [directory / line[3:] for line in status.split("\0") if line]

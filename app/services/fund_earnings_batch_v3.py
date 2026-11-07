@@ -4,6 +4,7 @@
 封存标签、不调用拟合，也不把旧协议剩余额度自动转给新假设。
 """
 
+# 原件路径只是数据库别名；业务读取不再打开C/D盘源文件。
 import json
 import re
 from collections import Counter, defaultdict
@@ -12,6 +13,8 @@ from pathlib import Path
 
 import pypdfium2 as pdfium
 
+from app.core.pdf import PDF_LOCK
+from app.services import material_content as _source_store
 from app.services.fund_earnings_evidence_v1 import plan_groups
 from app.services.fund_earnings_history_v2 import identity, merge_windows
 from app.services.fund_earnings_semantics_v2 import earnings_title_kind
@@ -63,7 +66,7 @@ def extract_pdf(raw, maximum_pages):
     """对实际原件独立提取全文并关闭页资源；页数超限时不截断冒充完整正文。"""
     if not raw.startswith(b"%PDF"):
         raise ValueError("NOT_PDF_CONTENT")
-    with pdfium.PdfDocument(raw) as doc:
+    with PDF_LOCK, _source_store.document_pdfium(raw) as doc:
         if len(doc) > maximum_pages:
             raise ValueError("PDF_PAGE_LIMIT")
         pages, metadata = [], doc.get_metadata_dict()
@@ -84,7 +87,7 @@ class EarningsBatch:
         self.out = run_path(name)
 
     def prepare(self, previous_name):
-        if (self.out / "plan.json").exists():
+        if _source_store.location_exists(self.out / "plan.json"):
             saved = self.check_plan()
             if Path(saved["previous_run"]).name != previous_name:
                 raise ValueError("RESUME_PREDECESSOR_CHANGED")
@@ -104,7 +107,7 @@ class EarningsBatch:
             if sha(p) != expected:
                 raise ValueError("PROTECTED_EVIDENCE_CHANGED:" + p)
         for p in previous.rglob("*"):
-            if p.is_file():
+            if _source_store.source_exists(p):
                 protected.setdefault(str(p), sha(p))
         ledger = sorted((OLD / "fit-ledger").glob("*.json"))
         if len(ledger) != 12 or not all(read(p)["budget_consumed"] for p in ledger):
@@ -203,7 +206,7 @@ class EarningsBatch:
         try:
             for i, window in enumerate(plan["windows"], 1):
                 target = self.out / "catalogs" / (digest(window) + ".json")
-                if target.exists():
+                if _source_store.location_exists(target):
                     continue
                 pages, receipts = [], []
                 try:
@@ -272,7 +275,7 @@ class EarningsBatch:
             save(self.out / "body-worklist.json", work)
             for i, row in enumerate(work, 1):
                 target = self.out / "documents" / (row["announcementId"] + ".json")
-                if target.exists():
+                if _source_store.location_exists(target):
                     continue
                 try:
                     if i > plan["maximum_documents"]:
@@ -285,7 +288,7 @@ class EarningsBatch:
                         receipt = previous[0]
                         if sha(receipt["path"]) != receipt["sha256"]:
                             raise ValueError("CACHED_SOURCE_CHANGED")
-                        raw = Path(receipt["path"]).read_bytes()
+                        raw = _source_store.source_bytes(Path(receipt["path"]))
                     else:
                         raw, receipt = reader.fetch(url, group="body", maximum_bytes=plan["maximum_pdf_bytes"])
                     if len(raw) > plan["maximum_pdf_bytes"]:
@@ -351,7 +354,7 @@ class EarningsBatch:
         catalogs = list(current)
         for directory in plan["ancestor_runs"]:
             p = Path(directory)
-            folder = p / ("company-catalogs" if (p / "company-catalogs").exists() else "catalogs")
+            folder = p / ("company-catalogs" if _source_store.location_exists(p / "company-catalogs") else "catalogs")
             catalogs.extend(read(f) for f in folder.glob("*.json"))
         for c in catalogs:
             if c["catalog_complete"]:
@@ -405,7 +408,7 @@ class EarningsBatch:
                 continue
             if sha(d["receipt"]["path"]) != d["receipt"]["sha256"]:
                 raise ValueError("BODY_SOURCE_CHANGED")
-            pages, _ = extract_pdf(Path(d["receipt"]["path"]).read_bytes(), plan["maximum_pdf_pages"])
+            pages, _ = extract_pdf(_source_store.source_bytes(Path(d["receipt"]["path"])), plan["maximum_pdf_pages"])
             if [normalize(p) for p in pages] != [normalize(p) for p in d["pages"]]:
                 raise ValueError("BODY_REPLAY_MISMATCH")
             proof = issuer_identity(d["row"], pages)

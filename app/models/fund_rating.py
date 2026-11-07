@@ -93,6 +93,7 @@ class RatingResult(Base):
         CheckConstraint("score IS NULL OR (score >= 0 AND score <= 100)", name="ck_rating_score_range"),
         CheckConstraint(
             "(status = 'RATED' AND score IS NOT NULL AND grade IS NOT NULL) OR "
+            "(status = 'SCORED' AND score IS NOT NULL AND grade IS NULL) OR "
             "(status IN ('NOT_RATED','UNSUPPORTED','PARTIAL') AND score IS NULL AND grade IS NULL)",
             name="ck_rating_score_state",
         ),

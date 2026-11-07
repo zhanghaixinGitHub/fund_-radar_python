@@ -1,6 +1,6 @@
 """从已留存的公开定期报告补齐市场持仓；离线核验后发布，不改评级或预测输入。"""
 
-import hashlib
+# 原件路径只是数据库别名；业务读取不再打开C/D盘源文件。
 import json
 import re
 import unicodedata
@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 
 from app.core.config import get_settings
 from app.integrations.public_fund_reports import report_period
+from app.services import material_content as _source_store
 from app.services.fund_exposure_common import now, read
 from app.services.fund_materials_build import safe_url
 from app.services.fund_materials_store import versioned_save
@@ -31,6 +32,7 @@ def _fund_name_matches(text: str, name: str) -> bool:
             "证券投资基金",
             "基金",
             "(QDII)",
+            "(LOF)",
         ):
             value = value.replace(term, "")
         return re.sub(r"(股票|混合|债券|指数)型", r"\1", value)
@@ -44,10 +46,32 @@ def _fund_name_matches(text: str, name: str) -> bool:
     )
 
 
+def _report_identity_matches(text: str, name: str, code: str, title: str) -> bool:
+    """简称有历史别名或币种后缀时，核对同份报告的主代码与目录完整标题。
+
+    只适用本份额代码恰为报告主代码的情况。C类等其他份额不能借主代码放行；
+    完整目录标题必须出现在本报告首页，产品前缀也必须与运行时名称一致。
+    原文读取层仍须核对公告号、所属基金及原件摘要，本函数不替代这些检查。
+    """
+    if _fund_name_matches(text, name):
+        return True
+    def compact(value):
+        return re.sub(r"\s+", "", unicodedata.normalize("NFKC", value))
+    codes = re.findall(r"基金主代码\s*[:：]?\s*(\d{6})(?!\d)", text)
+    return bool(
+        re.fullmatch(r"\d{6}", code)
+        and codes == [code]
+        and len(compact(title)) >= 15
+        and compact(title) in compact(text[:4000])
+        and len(compact(name)) >= 4
+        and compact(title).startswith(compact(name)[:4])
+    )
+
+
 def _section(pages: list[str], heading: str) -> str | None:
     """只取投资组合正文，不把目录页、买卖明细或附注中的数字混入期末持仓。"""
     text = "\n".join(stock_pages(pages))
-    starts = list(re.finditer(r"(?m)^\s*7\.(\d+)\s+([^\n]+)", text))
+    starts = list(re.finditer(r"(?m)^\s*[78]\.(\d+(?:\.\d+)?)\s+([^\n]+)", text))
     for i in range(len(starts) - 1, -1, -1):
         match = starts[i]
         if re.search(heading, match[2]) and not re.search(r"\.{3}|…", match[2]):
@@ -93,15 +117,72 @@ def _security_rows(body: str, net: Decimal) -> list[dict]:
     return rows
 
 
+def _domestic_fund_rows(body: str, net: Decimal | None = None) -> list[dict]:
+    """读取境内FOF六位基金代码表，连接同一行块的名称，不把运作方式拼入名称。
+
+    仅接收原表同时列出的份额数量、精确到分市值、比例与关联标志；有净资产
+    时逐行对账。名称上一行如含完整运作方式，须归入下一序号而非上一基金。
+    """
+    compact = re.sub(r"\s+", "", body)
+    code_header = "基金代码" in compact or ("基金代" in compact and "码" in compact[:500])
+    if not code_header or not all(v in compact for v in ("基金名称", "公允价值", "份", "元")):
+        raise ValueError("HOLDINGS_FOF_HEADER")
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    # 旧全仓表把运作方式逐字纵排，并夹入下一基金名称；本适配不跨这种版式猜行归属。
+    if any(re.fullmatch(r"契|约|交|易", line) for line in lines):
+        raise ValueError("HOLDINGS_FOF_VERTICAL_LAYOUT_NOT_SUPPORTED")
+    row_start = re.compile(r"^(\d{1,3})\s+(\d{6})\s+(.+)$")
+    anchors = [(i, m) for i, line in enumerate(lines) if (m := row_start.match(line))]
+    if not anchors:
+        raise ValueError("HOLDINGS_FOF_EMPTY")
+    operation = r"(?:契约型开放|交易型开放|契约型|开放式|契约|型|开|放|式)"
+
+    def name_piece(line):
+        return re.sub(r"(?:\s|^)" + operation + r"$", "", line.strip()).strip()
+
+    starts = []
+    for i, _ in anchors:
+        prior = lines[i - 1] if i else ""
+        starts.append(i - 1 if re.search(r"\S+\s+(?:契约型开放|交易型开放)$", prior) else i)
+    rows = []
+    for n, (index, match) in enumerate(anchors):
+        if int(match[1]) != n + 1:
+            raise ValueError("HOLDINGS_FOF_RANK")
+        cells = re.search(r"([\d,]+(?:\.\d+)?)\s+([\d,]+\.\d{2})\s+(\d+\.\d+)\s+(?:是|否)\s*$", match[3])
+        if not cells:
+            raise ValueError("HOLDINGS_FOF_CELLS")
+        quantity, value, weight = map(_number, cells.groups())
+        if quantity <= 0 or value <= 0 or not 0 <= weight <= 100:
+            raise ValueError("HOLDINGS_FOF_RANGE")
+        if net is not None and abs(value / net * 100 - weight) > Decimal(".006"):
+            raise ValueError("HOLDINGS_FOF_WEIGHT")
+        parts = [name_piece(lines[starts[n]])] if starts[n] < index else []
+        parts.append(name_piece(match[3][:cells.start()]))
+        stop = starts[n + 1] if n + 1 < len(starts) else len(lines)
+        for line in lines[index + 1:stop]:
+            if re.match(r"注[：:]|\d+\.\d+", line):
+                break
+            if re.fullmatch(operation, line):
+                continue
+            parts.append(name_piece(line))
+        name = re.sub(r"\s+", "", "".join(parts))
+        if not name or re.search(r"[\d,]+\.\d{2}|公允价值|关联方|基金投资明细", name):
+            raise ValueError("HOLDINGS_FOF_NAME")
+        rows.append({"stockCode": match[2], "stockName": name, "weightPct": float(weight), "marketValue": float(value)})
+    if len({r["stockCode"] for r in rows}) != len(rows) or sum(r["weightPct"] for r in rows) > 100:
+        raise ValueError("HOLDINGS_FOF_RANGE")
+    return rows
+
+
 def _public_table(
     root: Path, ref: dict, code: str, end: str, expected: Decimal | None, net: Decimal | None
 ) -> list[dict]:
     """转载明细按报告期核对；万元精度只允许原表逐行舍入误差，不补缺行或猜币种。"""
     path = (root / ref["file"]).resolve()
-    if not path.is_relative_to(root) or path.stat().st_size > 8_000_000:
+    if not path.is_relative_to(root) or _source_store.source_size(path) > 8_000_000:
         raise ValueError("HOLDINGS_TABLE_PATH")
-    raw = path.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != ref["sha256"] or ref.get("fund_code") != code:
+    raw = _source_store.source_bytes(path)
+    if _source_store.content_digest(raw) != ref["sha256"] or ref.get("fund_code") != code:
         raise ValueError("HOLDINGS_TABLE_HASH_OR_IDENTITY")
     match = re.search(r'content:("(?:\\.|[^"\\])*")', raw.decode("utf-8"))
     if not match:
@@ -147,10 +228,11 @@ def report_from_original(code: str, name: str, root: Path, ref: dict) -> tuple[d
     """核对原件哈希、产品身份、披露日期及金额；缺少某类明细时保留准确资产结构和缺口。"""
     root = root.resolve()
     path = (root / ref["file"]).resolve()
-    if not path.is_relative_to(root) or not path.is_file() or path.stat().st_size > 25_000_000:
+    if (not path.is_relative_to(root) or not _source_store.source_exists(path)
+            or _source_store.source_size(path) > 25_000_000):
         raise ValueError("HOLDINGS_ORIGINAL_PATH_OR_SIZE")
-    raw = path.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != ref["sha256"] or not safe_url(ref["url"]):
+    raw = _source_store.source_bytes(path)
+    if _source_store.content_digest(raw) != ref["sha256"] or not safe_url(ref["url"]):
         raise ValueError("HOLDINGS_ORIGINAL_HASH_OR_URL")
     if ref.get("table_only"):
         # 公告目录仍在，但正文暂不可读：仅发布独立公开表的实际行，完整性与股票仓位保持未知。
@@ -186,7 +268,10 @@ def report_from_original(code: str, name: str, root: Path, ref: dict) -> tuple[d
         }, [{"part": "report", "reason": "HOLDINGS_ORIGINAL_BODY_UNAVAILABLE"}]
     pages, reprint = public_document(raw, ref, code, "报告")
     text = "\n".join(pages)
-    if code not in text or not (matches_name(text, name.split("-")[0]) or _fund_name_matches(text, name)):
+    if code not in text or not (
+        matches_name(text, name.split("-")[0])
+        or _report_identity_matches(text, name, code, ref.get("title", ""))
+    ):
         raise ValueError("HOLDINGS_FUND_IDENTITY")
     # 目录中的“摘要”二字不能使完整报告失效；只识别首页报告标题。
     title = re.search(r"[0-9〇零一二三四五六七八九]{4}年(?:中期|半年度|年度)报告", re.sub(r"\s+", "", text[:1500]))
@@ -246,7 +331,12 @@ def report_from_original(code: str, name: str, root: Path, ref: dict) -> tuple[d
             continue
         body = _section(pages, heading)
         try:
-            positions = _security_rows(body or "", net)
+            try:
+                positions = _security_rows(body or "", net)
+            except ValueError:
+                if key != "fund_amount":
+                    raise
+                positions = _domestic_fund_rows(body or "", net)
             if sum(Decimal(str(p["marketValue"])) for p in positions) > expected + Decimal(".02"):
                 raise ValueError("HOLDINGS_GROUP_AMOUNT")
             groups.append({"name": label, "notice": "按定期报告列示，可能仅含主要持仓。", "holdings": positions})
@@ -263,7 +353,7 @@ def report_from_original(code: str, name: str, root: Path, ref: dict) -> tuple[d
     reviewed = ref.get("reviewed_fund_table")
     if reviewed:
         body = _section(pages, "基金投资明细|投资目标基金明细|投资基金情况")
-        if not body or hashlib.sha256(body.encode("utf-8")).hexdigest() != reviewed["section_sha256"]:
+        if not body or _source_store.content_digest(body.encode("utf-8")) != reviewed["section_sha256"]:
             raise ValueError("HOLDINGS_REVIEWED_SECTION_CHANGED")
         positions = reviewed["holdings"]
         amount = sum(Decimal(str(h["marketValue"])) for h in positions)
@@ -331,7 +421,7 @@ def publish_report(code: str, report: dict, *, directory: Path, dry_run: bool = 
     if not re.fullmatch(r"[0-9]{6}", code):
         raise ValueError("HOLDINGS_FUND_CODE")
     path = directory / (code + ".json")
-    previous = read(path) if path.exists() else {}
+    previous = read(path) if _source_store.location_exists(path) else {}
     if previous and previous.get("fundCode") != code:
         raise ValueError("HOLDINGS_SNAPSHOT_IDENTITY")
     reports = {r["id"]: r for r in previous.get("reports", [])}
@@ -344,7 +434,41 @@ def publish_report(code: str, report: dict, *, directory: Path, dry_run: bool = 
             rows = value.get("holdings", []) + [h for g in value.get("investmentGroups") or [] for h in g["holdings"]]
             return {(h.get("stockCode"), h.get("stockName")) for h in rows}
 
-        if identities(old) <= identities(report) and not (old["fullDisclosure"] and not report["fullDisclosure"]):
+        # 同一原件经完整数字列核验，可能纠正名称夹数量、金额尾数误作比例的旧解析。
+        # 只允许同报告、同公开日期、相同证券集合的严格部分表替换；历史快照由
+        # versioned_save 原样归档，不放宽披露覆盖，也不让任意名称变化覆盖旧结果。
+        def codes(value):
+            return {h.get("stockCode") for h in value.get("holdings", [])}
+
+        incoming_codes = codes(report)
+        prior_codes = set()
+        for security in codes(old):
+            # 原公开表只有数字代码时，只匹配严格原文表中唯一同码证券；
+            # 已带市场的旧代码必须原样相同，不能抹去市场后缀跨市场替换。
+            matches = [v for v in incoming_codes if isinstance(v, str) and v.startswith(str(security) + ".")]
+            prior_codes.add(
+                matches[0] if isinstance(security, str)
+                and (re.fullmatch(r"\d{5,6}", security)
+                     or (report.get("stockTableVerification") == "EXACT_PARTIAL_MARKET_COLUMNS_V1"
+                         and re.fullmatch(r"[A-Z]{2,6}", security))) and len(matches) == 1
+                else security
+            )
+
+        corrected = (
+            report.get("stockTableVerification")
+            in {"EXACT_PARTIAL_NUMERIC_COLUMNS_V1", "EXACT_PARTIAL_MARKET_COLUMNS_V1"}
+            and not report["fullDisclosure"]
+            and not old["fullDisclosure"]
+            and report["endDate"] == old["endDate"]
+            and report["publishedDate"] == old["publishedDate"]
+            and report.get("sourceArticleId") == old.get("sourceArticleId")
+            and bool(codes(old))
+            and None not in codes(old)
+            and prior_codes == incoming_codes
+        )
+        if (identities(old) <= identities(report) or corrected) and not (
+            old["fullDisclosure"] and not report["fullDisclosure"]
+        ):
             reports[report["id"]] = report
     ordered = sorted(
         reports.values(), key=lambda r: (r["endDate"], r["publishedDate"], r["fullDisclosure"]), reverse=True

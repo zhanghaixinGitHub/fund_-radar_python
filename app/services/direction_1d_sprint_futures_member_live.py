@@ -1,6 +1,6 @@
 """目标17日仅一次公开IF排名实收，具体合约来自R95实际收到的主力映射。"""
 
-import hashlib
+# 原始响应统一归档外接盘；历史路径只作为数据库别名，不生成C盘源文件。
 from datetime import date, datetime, time, timedelta
 from time import monotonic
 
@@ -11,6 +11,7 @@ from app.integrations import tushare_sprint_futures_holdings as parser
 from app.services import direction_1d_sprint as base
 from app.services import direction_1d_sprint_current_basis_data as quote_live
 from app.services import direction_1d_sprint_futures_member_data as data
+from app.services import material_content as _sources
 
 URL = "https://api.tushare.pro"
 MAX_BYTES = 1048576
@@ -33,7 +34,7 @@ def in_window(t, u, at):
 
 
 def ready(u):
-    return (root() / u / "snapshot.json").is_file()
+    return _sources.source_exists(root() / u / "snapshot.json")
 
 
 def query(t, contract):
@@ -60,24 +61,24 @@ def quote_context(t, u):
     }
     if source["available"]:
         point = source["snapshot"]["points"][t]
-        raw = (quote_live.live_root() / u / "raw/fut_daily.json").read_bytes()
+        raw = _sources.source_bytes(quote_live.live_root() / u / "raw/fut_daily.json")
         q = quote_live.parser.parse(raw, "fut_daily", t.replace("-", ""), t.replace("-", ""))[t]
         require(q["close"] == point["futures_close"], "ACTUAL_QUOTE_CHANGED")
         value.update(
             {
                 "main_contract": point["main_contract"],
                 "total_open_interest": q["oi"],
-                "quote_raw_sha256": hashlib.sha256(raw).hexdigest(),
+                "quote_raw_sha256": _sources.content_digest(raw),
             }
         )
     return value
 
 
 def raw_identity(path):
-    if not path.exists():
+    if not _sources.location_exists(path):
         return None
-    raw = path.read_bytes()
-    return {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    raw = _sources.source_bytes(path)
+    return {"bytes": len(raw), "sha256": _sources.content_digest(raw)}
 
 
 def fetch(request_query):
@@ -105,7 +106,7 @@ def reconstruct(t, u, ph):
     request_path = folder / "request.json"
     reserved, requests = 0, 0
     if not source["available"]:
-        require(not request_path.exists(), "REQUEST_WITHOUT_ACTUAL_MAIN_CONTRACT")
+        require(not _sources.location_exists(request_path), "REQUEST_WITHOUT_ACTUAL_MAIN_CONTRACT")
         error = "ACTUAL_MAIN_SOURCE_UNAVAILABLE"
     else:
         request = base.read(request_path)
@@ -136,7 +137,7 @@ def reconstruct(t, u, ph):
         reserved, requests = 1, None
         request_hash, receipt_hash, completed = base.digest(request), base.digest(receipt), receipt["at"]
         if receipt["status"] == "RECEIVED":
-            raw = (folder / "raw.bin").read_bytes()
+            raw = _sources.source_bytes(folder / "raw.bin")
             require(0 < len(raw) <= MAX_BYTES and type(receipt["http_status"]) is int, "LIVE_RESPONSE_INVALID")
             requests, received = 1, completed
             if receipt["http_status"] == 200:
@@ -194,7 +195,7 @@ def capture(t, u, ph):
         return None
     source = quote_context(t, u)
     folder.mkdir(parents=True, exist_ok=True)
-    if source["available"] and not (folder / "request.json").exists():
+    if source["available"] and not _sources.location_exists(folder / "request.json"):
         request = {
             "at": base.now().isoformat(),
             "t": t,
@@ -217,8 +218,7 @@ def capture(t, u, ph):
                 "error_type": type(exc).__name__,
             }
         else:
-            with (folder / "raw.bin").open("xb") as stream:
-                stream.write(raw)
+            _sources.write_source(folder / "raw.bin", raw)
             receipt = {
                 "at": base.now().isoformat(),
                 "request_hash": base.digest(request),
@@ -227,7 +227,7 @@ def capture(t, u, ph):
                 "raw": raw_identity(folder / "raw.bin"),
             }
         base.save(folder / "response.json", receipt)
-    elif source["available"] and not (folder / "response.json").exists():
+    elif source["available"] and not _sources.location_exists(folder / "response.json"):
         request = base.read(folder / "request.json")
         require(request["t"] == t and request["u"] == u and request["plan_hash"] == ph, "INTERRUPTED_REQUEST_CHANGED")
         base.save(

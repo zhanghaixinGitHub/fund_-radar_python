@@ -1,6 +1,5 @@
 """本基金已核验失效报告的精确备用来源，不进行开放式搜索或跨基金替换。"""
 
-import hashlib
 import re
 from datetime import datetime, timedelta
 
@@ -9,6 +8,7 @@ from bs4 import BeautifulSoup
 from app.services.direction_1d_protocol import digest
 from app.services.fund_exposure_common import ROOT, blob, now, read
 from app.services.fund_materials_store import versioned_save
+from app.services.material_content import content_digest, location_exists, source_bytes
 
 TITLE = "德邦鑫星价值灵活配置混合型证券投资基金2020年第1季度报告"
 PRIMARY = "https://www.dbfund.com.cn/upload/pdf/2020-04-21-084255-" + TITLE + ".pdf"
@@ -26,12 +26,12 @@ def recover_report(client, entry, failure):
     if entry.get("url") != PRIMARY or entry.get("title") != TITLE or failure.get("http_status") != 404:
         raise ValueError("REPORT_RECOVERY_SCOPE_INVALID")
     cache = ROOT / "readiness-extended/report-recovery" / (digest(PRIMARY) + ".json")
-    old = read(cache) if cache.exists() else None
+    old = read(cache) if location_exists(cache) else None
     if old and now() - datetime.fromisoformat(old["checked_at"]) < timedelta(days=30):
         if old["url"] != REPRINT or old["primary_failure"]["url"] != PRIMARY:
             raise ValueError("REPORT_RECOVERY_SOURCE_CHANGED")
-        raw = (ROOT / old["file"]).read_bytes()
-        if hashlib.sha256(raw).hexdigest() != old["sha256"]:
+        raw = source_bytes(ROOT / old["file"])
+        if content_digest(raw) != old["sha256"]:
             raise ValueError("REPORT_RECOVERY_RAW_CHANGED")
         receipt = old
     else:

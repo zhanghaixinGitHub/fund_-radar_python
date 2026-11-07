@@ -4,7 +4,7 @@
 当前三个特征，因此不作为此独立版本的可用性条件。模型训练和阈值均不改变。
 """
 
-import hashlib
+# 原始响应统一归档外接盘；历史路径只作为数据库别名，不生成C盘源文件。
 import runpy
 from collections import defaultdict
 from datetime import datetime
@@ -16,6 +16,7 @@ from app.services import direction_1d_sprint_market_fund_bias as fund_model
 from app.services import direction_1d_sprint_market_kernel_direction as kernel
 from app.services import direction_1d_sprint_market_only_data as data
 from app.services import direction_1d_sprint_market_only_forward as evidence
+from app.services import material_content as _sources
 
 SERVICES = (fund_model, kernel)
 FIRST_TARGET = "2026-09-17"
@@ -32,7 +33,7 @@ def require(condition, code):
 
 
 def sha(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return _sources.content_digest(_sources.source_bytes(path))
 
 
 def context():
@@ -88,7 +89,7 @@ def capture_fxi(t, target, at):
     etf = data.etfs
     folder = etf.root() / target / "FXI"
     for slot in etf.SLOTS:
-        if (folder / f"raw/{slot}.json").exists():
+        if _sources.location_exists(folder / f"raw/{slot}.json"):
             try:
                 _, meta = etf.load_piece(target, t, "FXI", slot)
                 return {"slot": slot, "hash": base.digest(meta)}
@@ -98,7 +99,7 @@ def capture_fxi(t, target, at):
     if slot is None or data.ended(base.now()) or base.now() >= data.deadline(target):
         return None
     path = folder / f"requests/{slot}.json"
-    if path.exists():
+    if _sources.location_exists(path):
         return None
     etf.closed_before(base.now(), t, target)
     request = {
@@ -118,14 +119,13 @@ def capture_fxi(t, target, at):
             "symbol": "FXI",
             "received_at": base.now().isoformat(),
             "request_hash": base.digest(request),
-            "body_sha256": hashlib.sha256(raw).hexdigest(),
+            "body_sha256": _sources.content_digest(raw),
             "bytes": len(raw),
             "headers": headers,
         }
         raw_path = folder / f"raw/{slot}.bin"
         raw_path.parent.mkdir(parents=True, exist_ok=True)
-        with raw_path.open("xb") as output:
-            output.write(raw)
+        _sources.write_source(raw_path, raw)
         base.save(folder / f"raw/{slot}.json", meta)
         etf.load_piece(target, t, "FXI", slot)
         return {"slot": slot, "hash": base.digest(meta)}
@@ -142,7 +142,7 @@ def materialize(t, target, spx_ref, fxi_ref, ctx):
     require(ref == spx_ref, "CORE_SPX_REFERENCE_CHANGED")
     _, meta = data.etfs.load_piece(target, t, "FXI", fxi_ref["slot"])
     require(base.digest(meta) == fxi_ref["hash"], "CORE_FXI_REFERENCE_CHANGED")
-    raw = (data.etfs.root() / target / f"FXI/raw/{fxi_ref['slot']}.bin").read_bytes()
+    raw = _sources.source_bytes(data.etfs.root() / target / f"FXI/raw/{fxi_ref['slot']}.bin")
     points = data.etfs.parse(raw, "FXI", data.overnight.alignment(t, target)["required_us_dates"][-1])
     cn = data.cnya.load(target)
     require(cn["base"] == t, "CORE_CNYA_BASE_CHANGED")
@@ -152,7 +152,7 @@ def materialize(t, target, spx_ref, fxi_ref, ctx):
         "contract": CONTRACT,
         "spx_ref": ref,
         "fxi_ref": fxi_ref,
-        "fxi_raw_sha256": hashlib.sha256(raw).hexdigest(),
+        "fxi_raw_sha256": _sources.content_digest(raw),
         "cnya_hash": base.digest(cn),
         "source_received_at": [spx["received_at"], meta["received_at"], cn["at"]],
         "market": ctx["helper"]["market"](spx["parsed"]["rows"], points, cn["rows"], t, target),
@@ -180,7 +180,7 @@ def capture(ctx):
     days = list(map(str, base.calendar()[0]))
     if target < FIRST_TARGET or target not in days or data.slot_for(at) is None or data.ended(at):
         return None
-    if (root() / "inputs" / target / "input.json").exists():
+    if _sources.location_exists(root() / "inputs" / target / "input.json"):
         return load_input(target, ctx)
     t = days[days.index(target) - 1]
     # 各源独立尝试；SPX尚未完整时仍采集其余两源，避免将最后时槽浪费在串行等待。
@@ -244,7 +244,7 @@ def validate(value, receipt, source, ctx):
 def write_forecasts(source, ctx):
     for fund in data.scope():
         path = root() / "forward" / source["target"] / f"{fund['code']}.json"
-        if path.exists():
+        if _sources.location_exists(path):
             continue
         if base.now() >= min(data.deadline(source["target"]), evidence.sprint_end()):
             break
@@ -364,7 +364,7 @@ def observe(values, at):
     first = {}
     for f in due:
         path = root() / "outcomes" / f["u"] / f"{f['code']}.json"
-        if path.exists():
+        if _sources.location_exists(path):
             first[f["code"], f["u"]] = base.read(path)
     for path in evidence.observation_paths(due):
         snapshot = base.read(path)
@@ -387,7 +387,7 @@ def observe(values, at):
             elif evidence.pair_version(pair) != evidence.pair_version(first[key]):
                 version = base.digest(evidence.pair_version(pair))[:24]
                 dest = root() / "revisions" / f["u"] / f["code"] / f"{version}.json"
-                if not dest.exists():
+                if not _sources.location_exists(dest):
                     base.save(dest, value | {"first_outcome_hash": base.digest(first[key])})
 
 
@@ -395,7 +395,7 @@ def report(values):
     at, paired, cache, revised = base.now(), defaultdict(list), {}, set()
     for f in values:
         path = root() / "outcomes" / f["u"] / f"{f['code']}.json"
-        if not path.exists():
+        if not _sources.location_exists(path):
             continue
         outcome = base.read(path)
         pair = evidence.validated_outcome(f, outcome, cache, at)
@@ -443,7 +443,7 @@ def run():
     values = forecasts(ctx)
     observe(values, base.now())
     # 净值刷新在预测之后，并复用原30基金/半小时时槽上限；已匹配的题不再拉取。
-    pending = [f for f in values if not (root() / "outcomes" / f["u"] / f"{f['code']}.json").exists()]
+    pending = [f for f in values if not _sources.location_exists(root() / "outcomes" / f["u"] / f"{f['code']}.json")]
     evidence.refresh_if_needed(pending, base.now())
     observe(values, base.now())
     return report(values)

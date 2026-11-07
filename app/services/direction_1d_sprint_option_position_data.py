@@ -1,6 +1,6 @@
 """第97轮IO成交/持仓比；复核全历史原文，并独立记录实际T日来源。"""
 
-import hashlib
+# 原始响应统一归档外接盘；历史路径只作为数据库别名，不生成C盘源文件。
 import json
 import re
 from datetime import datetime, timedelta
@@ -14,6 +14,7 @@ from app.integrations import tushare_sprint_index_options as parser
 from app.services import direction_1d_sprint as base
 from app.services import direction_1d_sprint_market_fxi_interval as original
 from app.services import direction_1d_sprint_market_only_data as market_data
+from app.services import material_content as _sources
 
 scope = original.data.scope
 
@@ -28,7 +29,7 @@ def require(condition, reason):
 
 
 def sha(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return _sources.content_digest(_sources.source_bytes(path))
 
 
 def samples():
@@ -49,14 +50,14 @@ def samples():
             req, meta, result = (
                 base.read(folder / f"recent-{name}.json") for name in ("request", "response", "result")
             )
-            raw = (folder / "recent-raw.json").read_bytes()
+            raw = _sources.source_bytes(folder / "recent-raw.json")
             fields = p["fields"]
             require(req["params"] == p["params"] and req["fields"] == fields, "RECENT_REQUEST_CHANGED")
         else:
             req, meta, result = (
                 base.read(folder / sub / (key + ".json")) for sub in ("requests", "responses", "results")
             )
-            raw = (folder / "raw" / (key + ".json")).read_bytes()
+            raw = _sources.source_bytes(folder / "raw" / (key + ".json"))
             q = next(q for q in p["queries"] if q["key"] == key)
             require(req["query"] == q, "SAMPLE_REQUEST_CHANGED")
             fields = q["fields"]
@@ -64,7 +65,7 @@ def samples():
         require(
             meta["http_status"] == 200
             and meta["bytes"] == len(raw)
-            and meta["sha256"] == hashlib.sha256(raw).hexdigest(),
+            and meta["sha256"] == _sources.content_digest(raw),
             "SAMPLE_RAW_CHANGED",
         )
         require(
@@ -130,7 +131,7 @@ def reconstruct():
     for q in p["queries"]:
         key = q["key"]
         req, meta, saved = (base.read(root() / sub / (key + ".json")) for sub in ("requests", "responses", "parsed"))
-        raw = (root() / "raw" / (key + ".json")).read_bytes()
+        raw = _sources.source_bytes(root() / "raw" / (key + ".json"))
         require(
             req["query"] == q and req["plan_hash"] == base.digest(p) and meta["request_hash"] == base.digest(req),
             "HISTORY_REQUEST_CHANGED",
@@ -138,7 +139,7 @@ def reconstruct():
         require(
             meta["http_status"] == 200
             and meta["bytes"] == len(raw)
-            and meta["sha256"] == hashlib.sha256(raw).hexdigest(),
+            and meta["sha256"] == _sources.content_digest(raw),
             "HISTORY_RAW_CHANGED",
         )
         require(
@@ -236,13 +237,13 @@ def reconstruct_live(t, u, ph, at):
     requested = datetime.fromisoformat(req["at"])
     require(in_window(t, u, requested) and requested <= at, "LIVE_REQUEST_TIME_INVALID")
     snapshot = {"request_hash": base.digest(req), "response_hash": None, "points": {}}
-    if not (folder / "response.json").exists():
+    if not _sources.location_exists(folder / "response.json"):
         return snapshot
-    meta, raw = base.read(folder / "response.json"), (folder / "raw.json").read_bytes()
+    meta, raw = base.read(folder / "response.json"), _sources.source_bytes(folder / "raw.json")
     require(
         meta["request_hash"] == base.digest(req)
         and meta["bytes"] == len(raw)
-        and meta["sha256"] == hashlib.sha256(raw).hexdigest(),
+        and meta["sha256"] == _sources.content_digest(raw),
         "LIVE_RAW_CHANGED",
     )
     received = datetime.fromisoformat(meta["received_at"])
@@ -272,12 +273,12 @@ def load_live(t, u, ph):
 
 def capture(t, u, ph):
     folder = live_root() / u
-    if (folder / "snapshot.json").exists():
+    if _sources.location_exists(folder / "snapshot.json"):
         return load_live(t, u, ph)
     if not in_window(t, u, base.now()):
         return None
     errors = []
-    if (folder / "request.json").exists():
+    if _sources.location_exists(folder / "request.json"):
         errors.append("RESERVED_REQUEST_NOT_RETRIED")
     else:
         if base.now() + timedelta(seconds=35) >= market_data.deadline(u):
@@ -308,8 +309,7 @@ def capture(t, u, ph):
                         require(len(raw) <= 2097152 and monotonic() - began <= 30, "RESPONSE_TOO_LARGE_OR_SLOW")
                     status = response.status_code
             require(token.encode() not in raw, "SECRET_IN_RESPONSE")
-            with (folder / "raw.json").open("xb") as f:
-                f.write(raw)
+            _sources.write_source(folder / "raw.json", raw)
             base.save(
                 folder / "response.json",
                 {
@@ -317,7 +317,7 @@ def capture(t, u, ph):
                     "request_hash": base.digest(req),
                     "http_status": status,
                     "bytes": len(raw),
-                    "sha256": hashlib.sha256(raw).hexdigest(),
+                    "sha256": _sources.content_digest(raw),
                 },
             )
             require(status == 200, "HTTP_FAILED")

@@ -1,0 +1,48 @@
+ 5.9 报告期末按公允价值占基金资产净值比例大小排序的前十名基金投资明细
+
+
+                                                                占基
+                            运
+
+                                                                金资
+ 序                  基 金  作                    公允价值
+
+    基金名称                        管理人                    产净
+ 号                  类型  方                  （人民币元）
+
+                                                                值比
+                            式
+
+                                                                例(%)
+
+    WisdomTree WTI        开    WisdomTree
+
+ 1      Crude Oil      ETC  放    Management  171,172,800.95  19.78
+                            式    Jersey Ltd
+
+    United States Oil        开    United States
+
+ 2      Fund LP      ETF  放    Commodity    157,558,091.50  18.21
+                            式    Funds LLC
+
+      Invesco DB Oil          开  Invesco Capital
+
+ 3        Fund        ETF  放    Management  156,717,223.42  18.11
+                            式      LLC
+
+    WisdomTree Brent        开    WisdomTree
+
+ 4      Crude Oil      ETC  放    Management  154,371,652.11  17.84
+                            式    Jersey Ltd
+
+      United States          开    United States
+
+ 5  Brent Oil Fund LP  ETF  放    Commodity    137,050,511.39  15.84
+                            式    Funds LLC
+
+      Samsung S&P          开  SamsungAsset
+
+ 6    GSCI Crude Oil  ETF  放  Management HK  10,116,653.10  1.17
+      ER Futures ETF          式        Ltd
+
+5.10 投资

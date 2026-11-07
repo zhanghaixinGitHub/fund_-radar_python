@@ -6,10 +6,11 @@ from pathlib import Path
 
 from app.core.config import get_settings
 from app.services.fund_exposure_common import read
+from app.services.material_content import location_exists
 
 
 @lru_cache(maxsize=8)
-def _snapshot(path: str, modified_ns: int) -> dict:
+def _snapshot(path: str, modified_ns: int | str) -> dict:
     """同版本快照只校验一次，替换文件后自动失效；避免翻页时反复读取数万条资料。"""
     return read(Path(path))
 
@@ -18,7 +19,13 @@ def snapshot(code: str) -> dict | None:
     if not re.fullmatch(r"\d{6}", code):
         raise ValueError("INVALID_FUND_CODE")
     p = Path(get_settings().fund_material_directory) / f"{code}.json"
-    return _snapshot(str(p.resolve()), p.stat().st_mtime_ns) if p.exists() else None
+    from app.services.material_content import managed, repository
+
+    if managed(p):
+        metadata = repository().metadata(path=p)
+        if metadata is not None:
+            return _snapshot(str(p.resolve()), metadata.source_hash)
+    return _snapshot(str(p.resolve()), p.stat().st_mtime_ns) if location_exists(p) else None
 
 
 def overview(code: str, report_id: str | None = None, stock_code: str | None = None) -> dict:

@@ -15,6 +15,7 @@ from app.services.fund_materials_build import build
 from app.services.fund_materials_store import LIVE, versioned_save
 from app.services.fund_peer_materials import supplement as supplement_peers
 from app.services.fund_training_package import supplement as prepare_training_materials
+from app.services.material_content import location_exists, material_operation
 
 STAGES = (
     "基金报告与持仓",
@@ -108,6 +109,7 @@ def current_scope(cutoff: str, previous_cutoff: str) -> dict:
 class FundMaterialsSyncService:
     """所有入口都进入现有任务队列，真正采集再持有与旧维护相同的数据库锁。"""
 
+    @material_operation
     def sync(self, fund_code: str, *, progress_reporter=lambda *args: None) -> dict:
         if fund_code != FUND:
             raise ValueError("仅支持 002112，基金代码不能为空。")
@@ -126,7 +128,7 @@ class FundMaterialsSyncService:
 
     def _run(self, reporter):
         state_path = LIVE / "state.json"
-        previous = read(state_path) if state_path.exists() else {}
+        previous = read(state_path) if location_exists(state_path) else {}
         cutoff = now().strftime("%Y%m%d")
         baseline = read(ROOT / "supplement/plan.json")["end_date"]
         baseline = datetime.strptime(baseline, "%Y%m%d").date().isoformat()
@@ -294,7 +296,7 @@ class FundMaterialsSyncService:
 def schedule_if_due():
     """首次手动使用后启用持续检查；已有维护循环只登记任务，不能绕过队列直接采集。"""
     path = LIVE / "state.json"
-    if not path.exists():
+    if not location_exists(path):
         return
     state = read(path)
     if not state.get("enabled") or (

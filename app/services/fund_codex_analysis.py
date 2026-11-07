@@ -27,13 +27,15 @@ def freeze_packet(directory: Path, fund_code="002112", materials_path=None) -> d
     输入和首次结果。每段记录原文字符范围，审阅结果不得虚构已读全文的覆盖范围。
     """
     directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=False)
     data = prepare(repo.clock(), fund_code, materials_path)
     if data["window"]["status"] != "OPEN":
         raise ValueError("MISSED_DEADLINE")
+    # 资料/窗口校验失败不能留下空冻结目录，否则补齐后重试会被旧空目录永久挡住。
+    directory.mkdir(parents=True, exist_ok=False)
     packet = {"format": "CODEX_FUND_INPUT_V1", "input_hash": digest(data), "input": data}
     save(directory / "input.json", packet)
     documents = directory / "documents"
+    # 恢复原有可直接审阅的正文分段文件；完整输入仍留在input.json，不新增资料库依赖。
     documents.mkdir()
     index = []
     for number, document in enumerate(data["documents"], 1):
@@ -42,7 +44,7 @@ def freeze_packet(directory: Path, fund_code="002112", materials_path=None) -> d
             end = min(start + 12000, len(body))
             name = f"{number:03d}-{part:03d}.txt"
             (documents / name).write_text(body[start:end], encoding="utf-8")
-            chunks.append({"file": name, "start": start, "end": end})
+            chunks.append({"start": start, "end": end, "file": name})
         index.append(
             {
                 **{key: value for key, value in document.items() if key != "body"},

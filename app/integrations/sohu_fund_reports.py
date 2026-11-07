@@ -1,6 +1,5 @@
 """公开基金报告的第二转载来源；按基金、报告期、披露日期核对，绝不代替官方身份校验。"""
 
-import hashlib
 import re
 import time
 from datetime import datetime, timedelta
@@ -12,6 +11,7 @@ from app.integrations.dbfund_reports import bounded_get
 from app.services.direction_1d_protocol import digest
 from app.services.fund_exposure_common import ROOT, blob, now, read
 from app.services.fund_materials_store import versioned_save
+from app.services.material_content import content_digest, location_exists, source_bytes
 
 BASE = "https://q.fund.sohu.com"
 
@@ -33,10 +33,10 @@ def page(client, code, url, *, body=False):
     if body and not re.fullmatch(r"\d{1,10}", query.get("id", [""])[0]):
         raise ValueError("REPORT_REPRINT_ARTICLE_INVALID")
     path = STORE / "receipts" / (digest({"sohu": url}) + ".json")
-    old = read(path) if path.exists() else None
+    old = read(path) if location_exists(path) else None
     if old and now() - datetime.fromisoformat(old["checked_at"]) < timedelta(days=30):
-        raw = (ROOT / old["file"]).read_bytes()
-        if hashlib.sha256(raw).hexdigest() != old["sha256"]:
+        raw = source_bytes(ROOT / old["file"])
+        if content_digest(raw) != old["sha256"]:
             raise ValueError("REPORT_CACHED_BODY_CHANGED")
         return raw, old
     if client.count >= 600:
@@ -132,7 +132,7 @@ def report(client, code, entry):
         raise ValueError("REPORT_REPRINT_IDENTITY_OR_DATE_MISMATCH")
     content_hash = digest({"title": title, "text": text, "published": published[0]})
     path = STORE / "receipts" / (digest({"sohu_content": item["url"]}) + ".json")
-    old = read(path) if path.exists() else None
+    old = read(path) if location_exists(path) else None
     receipt = {
         **receipt,
         "content_hash": content_hash,

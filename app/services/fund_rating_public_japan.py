@@ -4,7 +4,6 @@
 与已授权同份额净值逐日交叉核验，不把日本休市日补成境内估值日。
 """
 
-import hashlib
 import json
 import re
 from datetime import date, datetime
@@ -15,6 +14,7 @@ from app.services import fund_rating_public_market as market
 from app.services.fund_rating_inputs import digest
 from app.services.fund_rating_metrics import history_metrics, standard_cost
 from app.services.fund_rating_rules import decimal
+from app.services.material_content import content_digest, source_bytes
 
 CODE = "019449"
 PROFILE = "CIFM_JAPAN_CNY_OWN_VALUATIONS_V1"
@@ -216,8 +216,8 @@ def facts(refs: dict, root: Path, code: str, name: str, as_of: date) -> dict:
 
     def read(label):
         ref = refs[label]
-        raw = (root / ref["file"]).read_bytes()
-        if hashlib.sha256(raw).hexdigest() != ref["sha256"]:
+        raw = source_bytes(root / ref["file"])
+        if content_digest(raw) != ref["sha256"]:
             raise ValueError("RATING_JAPAN_ORIGINAL_HASH")
         return raw
 

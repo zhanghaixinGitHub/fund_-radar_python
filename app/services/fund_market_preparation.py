@@ -18,6 +18,7 @@ from app.services.fund_exposure_common import now, read
 from app.services.fund_materials import snapshot
 from app.services.fund_materials_store import versioned_save
 from app.services.fund_rating_inputs import catalog
+from app.services.material_content import material_operation
 
 logger = get_logger(__name__)
 
@@ -50,6 +51,12 @@ class MarketFundPreparation:
         if self._news_client is not None:
             self._news_client.close()
 
+    def sync_share_classes(self, funds: list[dict], *, progress=lambda *args: None) -> dict:
+        """全批共用来源预算与发布锁；通常每七天复查，新增基金随本轮资料同步纳入。"""
+        from app.services.fund_share_classes import synchronize
+
+        return synchronize(tuple(f["fund_code"] for f in funds), due_only=True, progress=progress)
+
     def sync_news(self, code: str, *, progress=lambda *args: None) -> dict:
         from app.services.fund_market_news import MarketNewsClient, synchronize
 
@@ -68,6 +75,7 @@ class MarketFundPreparation:
             "source_hash": digest({key: item["source"]["sha256"] for key, item in value["items"].items()}),
         }
 
+    @material_operation
     def sync_holdings(self, funds: list[dict], *, progress=lambda *args: None) -> dict:
         """统一遵守披露期每日、平时每周的周期，不因每日综合任务强制重复抓取。
 
@@ -110,6 +118,7 @@ class MarketFundPreparation:
         progress(len(result.get("funds", [])), len(funds), None, message)
         return result
 
+    @material_operation
     def sync_material(self, fund: dict, news: dict | None, *, progress=lambda *args: None) -> dict:
         """留存本基金的报告、来源和已公开公司资料；不把页面持仓等同于八维/综合输入完整。"""
         code = fund["fund_code"]
@@ -177,6 +186,7 @@ class MarketFundPreparation:
         progress(1, 1, code, "资料已留存，必要缺项已单独记录" if gaps else "基金资料已留存")
         return result
 
+    @material_operation
     def prepare_inputs(self, funds: list[dict], *, progress=lambda *args: None) -> dict:
         """冻结实际可用输入；沿用原综合资料校验，不用净值或另一基金来源顶替审阅。"""
         from app.services.fund_information_snapshot import prepare

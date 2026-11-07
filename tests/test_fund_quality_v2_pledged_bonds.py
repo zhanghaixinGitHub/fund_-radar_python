@@ -32,6 +32,17 @@ def test_actual_collateral_values_are_not_financing_balance_and_9_digit_bonds_ar
     assert "cost" not in result["rows"][0]  # 没有披露取得成本时不填0。
 
 
+def test_ascii_colon_keeps_explicit_rmb_yuan_and_partial_market_boundary():
+    body = section().replace("单位：人民币元", "单位:人民币元").replace("数量（张）", "数量(张)")
+    assert pledged_bond_table(body, bond_amount="2000")["amount_cny"] == "1100.00"
+    with pytest.raises(ValueError, match="UNIT_UNVERIFIED"):
+        pledged_bond_table(body.replace("人民币元", "人民币万元"), bond_amount="2000")
+    with pytest.raises(PledgedBondIncomplete) as error:
+        pledged_bond_table(body.replace("\n无。", "\n融资余额500.00元，按比例折算标准券。"), bond_amount="2000")
+    assert len(error.value.evidence["known_rows"]) == 2
+    assert "amount_cny" not in error.value.evidence
+
+
 def test_wrapped_bond_name_is_kept_and_unresolved_second_market_preserves_only_partial_facts():
     text = section().replace("测试中票", "测试\n中票")
     assert pledged_bond_table(text, bond_amount="2000")["rows"][1]["name"] == "测试中票"
@@ -206,3 +217,22 @@ def test_complete_empty_bond_table_requires_every_column_and_all_five_explicit_n
     ]:
         with pytest.raises(ValueError, match="BOND_TABLE_UNVERIFIED"):
             restricted_securities([invalid], [], "2000")
+
+
+def test_complete_eleven_column_empty_bond_table_and_stock_only_note_are_explicit_evidence():
+    header = ("证券代码 证券名称 成功认购日 受限期 流通受限类型 认购价格 期末估值单价 "
+              "数量（单位：张） 期末成本总额 期末估值总额 备注")
+    note = ("注：基金持有的股票在流通受限期内，如获得股票红利、送股、转增股、配股的，"
+            "则此新增股票的流通受限期和估值价格与相应原股票一致。")
+    body = ("6.4.12.1 因认购新发证券\n本基金未持有因认购新发流通受限股票。\n"
+            "6.4.12.1.2 受限证券类别：债券\n" + header + "\n" + "- " * 11 + "\n" + note
+            + "\n6.4.12.2 期末持有的暂时停牌等流通受限股票\n本基金未持有暂时停牌等流通受限股票。\n"
+            + section().replace(section()[section().index("本金余额"):section().index("6.4.12.3.2")], "无。\n")
+            + "6.4.12.4 期末参与转融通\n本基金无参与转融通证券出借业务的证券。\n6.4.13 金融工具风险")
+    result = restricted_securities([body], [], "0")
+    assert result["restricted_amount"] == "0"
+    assert "ELEVEN_COLUMNS" in result["empty_bond_table_evidence"]["basis"]
+    for invalid in [body.replace("- " * 11, "- " * 10), body.replace("期末成本总额", ""),
+                    body.replace(note, "另有受限债券尚未列示。")]:
+        with pytest.raises(ValueError, match="BOND_TABLE_UNVERIFIED"):
+            restricted_securities([invalid], [], "0")

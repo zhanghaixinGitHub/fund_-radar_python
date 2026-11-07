@@ -15,6 +15,7 @@ from sqlalchemy import text
 
 from app.db.session import get_nav_preview_engine
 from app.integrations.tushare_overnight import FIELDS, fetch_spx
+from app.services import material_content as material_store
 from app.services.direction_1d_protocol import ZONE, calendar, canonical, digest
 from app.services.direction_1d_training import read, write_new
 from app.services.direction_training_artifacts import file_hash
@@ -206,11 +207,8 @@ def validate_response(body: bytes, plan: dict) -> dict:
 
 
 def write_body(path: Path, body: bytes) -> None:
-    """独占保存原始响应并刷入磁盘；完成时间在调用返回后读取，写失败不能算已取得。"""
-    with path.open("xb") as stream:
-        stream.write(body)
-        stream.flush()
-        os.fsync(stream.fileno())
+    """原始响应直接归档外接盘并刷盘入库；失败不能算已取得，C盘不落临时副本。"""
+    material_store.write_source(path, body)
 
 
 def collect_slot(
@@ -315,8 +313,8 @@ def day_status(root: Path, day: date, at: datetime) -> dict:
         if "raw_file" in item:
             if item["raw_file"] != f"{slot}-response.json":
                 raise ValueError("OVERNIGHT_RAW_PATH_INVALID")
-            body = (directory / item["raw_file"]).read_bytes()
-            if hashlib.sha256(body).hexdigest() != item["response_sha256"]:
+            body = material_store.source_bytes(directory / item["raw_file"])
+            if material_store.content_digest(body) != item["response_sha256"]:
                 raise ValueError("OVERNIGHT_RAW_HASH_CHANGED")
             validation = validate_response(body, plan)
             if validation != item["validation"]:

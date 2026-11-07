@@ -22,6 +22,7 @@ from app.schemas.fund import (
     InternalSyncJobLastSuccess,
     InternalSyncJobStatus,
 )
+from app.schemas.fund_share_classes import FundShareClasses
 from app.schemas.market_sync import MarketSyncRequest
 from app.services.fund_catalog_read import (
     get_fund,
@@ -50,6 +51,17 @@ from app.services.sync_jobs import (
 )
 
 router = APIRouter()
+
+
+@router.get("/{fund_code}/share-classes", response_model=FundShareClasses,
+            dependencies=[Depends(require_service_token)])
+def get_internal_share_classes(
+    fund_code: Annotated[str, Path(pattern=r"^[0-9]{6}$")],
+) -> FundShareClasses:
+    """所有基金复用已核验的份额投影；读取不触发采集，也不读取个人资料。"""
+    from app.services.fund_share_classes import read_relations
+
+    return FundShareClasses.model_validate(read_relations(fund_code))
 logger = get_logger(__name__)
 _FUND_TYPES = "BOND|STOCK|MIXED|INDEX|MONEY|QDII|FOF|OTHER"
 _FUND_CODE_PATTERN = re.compile(r"^\d{6}$")
@@ -63,7 +75,7 @@ def list_internal_funds(
     page_size: Annotated[int, Query(alias="pageSize", ge=1, le=100)] = 10,
     cursor: Annotated[str | None, Query(pattern=r"^\d+$")] = None,
     page: Annotated[int | None, Query(ge=1, le=10_000)] = None,
-    rating: Annotated[str | None, Query(pattern=r"^(EXCELLENT|GOOD|AVERAGE|WEAK|UNRATED|PENDING)$")] = None,
+    rating: Annotated[str | None, Query(pattern=r"^(EXCELLENT|GOOD|AVERAGE|WEAK|SCORED|UNRATED|PENDING)$")] = None,
 ) -> InternalFundPage:
     """按兼容游标或页码返回已落库的真实基金目录样本。
 

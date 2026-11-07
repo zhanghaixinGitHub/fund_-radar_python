@@ -22,6 +22,7 @@ def one(connection, sql, **params):
 
 
 def snapshot(connection, fund_code, cutoff, payload):
+    # 新快照恢复完整原有业务载荷；历史引用包继续由读取兼容层还原，不强制写资料库。
     content_hash = fingerprint(payload)
     connection.execute(
         text("""

@@ -1,6 +1,5 @@
 """002112 的第二批零采购资料：独立留存财务、分红及停牌证据，不改训练协议。"""
 
-import hashlib
 import json
 import threading
 import time
@@ -16,6 +15,7 @@ from app.db.session import get_engine
 from app.services.direction_1d_protocol import digest
 from app.services.fund_exposure_common import ROOT, blob, now, read, save
 from app.services.fund_exposure_quotes import permission, safe_error
+from app.services.material_content import content_digest, location_exists, source_bytes
 
 SUPPLEMENT = ROOT / "supplement"
 FINANCIAL_APIS = ("fina_indicator", "income", "balancesheet", "cashflow", "dividend")
@@ -25,7 +25,7 @@ OPERATING_APIS = ("forecast", "express", "fina_audit", "fina_mainbz", "disclosur
 def plan():
     """补充采集单独冻结范围；旧训练/检验年份、标签与最少样本数完全不变。"""
     path = SUPPLEMENT / "plan.json"
-    if not path.exists():
+    if not location_exists(path):
         codes = read(ROOT / "universe.json")["codes"]
         save(
             path,
@@ -54,8 +54,8 @@ def verified_bytes(receipt):
     """所有复用必须核对内容；不因存在同名文件就视为采集成功。"""
     if receipt.get("expires_at") and datetime.fromisoformat(receipt["expires_at"]) <= now():
         raise ValueError("EXPOSURE_EVIDENCE_EXPIRED")
-    raw = (ROOT / receipt["file"]).read_bytes()
-    if hashlib.sha256(raw).hexdigest() != receipt["sha256"]:
+    raw = source_bytes(ROOT / receipt["file"])
+    if content_digest(raw) != receipt["sha256"]:
         raise ValueError("EXPOSURE_RAW_HASH_MISMATCH")
     return raw
 
@@ -70,7 +70,7 @@ class SupplementProvider:
         self.source = permission()
         probe = read(ROOT / "supplement-permission-probes.json")
         extra = SUPPLEMENT / "operating-permission-probes.json"
-        if extra.exists():
+        if location_exists(extra):
             probe["probes"].extend(read(extra)["probes"])
         self.allowed = set()
         for item in probe["probes"]:
@@ -91,7 +91,7 @@ class SupplementProvider:
         if self.cache_period:
             request["checked_period"] = self.cache_period
         path = SUPPLEMENT / "receipts" / (digest(request) + ".json")
-        if path.exists():
+        if location_exists(path):
             receipt = read(path)
             if datetime.fromisoformat(receipt["expires_at"]) <= now():
                 raise ValueError("EXPOSURE_EVIDENCE_EXPIRED")
@@ -113,7 +113,7 @@ class SupplementProvider:
                         connection.execute(text("SELECT pg_advisory_lock(20260925,211201)"))
                         try:
                             clock_path = SUPPLEMENT / "provider-clock.json"
-                            previous = read(clock_path) if clock_path.exists() else None
+                            previous = read(clock_path) if location_exists(clock_path) else None
                             delay = (
                                 max(0, interval - (now() - datetime.fromisoformat(previous["at"])).total_seconds())
                                 if previous
@@ -196,7 +196,7 @@ def acquire_financials(*, operating=False):
     provider = SupplementProvider()
     apis = OPERATING_APIS if operating else FINANCIAL_APIS
     result_path = SUPPLEMENT / ("operating-result.json" if operating else "financial-result.json")
-    if operating and not (SUPPLEMENT / "operating-plan.json").exists():
+    if operating and not location_exists(SUPPLEMENT / "operating-plan.json"):
         save(
             SUPPLEMENT / "operating-plan.json",
             {
@@ -218,7 +218,7 @@ def acquire_financials(*, operating=False):
         for api in apis:
             output = SUPPLEMENT / "financials" / code / (api + ".json")
             try:
-                if output.exists():
+                if location_exists(output):
                     stored = read(output)
                     # 主营构成由多段查询合并，复用时也要逐段验证，不能只核对第一段。
                     for cached in stored.get("all_receipts", [stored["receipt"]]):

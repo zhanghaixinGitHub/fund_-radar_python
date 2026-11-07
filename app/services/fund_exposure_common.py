@@ -1,6 +1,5 @@
 """002112 持仓数据试点的固定范围、文件留存与证据校验。"""
 
-import hashlib
 import json
 import os
 from datetime import datetime
@@ -8,6 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.services.direction_1d_protocol import ZONE, canonical, digest
+from app.services.material_content import content_digest, location_exists, source_bytes, source_text
 
 PROJECT = Path(__file__).resolve().parents[2]
 ROOT = PROJECT / ".local-runs" / "fund-exposure-002112"
@@ -22,14 +22,31 @@ def now() -> datetime:
 
 def save(path: Path, value, *, replace: bool = False) -> str:
     """JSON 同时保存内容哈希；默认只创建，运行状态才允许原子替换。"""
+    # 新冻结输入恢复原有完整JSON文件；旧压缩包仍由read/unpack兼容，不补建或删除旧内容。
     raw = canonical({"hash": digest(value), "payload": value}).encode("utf-8")
-    path.parent.mkdir(parents=True, exist_ok=True)
+    from app.services.material_file_access import physical_path
+
+    physical_path(path).parent.mkdir(parents=True, exist_ok=True)
     _publish(path, raw, replace=replace)
     return digest(value)
 
 
 def _publish(path: Path, raw: bytes, *, replace=False):
     """先写完临时文件再公开名称；并行验收不会读到半份 JSON，首次创建仍禁止覆盖。"""
+    from app.services.material_content import ensure_publishable, register_content
+    from app.services.material_file_access import physical_path
+
+    # 已提取资料的历史路径转存只登记数据库引用，不把空PDF或重复正文写回磁盘。
+    if register_content(path, raw, replace=replace):
+        return
+    from app.services.material_source_archive import publish_source
+
+    if publish_source(path, raw, replace=replace):
+        return
+    if not ensure_publishable(path, raw, replace=replace):
+        return
+    # 路径更深的D盘工作区仍可原子保存长文件名；旧C盘别名只映射到D盘，不在C盘新建文件。
+    path = physical_path(path)
     temporary = path.with_name(path.name + "." + uuid4().hex + ".tmp")
     try:
         with temporary.open("xb") as stream:
@@ -41,32 +58,37 @@ def _publish(path: Path, raw: bytes, *, replace=False):
             os.link(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+    from app.services.material_content import persist_written
+
+    persist_written(path, raw)
 
 
 def read(path: Path):
     """读取前核对哈希，拒绝损坏或被静默改写的证据。"""
-    value = json.loads(path.read_text(encoding="utf-8"))
+    value = json.loads(source_text(path, encoding="utf-8"))
     if set(value) != {"hash", "payload"} or digest(value["payload"]) != value["hash"]:
         raise ValueError("EXPOSURE_EVIDENCE_HASH_MISMATCH")
-    return value["payload"]
+    from app.services.material_packet_storage import unpack
+
+    return unpack(value["payload"])
 
 
 def blob(raw: bytes, suffix: str) -> tuple[str, str]:
     """原始公开资料按内容寻址保存，名称不包含网页输入或凭据。"""
     if suffix not in {"pdf", "json", "html"}:
         raise ValueError("EXPOSURE_SUFFIX_INVALID")
-    key = hashlib.sha256(raw).hexdigest()
+    key = content_digest(raw)
     path = ROOT / "raw" / f"{key}.{suffix}"
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        if hashlib.sha256(path.read_bytes()).hexdigest() != key:
+    if location_exists(path):
+        if content_digest(source_bytes(path)) != key:
             raise ValueError("EXPOSURE_RAW_HASH_MISMATCH")
     else:
         try:
             _publish(path, raw)
         except FileExistsError:
             # 不同公告可能引用相同原文，并发写入内容相同的文件可以直接复用。
-            if hashlib.sha256(path.read_bytes()).hexdigest() != key:
+            if content_digest(source_bytes(path)) != key:
                 raise ValueError("EXPOSURE_RAW_HASH_MISMATCH") from None
     return key, path.relative_to(ROOT).as_posix()
 
@@ -74,7 +96,7 @@ def blob(raw: bytes, suffix: str) -> tuple[str, str]:
 def initialize() -> dict:
     """采集和评分之前冻结预算及三类样本门槛，不自动购权、不读 2025 标签。"""
     path = ROOT / "plan.json"
-    if path.exists():
+    if location_exists(path):
         return read(path)
     plan = {
         "version": "FUND_EXPOSURE_002112_V1",

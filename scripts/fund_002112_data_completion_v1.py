@@ -18,8 +18,8 @@ from datetime import datetime
 from pathlib import Path
 
 PY = Path(__file__).resolve().parents[1]
-WEB = Path('C:/WebStormProject/workSpace05')
-JAVA = Path('C:/ideaProject/workSpace12')
+WEB = Path('D:/Project-FullStack/workSpace01/01-vue')
+JAVA = Path('D:/Project-FullStack/workSpace01/02-java')
 ROOT = PY / '.local-runs/fund-exposure-002112'
 OLD = ROOT / 'closure/20260929-v1'
 OUT = ROOT / 'data-completion/20260930-v1'

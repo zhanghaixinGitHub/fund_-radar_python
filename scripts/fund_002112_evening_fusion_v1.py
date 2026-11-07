@@ -192,7 +192,7 @@ def holding_weights(report) -> dict:
 def git_snapshot() -> dict:
     """只读记录三个工作区既有改动及字节摘要，不暂存、不还原、不提交。"""
     result = {}
-    for repo in [PY, Path(r"C:\WebStormProject\workSpace05"), Path(r"C:\ideaProject\workSpace12")]:
+    for repo in [PY, Path(r"D:\Project-FullStack\workSpace01\01-vue"), Path(r"D:\Project-FullStack\workSpace01\02-java")]:
         raw = subprocess.check_output(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd=repo)
         entries = raw.decode("utf-8").split("\0")
         files = {}

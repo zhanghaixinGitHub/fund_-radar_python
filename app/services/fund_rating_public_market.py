@@ -4,7 +4,6 @@
 净值使用已授权来源的复权单位净值，不能用累计净值冒充再投资总回报。
 """
 
-import hashlib
 import io
 import json
 import re
@@ -17,13 +16,13 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pypdf import PdfReader
-
 from app.core.config import get_settings
 from app.integrations.fund_report_layout_v3 import parse_text
 from app.services.fund_rating_disclosures import compact
 from app.services.fund_rating_metrics import history_metrics, standard_cost
 from app.services.fund_rating_rules import decimal
+from app.services.material_content import content_digest, source_bytes
+from app.services.material_content import document_reader as PdfReader
 
 BASIS = "PUBLIC_DISCLOSURE_DOMESTIC_EQUITY_V1"
 SCOPE = {"basis": BASIS, "asset": "DOMESTIC_ACTIVE_EQUITY", "currency": "CNY"}
@@ -86,8 +85,8 @@ def attachment_identity(refs: dict, root: Path, label: str, code: str, required_
     record_ref = refs.get(label + "_identity")
     if record_ref is None or urlsplit(record_ref["url"]).hostname != REPRINT_HOST:
         raise ValueError("RATING_MARKET_ATTACHMENT_IDENTITY")
-    raw = (root / record_ref["file"]).read_bytes()
-    if hashlib.sha256(raw).hexdigest() != record_ref["sha256"]:
+    raw = source_bytes(root / record_ref["file"])
+    if content_digest(raw) != record_ref["sha256"]:
         raise ValueError("RATING_MARKET_ORIGINAL_HASH")
     record = json.loads(raw)
     data = record.get("data") or {}
@@ -110,11 +109,15 @@ def attachment_identity(refs: dict, root: Path, label: str, code: str, required_
 @lru_cache(maxsize=24)
 def _pdf_pages(raw: bytes) -> tuple[str, ...]:
     """同一批原件按字节复用文本；不同字节不会命中旧缓存。"""
-    return tuple(p.extract_text() or "" for p in PdfReader(io.BytesIO(raw)).pages)
+    return tuple(p.extract_text() or "" for p in PdfReader(raw).pages)
 
 
 def public_document(raw: bytes, ref: dict, code: str, required_title: str) -> tuple[list[str], dict | None]:
     """保留发行人 PDF 与完整公开转载的区别，转载必须核对正文标识及基金身份。"""
+    from app.services.material_content import SourceContent, docx_structure
+
+    if isinstance(raw, SourceContent) and raw.kind == "DOCX":
+        return [docx_structure(raw)["text"]], None
     if raw.startswith(b"%PDF"):
         return list(_pdf_pages(raw)), None
     if raw.startswith(b"PK\x03\x04"):
@@ -221,7 +224,8 @@ def amount(text: str, label: str, *, first: bool = False) -> str:
     if not lines or (not first and len(lines) != 1):
         raise ValueError("RATING_MARKET_AMOUNT_ROW:" + label)
     tail = re.sub(r"^\s*" + re.escape(label) + r"\s+", "", lines[0])
-    tail = re.sub(r"^[56]\.4\.\d+(?:\.\d+)?\s+", "", tail)
+    # 中报及年报附注编号分别可能为6.4或7.4；附注本身不能当成本期金额。
+    tail = re.sub(r"^[567]\.4\.\d+(?:\.\d+)?\s+", "", tail)
     m = re.match(r"([\d,]+\.\d{2}|[-－—])(?:\s|$)", tail)
     if not m:
         raise ValueError("RATING_MARKET_AMOUNT_VALUE:" + label)
@@ -232,7 +236,9 @@ def balance(pages: list[str], *, require_stock: bool = True) -> dict:
     from app.services.fund_report_sections import numbered_pages
 
     pages = numbered_pages(pages)
-    text = section("\n".join(pages), r"[56]\.1\s*资产负债表", r"[56]\.2\s*利润表")
+    # 标准年度报告财务报表在第七节；只扩展章节编号，原资产与净资产对账照旧。
+    # REIT合并/个别报表不适用此标准表，不使用其第十节猜普通基金资产口径。
+    text = section("\n".join(pages), r"[567]\.1\s*资产负债表", r"[567]\.2\s*利润表")
     if "单位：人民币元" not in compact(text):
         raise ValueError("RATING_MARKET_BALANCE_UNIT")
     core = (
@@ -708,8 +714,8 @@ def stock_pages(pages: list[str]) -> list[str]:
 def read_facts(refs: dict, root: Path, code: str, name: str, as_of: date) -> dict:
     def read(label):
         ref = refs[label]
-        raw = (root / ref["file"]).read_bytes()
-        if hashlib.sha256(raw).hexdigest() != ref["sha256"]:
+        raw = source_bytes(root / ref["file"])
+        if content_digest(raw) != ref["sha256"]:
             raise ValueError("RATING_MARKET_ORIGINAL_HASH")
         return raw
 

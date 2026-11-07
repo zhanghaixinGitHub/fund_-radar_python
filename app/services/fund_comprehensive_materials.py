@@ -12,6 +12,7 @@ from app.services.comprehensive_prediction_policy import policy
 from app.services.direction_1d_protocol import ZONE, digest, input_days, window
 from app.services.fund_exposure_common import read
 from app.services.fund_information_contracts import time_context
+from app.services.material_content import source_exists
 
 
 def checked_documents(now: datetime, code: str, material: dict) -> list[dict]:
@@ -63,8 +64,9 @@ def prepare(now, code: str, materials_path=None) -> dict:
     """
     now = now.astimezone(ZONE)
     path = Path(materials_path or Path(get_settings().fund_material_directory) / "comprehensive" / f"{code}.json")
-    if not path.is_file():
+    if not source_exists(path):
         raise ValueError("COMPREHENSIVE_MATERIALS_REQUIRED")
+    # 交接包沿用原有文件/历史兼容读取，不因打开业务输入强制全文入库。
     material = read(path)
     if material.get("fund_code") != code:
         raise ValueError("COMPREHENSIVE_FUND_MISMATCH")
@@ -122,8 +124,7 @@ def prepare(now, code: str, materials_path=None) -> dict:
         rows = [
             row
             for row in rows
-            if row["updated_at"] <= now
-            and (row.get("ann_date") is None or row["ann_date"] <= now.date())
+            if row["updated_at"] <= now and (row.get("ann_date") is None or row["ann_date"] <= now.date())
         ]
         observed = repo.observe(connection, code, source, rows, now) if rows else []
     from app.services.fund_material_nav import supplement_nav
@@ -166,4 +167,25 @@ def prepare(now, code: str, materials_path=None) -> dict:
     if len(data["inventory"]) != 16:
         raise ValueError("COMPREHENSIVE_INVENTORY_INVALID")
     data["time_context"] = time_context(data)
+    # 旧资料整理器把“非基准日行情”一律标缺。仅在正式时间核验已逐证券证明
+    # 日本休市参考、且基准日净值等资料全部齐备时，派生本次用途覆盖；不改原包。
+    # 来源引用仍须由后续原契约检查，任何缺价、开市停牌或旧净值均不能走此路径。
+    market_coverage = data["comprehensive_coverage"].get("MARKET", {})
+    references = [
+        row.get("valuation_reference", {})
+        for group in (data["time_context"]["stocks"], data["time_context"]["markets"])
+        for row in group.values()
+    ]
+    if (
+        market_coverage.get("status") == "MISSING"
+        and data["time_context"]["baseline_complete"]
+        and any(r.get("reason") == "JP_EXCHANGE_HOLIDAY_LAST_SESSION_REFERENCE" for r in references)
+        and market_coverage.get("source_refs")
+        and set(market_coverage["source_refs"]) <= set(facts) | set(by_id)
+    ):
+        data["comprehensive_coverage"]["MARKET"] = {
+            **market_coverage,
+            "status": "AVAILABLE",
+            "verified_holiday_references": [r for r in references if r],
+        }
     return data

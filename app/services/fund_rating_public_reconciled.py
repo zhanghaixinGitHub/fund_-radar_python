@@ -4,7 +4,6 @@
 仍原样归档；新的分析序列有独立哈希，不能回写成供应商的原始数据。
 """
 
-import hashlib
 import json
 import re
 from copy import deepcopy
@@ -17,6 +16,7 @@ from app.services import fund_rating_public_index as index
 from app.services.fund_rating_inputs import canonical
 from app.services.fund_rating_public_market import compact, public_document, publication
 from app.services.fund_rating_rules import decimal
+from app.services.material_content import content_digest, source_bytes
 
 BASIS = "PUBLIC_DISCLOSURE_DOMESTIC_INDEX_RECONCILED_V1"
 SCOPE = {"basis": BASIS, "asset": "DOMESTIC_EQUITY_INDEX", "currency": "CNY"}
@@ -40,8 +40,8 @@ def _cash_events(provider: dict, refs: dict, root: Path, code: str, as_of: date)
     texts = {}
     for label, title in (("dividend_2025", "中期报告"), ("dividend_2026", "分红公告")):
         ref = refs[label]
-        raw = (root / ref["file"]).read_bytes()
-        if hashlib.sha256(raw).hexdigest() != ref["sha256"]:
+        raw = source_bytes(root / ref["file"])
+        if content_digest(raw) != ref["sha256"]:
             raise ValueError("RATING_RECONCILED_DIVIDEND_HASH")
         pages, _ = public_document(raw, ref, code, title)
         if publication(pages) > str(as_of):
@@ -82,7 +82,7 @@ def reconcile(history: dict, issuer: dict, provider: dict, refs: dict, root: Pat
     """每个估值日核对代码、单位净值、现金事件和累计收益，任何一天不符即拒绝。"""
     if refs["benchmark"].get("format") != "ISSUER_DAILY_BENCHMARK_WJ":
         raise ValueError("RATING_RECONCILED_ISSUER_SOURCE")
-    raw = json.loads((root / refs["benchmark"]["file"]).read_bytes())
+    raw = json.loads(source_bytes(root / refs["benchmark"]["file"]))
     units = {date.fromisoformat(r["tradeDate"]).isoformat(): decimal(r["unitNv"]) for r in raw["results"]}
     events = _cash_events(provider, refs, root, code, as_of)
     return reconcile_series(history, issuer, units, events)
@@ -115,9 +115,7 @@ def reconcile_series(history: dict, issuer: dict, units: dict, events: dict) -> 
             "adjusted_nav": str(value),
             "derived_source": "ISSUER_WEALTH_RECONCILED_WITH_CASH_REINVESTMENT",
         }
-        row["content_hash"] = hashlib.sha256(
-            canonical({k: v for k, v in row.items() if k != "content_hash"}).encode()
-        ).hexdigest()
+        row["content_hash"] = content_digest(canonical({k: v for k, v in row.items() if k != "content_hash"}).encode())
         result["rows"].append(row)
     result["adjusted_nav"] = list(map(str, wealth))
     result["return_source_reconciliation"] = {

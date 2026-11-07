@@ -2,6 +2,26 @@
 
 Python 服务只处理数据采集、事件理解、AI 评分、回测和 Java 内部接口。它不面对浏览器开放，不处理用户关注/提醒，不保存支付宝凭证，也不执行交易。
 
+## 资料混合读取与D盘存储
+
+2026-11-07用户确认采用混合读取：日常业务复用数据库、快照和同版本解析结果；需要时按需读取D盘原件，新资料不以全量文本化入库作为使用前提。新下载按原有D盘业务目录保存，日志、缓存、测试和核验记录也写D盘；04-SourceFile保留既有迁移原件与凭据。取消自动全文补提、统一归档和清理，原件与已有数据先保留，现有Docker数据卷继续使用。详见[当前项目规则](AGENTS.md)、[需求](docs_zhx/requirements/restore-file-material-reading-2026-11-07.md)及[实施](docs_zhx/implementation/restore-file-material-reading-2026-11-07.md)。生命周期文档的旧强制条款仅为历史记录。
+
+## 同产品份额关系
+
+市场与关注详情通过 Java 读取后台已核验的份额关系，不再在前端维护固定名单。
+既有“一键同步”的市场资料步骤会核对本轮全部基金，通常七天复查；新增基金或失败项不跳过。
+关系只依据最新公开定期报告的基金身份表，原文与版本保存在
+`data/fund-insights/share-classes/`，不通过名称相似度合并产品，也不把发现的外部份额自动加入净值、评级或交易范围。
+
+```powershell
+# 默认检查当前全部启用代码，--force 强制重新核对；--dry-run 只采集核对，不发布页面关系。
+.\.venv\Scripts\python.exe -m app.commands.sync_fund_share_classes
+.\.venv\Scripts\python.exe -m app.commands.sync_fund_share_classes --fund-code 001632 --force
+```
+
+新环境须执行一次上述全目录命令或既有资料同步。查询接口仅读取本地快照，不在打开页面时采集。
+报告未列出其他份额、资料未核实及来源故障分别处理；原件损坏、产品冲突或过期不能冒充完整关系。
+
 ## 本地启动
 
 ```powershell

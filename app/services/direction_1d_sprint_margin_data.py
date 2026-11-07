@@ -4,7 +4,7 @@
 每个目标日最多三个时槽请求，原始响应共享给所有基金，失败不自动追加请求。
 """
 
-import hashlib
+# 原始响应统一归档外接盘；历史路径只作为数据库别名，不生成C盘源文件。
 import json
 import math
 from datetime import date, datetime, time
@@ -13,6 +13,7 @@ import numpy as np
 
 from app.integrations.tushare_sprint_margin import FIELDS, MAX_BYTES, URL, fetch_margin
 from app.services import direction_1d_sprint as base
+from app.services import material_content as _sources
 
 SOURCE = "TUSHARE_MARGIN_EXISTING_PERMISSION_RESEARCH"
 SLOTS = ("0700", "0730", "0800")
@@ -109,13 +110,13 @@ def raw_history():
     """逐字节复核已有六次历史响应及请求，不在训练时重新下载。"""
     folder = source_folder()
     plan = base.read(folder / "history-plan.json")
-    if hashlib.sha256((folder / "fetch-history.py").read_bytes()).hexdigest() != plan["script_sha256"]:
+    if _sources.content_digest(_sources.source_bytes(folder / "fetch-history.py")) != plan["script_sha256"]:
         raise ValueError("MARGIN_HISTORY_SCRIPT_CHANGED")
     points = {}
     for i, (start, end) in enumerate(plan["windows"], 1):
         request = base.read(folder / f"history-request-{i}.json")
         receipt = base.read(folder / f"history-receipt-{i}.json")
-        raw = (folder / f"history-response-{i}.json").read_bytes()
+        raw = _sources.source_bytes(folder / f"history-response-{i}.json")
         if (
             request["url"] != URL
             or request["api_name"] != "margin"
@@ -123,7 +124,7 @@ def raw_history():
             or request["params"] != {"start_date": start, "end_date": end}
             or request["plan_hash"] != base.digest(plan)
             or receipt["request_hash"] != base.digest(request)
-            or receipt["body_sha256"] != hashlib.sha256(raw).hexdigest()
+            or receipt["body_sha256"] != _sources.content_digest(raw)
             or receipt["bytes"] != len(raw)
         ):
             raise ValueError("MARGIN_HISTORICAL_RAW_CHANGED")
@@ -180,8 +181,8 @@ def load(target):
         or datetime.fromisoformat(meta["received_at"]) > datetime.fromisoformat(value["at"])
     ):
         raise ValueError("MARGIN_LIVE_RESPONSE_CHANGED_OR_LATE")
-    raw = (folder / f"raw/{slot}.response.json").read_bytes()
-    if hashlib.sha256(raw).hexdigest() != meta["body_sha256"] or len(raw) != meta["bytes"]:
+    raw = _sources.source_bytes(folder / f"raw/{slot}.response.json")
+    if _sources.content_digest(raw) != meta["body_sha256"] or len(raw) != meta["bytes"]:
         raise ValueError("MARGIN_LIVE_RAW_CHANGED")
     points = parse(raw, needed[0], needed[-1])
     if any(day not in points for day in needed) or {d: points[d] for d in needed} != value["rows"]:
@@ -197,7 +198,7 @@ def capture(at):
         raise ValueError("MARGIN_LIVE_WINDOW_CLOSED")
     target, base_day = window["target_nav_date"], window["base_nav_date"]
     folder = root() / target
-    if (folder / "input.json").exists():
+    if _sources.location_exists(folder / "input.json"):
         return load(target)
     deadline = datetime.combine(date.fromisoformat(target), time(8, 30), base.ZONE)
     request_at = base.now()
@@ -205,7 +206,7 @@ def capture(at):
         raise ValueError("MARGIN_LIVE_REQUEST_TIME_INVALID")
     slot = slot_for(request_at)
     attempt = folder / f"requests/{slot}.json"
-    if attempt.exists() or len(list((folder / "requests").glob("*.json"))) >= 3:
+    if _sources.location_exists(attempt) or len(list((folder / "requests").glob("*.json"))) >= 3:
         raise ValueError("MARGIN_LIVE_SLOT_OR_BUDGET_EXHAUSTED")
     needed = required(base_day, target)
     request = {
@@ -223,14 +224,13 @@ def capture(at):
         meta = {
             "received_at": base.now().isoformat(),
             "source": SOURCE,
-            "body_sha256": hashlib.sha256(body).hexdigest(),
+            "body_sha256": _sources.content_digest(body),
             "bytes": len(body),
             "request_hash": base.digest(request),
         }
         raw_path = folder / f"raw/{slot}.response.json"
         raw_path.parent.mkdir(parents=True, exist_ok=True)
-        with raw_path.open("xb") as file:
-            file.write(body)
+        _sources.write_source(raw_path, body)
         base.save(folder / f"raw/{slot}.json", meta)
         if datetime.fromisoformat(meta["received_at"]) >= deadline:
             raise ValueError("MARGIN_LIVE_RESPONSE_LATE")

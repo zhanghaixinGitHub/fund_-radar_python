@@ -1,6 +1,5 @@
 """综合资料中可核验的公开净值补充；不改写供应商净值库或冒用其来源身份。"""
 
-import hashlib
 import json
 import re
 from datetime import date, datetime
@@ -9,6 +8,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from app.services.direction_1d_protocol import digest
+from app.services.material_content import content_digest, source_bytes
 
 POLICY = "OFFICIAL_PUBLISHER_NAV_DOCUMENT_V1"
 DISTRIBUTOR_POLICY = "DISCLOSED_DISTRIBUTOR_NAV_DOCUMENT_V1"
@@ -51,10 +51,10 @@ def supplement_nav(
     ):
         raise ValueError("COMPREHENSIVE_NAV_PUBLISHER_MISMATCH")
     try:
-        raw = Path(document["raw_path"]).read_bytes()
+        raw = source_bytes(Path(document["raw_path"]))
         if (
             len(raw) > 1_000_000
-            or hashlib.sha256(raw).hexdigest() != document["raw_sha256"]
+            or content_digest(raw) != document["raw_sha256"]
             or raw.decode("utf-8-sig").strip() != document["body"].strip()
             or digest(document["body"]) != document["body_hash"]
         ):
@@ -180,10 +180,10 @@ def _distributor_nav(profile: dict, material: dict, documents: dict, observed: l
     ):
         raise ValueError("COMPREHENSIVE_NAV_DISTRIBUTOR_IDENTITY_INVALID")
     try:
-        raw = Path(source["raw_path"]).read_bytes()
+        raw = source_bytes(Path(source["raw_path"]))
         if (
             len(raw) > 1_000_000
-            or hashlib.sha256(raw).hexdigest() != source["raw_sha256"]
+            or content_digest(raw) != source["raw_sha256"]
             or raw.decode("utf-8-sig").strip() != source["body"].strip()
             or digest(source["body"]) != source["body_hash"]
         ):

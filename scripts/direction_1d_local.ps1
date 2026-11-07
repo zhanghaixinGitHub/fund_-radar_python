@@ -6,7 +6,7 @@ Start 只启动未占用端口；Stop 只停止此脚本记录且创建时刻匹
 #>
 param(
     [ValidateSet('Start','Status','Stop')][string]$Action = 'Status',
-    [string]$JavaRoot = 'C:\ideaProject\workSpace12',
+    [string]$JavaRoot = 'D:\Project-FullStack\workSpace01\02-java',
     [int]$PythonPort = 8000,
     [int]$JavaPort = 8080,
     # 本地验收可短时缩短轮询；这是作业收取频率，同一目标日仍只留一份原始预测。

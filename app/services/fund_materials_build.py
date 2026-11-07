@@ -9,6 +9,7 @@ from app.core.config import get_settings
 from app.services.direction_1d_protocol import digest
 from app.services.fund_exposure_common import ROOT, now, read
 from app.services.fund_materials_store import source_files, source_path, versioned_save
+from app.services.material_content import location_exists, source_glob
 
 
 def iso_date(value) -> str | None:
@@ -31,7 +32,7 @@ def financial_rows(root: Path, code: str, api: str) -> list[dict]:
     """优先完整字段版本；两个版本不能相加，文件哈希异常直接停止发布。"""
     for folder in ("enriched-financials", "financials"):
         p = source_path(root, f"supplement/{folder}/{code}/{api}.json")
-        if p.exists():
+        if location_exists(p):
             return read(p)["rows"]
     return []
 
@@ -215,7 +216,7 @@ def build(root: Path = ROOT, target: Path | None = None, *, checked_through: str
     current = {h["stockCode"]: h for h in reports[0]["holdings"]}
     # 一次载入截至日行情；缺少当日数据保持空值，不用旧价格冒充当日收盘。
     quotes = {}
-    for quote_file in sorted((root / "stock-days").glob("*.json"), reverse=True):
+    for quote_file in sorted(source_glob(root / "stock-days", "*.json"), reverse=True):
         if quote_file.stem > iso_date(cutoff):
             continue
         quotes = read(quote_file).get("rows", {})
@@ -255,7 +256,7 @@ def build(root: Path = ROOT, target: Path | None = None, *, checked_through: str
             )
     seen = set()
     catalog_path = root / "materials-live/supplement/public-catalog.json"
-    active_ids = set(read(catalog_path)["items"]) if catalog_path.exists() else None
+    active_ids = set(read(catalog_path)["items"]) if location_exists(catalog_path) else None
     for path in source_files(root, "supplement/documents"):
         d = read(path)
         url = safe_url(d.get("url") or d.get("receipt", {}).get("url"))
@@ -300,7 +301,7 @@ def build(root: Path = ROOT, target: Path | None = None, *, checked_through: str
         "notice": "持仓以定期报告为准，不代表实时调仓；公司公告按历史披露持仓关联收集，未覆盖所有新闻。",
     }
     target = target or Path(get_settings().fund_material_directory) / f"{fund}.json"
-    if target.exists():
+    if location_exists(target):
         previous = read(target)
         if previous.get("fundCode") != fund:
             raise ValueError("MATERIAL_PREVIOUS_FUND_MISMATCH")

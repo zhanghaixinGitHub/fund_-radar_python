@@ -11,18 +11,26 @@ from decimal import Decimal
 from bs4 import BeautifulSoup
 
 SCOPES = {
+    "管理人及其高级管理人员受稽查或处罚等情况": "MANAGER_AND_SENIOR_STAFF",
+    "管理人及其高级管理人员受调查或处罚等情况": "MANAGER_AND_SENIOR_STAFF",
     "管理人受调查或处罚等情况": "MANAGER",
     "管理人相关从业人员受调查或处罚等情况": "MANAGER_RELATED_STAFF",
     "管理人、托管人及其高级管理人员受稽查或处罚等情况": "COMBINED_MANAGER_CUSTODIAN_OR_STAFF",
     "管理人、托管人及其高级管理人员受稽查或处罚的情况": "COMBINED_MANAGER_CUSTODIAN_OR_STAFF",
 }
 END_TITLES = {
+    "托管人及其高级管理人员受稽查或处罚等情况",
+    "托管人及其高级管理人员受调查或处罚等情况",
     "托管人受调查或处罚等情况",
     "托管人相关从业人员受调查或处罚等情况",
     "基金租用证券公司交易单元的有关情况",
     "其他重大事件",
 }
 FIELDS = {
+    "受到稽查或处罚等措施的主体": "reported_subject",
+    "受到稽查或处罚等措施的时间": "reported_event_time",
+    "采取稽查或处罚等措施的机构": "reported_authorities",
+    "受到稽查或处罚等措施的原因": "reported_reasons",
     "受到调查或处罚等措施的主体": "reported_subject",
     "受到调查或处罚等措施的时间": "reported_event_time",
     "采取调查或处罚等措施的机构": "reported_authorities",
@@ -38,10 +46,17 @@ FIELDS = {
 def report_manager_name(pages: list[str]) -> str | None:
     """从封面/基本信息读法定管理人全称，不把持仓发行人、托管人或简称当管理人。"""
     text = re.sub(r"\s+", "", "\n".join(pages))[:16000]
-    company = r"([^。:：]{2,28}?基金管理(?:股份有限公司|有限责任公司|有限公司))"
+    company = (
+        r"([^。:：]{2,28}?(?:基金管理|证券资产管理)(?:[（(][^（）()]{1,12}[）)])?"
+        r"(?:股份有限公司|有限责任公司|有限公司))"
+    )
     explicit = re.search(r"基金管理人(?:名称)?[:：]" + company, text)
     if explicit:
         return explicit[1]
+    # 两列表头后接“名称”行，不能要求管理人全称紧跟表头，也不读取联系人姓名。
+    columns = re.search(r"基金管理人基金托管人名称" + company, text)
+    if columns:
+        return columns[1]
     table = re.search(r"基金管理人(?:名称)?" + company + r"基金托管人", text)
     return table[1] if table else None
 
@@ -79,8 +94,9 @@ def _reported_event_rows(quote: str) -> list[dict]:
         if "《" in item.get("reported_reasons", "") and not item.get("reported_legal_basis", "").startswith("《"):
             warnings.append("REASONS_AND_LEGAL_BASIS_INTERLEAVED_REQUIRES_ATTACHMENT_REVIEW")
         item["layout_warnings"] = warnings
-        item["field_state"] = ("LAYOUT_AMBIGUOUS_RAW_TEXT_ONLY" if warnings
-                               else "PARSED_REPORT_DECLARATION_NOT_INDEPENDENT_REVIEW")
+        item["field_state"] = (
+            "LAYOUT_AMBIGUOUS_RAW_TEXT_ONLY" if warnings else "PARSED_REPORT_DECLARATION_NOT_INDEPENDENT_REVIEW"
+        )
     return rows
 
 

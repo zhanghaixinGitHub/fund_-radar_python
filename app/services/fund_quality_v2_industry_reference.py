@@ -4,15 +4,13 @@
 观察期与发布日期分别记录；事后取得的分类不能被宣称为观察期末已知的信息。
 """
 
-import hashlib
-import io
 import re
 from datetime import date
 
-from pypdf import PdfReader
-
 from app.services.fund_quality_v2_index_reference import equity_slice_distance
 from app.services.fund_rating_rules import decimal
+from app.services.material_content import content_digest
+from app.services.material_content import document_reader as PdfReader
 
 
 def parse_capco_security_pages(pages: list[str], *, period_end: str) -> dict:
@@ -65,11 +63,11 @@ def rebuild_capco_reference(raw: bytes, *, expected_sha256: str, period_end: str
     来源URL、取得时间、发布正文与附件关联仍由外层原件回执校验，摘要相符
     只是文件一致性证据，不能独自证明来源、使用权限或事前可得性。
     """
-    if len(raw) > 20_000_000 or hashlib.sha256(raw).hexdigest() != expected_sha256:
+    if len(raw) > 20_000_000 or content_digest(raw) != expected_sha256:
         raise ValueError("QUALITY_INDUSTRY_SOURCE_HASH_OR_SIZE")
     if date.fromisoformat(published_on) < date.fromisoformat(period_end):
         raise ValueError("QUALITY_INDUSTRY_PUBLICATION_BEFORE_OBSERVATION")
-    reader = PdfReader(io.BytesIO(raw))
+    reader = PdfReader(raw)
     result = parse_capco_security_pages([page.extract_text() or "" for page in reader.pages], period_end=period_end)
     result.update(source_hash=expected_sha256, published_on=published_on)
     return result

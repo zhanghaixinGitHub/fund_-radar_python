@@ -1,11 +1,14 @@
 """FastAPI AI 服务的类型化环境配置。"""
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.workspace_paths import PYTHON_ROOT, SOURCE_ROOT
 
 
 class Settings(BaseSettings):
@@ -14,7 +17,8 @@ class Settings(BaseSettings):
     服务令牌和外部数据源凭据使用 SecretStr 保存，日志或接口中不得输出其实际值。
     """
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # 配置固定到本工程；从工作区根目录或IDE启动也不能误读旧工程的.env。
+    model_config = SettingsConfigDict(env_file=PYTHON_ROOT / ".env", env_file_encoding="utf-8", extra="ignore")
 
     app_environment: str = "local"
     app_host: str = "127.0.0.1"
@@ -25,6 +29,9 @@ class Settings(BaseSettings):
     fund_material_directory: str = "data/fund-materials"
     # 公共风险和历史评价的不可变结果与当前引用；不保存本人账户资料。
     fund_insight_directory: str = "data/fund-insights"
+    # 既有迁移原件的兼容根目录；新下载按调用方业务目录保存，不再强制统一归档或文本入库。
+    fund_source_archive_root: str = str(SOURCE_ROOT)
+    fund_source_archive_funds: str = "*"
     ai_service_token: SecretStr = SecretStr("")
     # 历史字段只保留兼容性。私人凭据由 deepseek_policy 按 002112/T1 范围单独读取。
     # 普通配置及历史研究脚本不再获得付费密钥，页面解释也不调用模型润色。
@@ -61,12 +68,18 @@ class Settings(BaseSettings):
     tushare_market_incremental_hour: int = Field(default=20, ge=0, le=23)
     tushare_market_incremental_minute: int = Field(default=0, ge=0, le=59)
 
-    @field_validator("fund_parse_cache_path")
+    @field_validator(
+        "fund_parse_cache_path", "fund_material_directory", "fund_insight_directory", "prediction_model_directory",
+        "fund_source_archive_root",
+    )
     @classmethod
     def resolve_parse_cache_path(cls, value: str) -> str:
         """相对路径固定到Python项目目录，避免换启动目录后丢失旧解析或重置费用台账。"""
         path = Path(value).expanduser()
-        return str(path if path.is_absolute() else Path(__file__).resolve().parents[2] / path)
+        path = path if path.is_absolute() else Path(__file__).resolve().parents[2] / path
+        if os.name == "nt" and path.drive.upper() != "D:":
+            raise ValueError("本项目资料、模型与缓存目录必须位于D盘")
+        return str(path)
 
 
 @lru_cache

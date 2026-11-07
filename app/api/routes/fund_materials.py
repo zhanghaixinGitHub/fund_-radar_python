@@ -3,6 +3,7 @@
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.dependencies import require_service_token
 from app.services import fund_evaluation_status, fund_materials, fund_news_sync, fund_risk_summary
@@ -16,8 +17,11 @@ MATERIAL_STOCK_CODE_PATTERN = r"^(?:\d{6}(?:\.(?:SH|SZ|BJ))?|\d{5}\.HK)$"
 
 
 def require_fund(code: str):
-    if get_fund(code) is None:
-        raise HTTPException(404, "基金不存在。")
+    try:
+        if get_fund(code) is None:
+            raise HTTPException(404, "基金不存在。")
+    except SQLAlchemyError as exc:
+        raise HTTPException(503, "基金资料暂时无法读取，请稍后重试。") from exc
 
 
 @router.get("/evaluation-status")
@@ -27,7 +31,7 @@ def get_evaluation_status(
     """按页面基金集合批量读资料状态，缺少审计保持未知，不把旧信号分数当历史评分。"""
     try:
         return fund_evaluation_status.batch(fund_codes.split(","))
-    except (ValueError, OSError, KeyError) as exc:
+    except (ValueError, OSError, KeyError, SQLAlchemyError) as exc:
         raise HTTPException(503, "历史评价资料暂时无法读取，请稍后重试。") from exc
 
 
@@ -37,7 +41,7 @@ def get_risk_summary(fund_code: Code):
     require_fund(fund_code)
     try:
         return fund_risk_summary.current(fund_code)
-    except (ValueError, OSError, KeyError) as exc:
+    except (ValueError, OSError, KeyError, SQLAlchemyError) as exc:
         raise HTTPException(503, "风险资料暂时无法读取，请稍后重试。") from exc
 
 
@@ -46,7 +50,7 @@ def get_news_facts(fund_code: Code):
     require_fund(fund_code)
     try:
         return fund_news_sync.current(fund_code)
-    except (ValueError, OSError, KeyError) as exc:
+    except (ValueError, OSError, KeyError, SQLAlchemyError) as exc:
         raise HTTPException(503, "消息资料暂时无法读取，请稍后重试。") from exc
 
 
@@ -61,6 +65,8 @@ def get_materials(
         return fund_materials.overview(fund_code, report_id, stock_code)
     except ValueError as exc:
         raise HTTPException(422, "所选资料暂不可用。") from exc
+    except (OSError, SQLAlchemyError) as exc:
+        raise HTTPException(503, "基金资料暂时无法读取，请稍后重试。") from exc
 
 
 @router.get("/{fund_code}/materials/documents")
@@ -74,12 +80,15 @@ def get_documents(
     latest_only: Annotated[bool, Query(alias="latestOnly")] = False,
 ):
     require_fund(fund_code)
-    return fund_materials.documents(
-        fund_code,
-        page=page,
-        size=page_size,
-        kind=kind,
-        stock_code=stock_code,
-        keyword=keyword.strip(),
-        latest_only=latest_only,
-    )
+    try:
+        return fund_materials.documents(
+            fund_code,
+            page=page,
+            size=page_size,
+            kind=kind,
+            stock_code=stock_code,
+            keyword=keyword.strip(),
+            latest_only=latest_only,
+        )
+    except (OSError, ValueError, SQLAlchemyError) as exc:
+        raise HTTPException(503, "基金资料暂时无法读取，请稍后重试。") from exc

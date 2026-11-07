@@ -4,6 +4,7 @@
 本模块没有模型导入。所有网络请求先登记，失败不自动重复，成功收据可恢复复用。
 """
 
+# 原始响应统一归档外接盘；历史路径只作为数据库别名，不生成C盘源文件。
 import json
 import re
 import time
@@ -14,10 +15,10 @@ from pathlib import Path
 
 import httpx
 from bs4 import BeautifulSoup
-from pypdf import PdfReader
 
 from app.integrations.fund_report_sections_v2 import parse_text
 from app.integrations.public_fund_reports import PEERS
+from app.services import material_content as _sources
 from app.services.fund_002112_holdings_compatibility import json_subtree
 from app.services.fund_002112_peer_admission import BUSINESS_FIELDS
 from app.services.fund_002112_peer_ready import report_date_check
@@ -117,11 +118,15 @@ def report_pages(report):
         raise ValueError("REPORT_KNOWN_REVISION_UNRESOLVED")
     modified = None
     if path.suffix.lower() == ".pdf":
-        pdf = PdfReader(path)
-        if pdf.is_encrypted or not 1 <= len(pdf.pages) <= 180:
+        pdf = _sources.document_reader(_sources.source_bytes(path))
+        stored_metadata = _sources.repository().page(raw["sha256"], "PDF_METADATA_TEXT_V1", 0)
+        if stored_metadata is None:
+            raise ValueError("REPORT_PDF_METADATA_NOT_STORED")
+        metadata = json.loads(stored_metadata)
+        if metadata["is_encrypted"] or not 1 <= len(pdf.pages) <= 180:
             raise ValueError("REPORT_PDF_LIMIT")
         pages = [p.extract_text() or "" for p in pdf.pages]
-        stamp = str((pdf.metadata or {}).get("/ModDate", ""))
+        stamp = str(metadata["metadata"].get("/ModDate", ""))
         if stamp:
             if not re.match(r"D:\d{8}", stamp):
                 raise ValueError("REPORT_MODIFIED_DATE_UNREADABLE")
@@ -141,7 +146,7 @@ def report_pages(report):
         pages = [data["notice_content"]]
         public = data["notice_date"][:10]
     else:
-        soup = BeautifulSoup(path.read_bytes(), "html.parser")
+        soup = BeautifulSoup(_sources.source_bytes(path), "html.parser")
         pages = [soup.select_one("#sohu_content").get_text("\n", strip=True)]
         title = soup.select_one("h1").get_text(" ", strip=True)
         stamp = soup.select_one(".article_info > .txt .c")
@@ -160,7 +165,7 @@ def review_reports(candidates, funds):
     reviews = {}
     for sha, report in sorted(reports.items()):
         destination = OUT / "reports" / (sha + ".json")
-        if destination.exists():
+        if _sources.location_exists(destination):
             reviews[sha] = read_json(destination)
             continue
         item = {"fund_code": report["fund_code"], "sha256": sha, "report_end": report["report_end"]}
@@ -198,7 +203,7 @@ def review_reports(candidates, funds):
 def database_check(required):
     """一次有界只读查询；不输出连接地址、参数、凭据或原始异常。"""
     path = OUT / "database-review.json"
-    if path.exists():
+    if _sources.location_exists(path):
         return read_json(path)
     from sqlalchemy import bindparam, text
 
@@ -264,11 +269,11 @@ def public_crosscheck(required):
             while total is None or len(collected) < total:
                 key = f"{code}-{page:03d}"
                 receipt_path = folder / (key + "-receipt.json")
-                if receipt_path.exists():
+                if _sources.location_exists(receipt_path):
                     receipt = read_json(receipt_path)
                 else:
                     request_path = folder / (key + "-request.json")
-                    if request_path.exists():
+                    if _sources.location_exists(request_path):
                         raise ValueError("INCOMPLETE_REQUEST_NO_AUTORETRY:" + key)
                     if len(list(folder.glob("*-request.json"))) >= 200:
                         raise ValueError("PUBLIC_REQUEST_BUDGET_EXHAUSTED")
@@ -297,8 +302,7 @@ def public_crosscheck(required):
                         if len(response.content) > 4_000_000:
                             raise ValueError("NAV_RESPONSE_TOO_LARGE")
                         raw_path = folder / (key + "-response.json")
-                        with raw_path.open("xb") as stream:
-                            stream.write(response.content)
+                        _sources.write_source(raw_path, response.content)
                         receipt = {"passed": True, "path": str(raw_path), "sha256": file_hash(raw_path)}
                     except Exception as exc:
                         receipt = {"passed": False, "error_type": type(exc).__name__}

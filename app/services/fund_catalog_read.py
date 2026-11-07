@@ -84,7 +84,7 @@ def _list_funds_by_rating(
     最后批量读取本页净值，避免全目录加载净值或逐只请求。读取失败向上抛出，不能
     用空列表或未筛选的缓存冒充查询成功；此路径不会采集、重新评分或写库。
     """
-    if rating not in {"EXCELLENT", "GOOD", "AVERAGE", "WEAK", "UNRATED", "PENDING"}:
+    if rating not in {"EXCELLENT", "GOOD", "AVERAGE", "WEAK", "SCORED", "UNRATED", "PENDING"}:
         raise ValueError("RATING_FILTER_INVALID")
     offset = (page - 1) * page_size if page is not None else 0
     total_count = 0
@@ -99,8 +99,12 @@ def _list_funds_by_rating(
             for code in codes:
                 item = summaries[code]
                 matches = (
-                    item.status in {"NOT_RATED", "UNSUPPORTED"} if rating == "UNRATED"
-                    else item.status in {"STALE", "WITHDRAWN"} if rating == "PENDING"
+                    item.status in {"NOT_RATED", "UNSUPPORTED"}
+                    if rating == "UNRATED"
+                    else item.status in {"STALE", "WITHDRAWN"}
+                    if rating == "PENDING"
+                    else item.status == "SCORED"
+                    if rating == "SCORED"
                     else item.status == "RATED" and item.grade == rating
                 )
                 if not matches:
@@ -155,9 +159,7 @@ def get_fund_watchlist_detail(fund_code: str) -> InternalFundWatchlistDetail | N
     basic = _to_detail(summaries[0], snapshot.detail, snapshot.profile)
     return InternalFundWatchlistDetail(
         basic=basic,
-        managers_status=(
-            "SYNCED" if "MARKET_DETAIL_MANAGER" in snapshot.succeeded_sync_types else "NOT_SYNCED"
-        ),
+        managers_status=("SYNCED" if "MARKET_DETAIL_MANAGER" in snapshot.succeeded_sync_types else "NOT_SYNCED"),
         managers=tuple(
             InternalFundManager(
                 manager_name=item.assignment.manager_name,
@@ -171,9 +173,7 @@ def get_fund_watchlist_detail(fund_code: str) -> InternalFundWatchlistDetail | N
             for item, performance in zip(snapshot.managers, returns.managers, strict=True)
         ),
         manager_periods=returns.periods,
-        latest_share_status=(
-            "SYNCED" if "MARKET_DETAIL_SHARE" in snapshot.succeeded_sync_types else "NOT_SYNCED"
-        ),
+        latest_share_status=("SYNCED" if "MARKET_DETAIL_SHARE" in snapshot.succeeded_sync_types else "NOT_SYNCED"),
         latest_share=(
             InternalFundShareSnapshot(
                 trade_date=snapshot.latest_share.snapshot.trade_date,
@@ -183,9 +183,7 @@ def get_fund_watchlist_detail(fund_code: str) -> InternalFundWatchlistDetail | N
             if snapshot.latest_share is not None
             else None
         ),
-        dividends_status=(
-            "SYNCED" if "MARKET_DETAIL_DIVIDEND" in snapshot.succeeded_sync_types else "NOT_SYNCED"
-        ),
+        dividends_status=("SYNCED" if "MARKET_DETAIL_DIVIDEND" in snapshot.succeeded_sync_types else "NOT_SYNCED"),
         dividends=tuple(
             InternalFundDividend(
                 ann_date=item.dividend.ann_date,
@@ -243,14 +241,17 @@ def get_fund_share_history(fund_code: str, start_date: date, end_date: date) -> 
         fund = session.get(FundShareClass, fund_code)
         if fund is None:
             return None
-        synced = session.scalar(
-            select(SourceSyncRun.sync_run_id)
-            .where(
-                SourceSyncRun.status == "SUCCEEDED",
-                SourceSyncRun.sync_type == "MARKET_DETAIL_SHARE",
+        synced = (
+            session.scalar(
+                select(SourceSyncRun.sync_run_id)
+                .where(
+                    SourceSyncRun.status == "SUCCEEDED",
+                    SourceSyncRun.sync_type == "MARKET_DETAIL_SHARE",
+                )
+                .limit(1)
             )
-            .limit(1)
-        ) is not None
+            is not None
+        )
         rows = list_fund_share_history(session, fund_code, start_date, end_date) if synced else ()
     return InternalFundShareHistory(
         fund_code=fund_code,

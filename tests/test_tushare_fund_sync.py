@@ -17,6 +17,7 @@ from app.integrations.tushare import (
     TushareIntegrationError,
 )
 from app.services.tushare_fund_sync import (
+    _derive_share_class,
     _normalize_catalog_records,
     _normalize_market_dividend_records,
     _normalize_market_manager_records,
@@ -426,6 +427,23 @@ def test_catalog_normalization_uses_company_full_name_and_conservative_share_cla
     assert records[0].status == "ACTIVE"
     assert records[0].share_class == "C"
     assert records[1].share_class == "UNSPECIFIED"
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("博时标普石油天然气勘探及生产精选行业指数(QDII)-C-CNY", "C"),
+    ("测试QDII-A-USD", "A"),
+    ("测试QDII-C-HKD", "C"),
+    ("测试QDII-c-cny", "C"),
+    ("测试QDII-C-XYZ", "UNSPECIFIED"),
+    ("测试QDII-CNY", "UNSPECIFIED"),
+    ("测试QDII-USD", "UNSPECIFIED"),
+    ("测试养老基金Y", "Y"),
+    ("测试基金C", "C"),
+    ("上证50ETF", "UNSPECIFIED"),
+])
+def test_catalog_share_class_never_uses_currency_suffix_as_class(name, expected):
+    """币种后缀不得生成虚假Y；真正养老Y与普通C保留原识别结果。"""
+    assert _derive_share_class(name) == expected
 
 
 def test_nav_normalization_rejects_conflicting_duplicate_values() -> None:

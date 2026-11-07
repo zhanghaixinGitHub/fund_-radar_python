@@ -1,6 +1,5 @@
 """大成景恒的官网报告补充，调用公开披露页自身的只读分页查询。"""
 
-import hashlib
 import json
 import re
 import time
@@ -9,6 +8,7 @@ from datetime import datetime, timedelta
 from app.services.direction_1d_protocol import digest
 from app.services.fund_exposure_common import ROOT, blob, now, read
 from app.services.fund_materials_store import versioned_save
+from app.services.material_content import content_digest, location_exists, source_bytes
 
 ORIGIN = "https://www.dcfund.com.cn"
 
@@ -34,10 +34,10 @@ def catalog(client):
         }
         url = ORIGIN + "/servlet/json"
         path = STORE / "receipts" / (digest({"dc_catalog": params}) + ".json")
-        old = read(path) if path.exists() else None
+        old = read(path) if location_exists(path) else None
         if old and now() - datetime.fromisoformat(old["checked_at"]) < timedelta(days=30):
-            raw = (ROOT / old["file"]).read_bytes()
-            if hashlib.sha256(raw).hexdigest() != old["sha256"]:
+            raw = source_bytes(ROOT / old["file"])
+            if content_digest(raw) != old["sha256"]:
                 raise ValueError("REPORT_CACHED_BODY_CHANGED")
             receipt = old
         else:

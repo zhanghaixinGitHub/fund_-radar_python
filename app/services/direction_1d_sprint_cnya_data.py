@@ -3,7 +3,7 @@
 历史首发时间未获验证；未来必须取得CNYA自己的原始文件，不能复用FXI文件或伪造及时输入。
 """
 
-import hashlib
+# 原始响应统一归档外接盘；历史路径只作为数据库别名，不生成C盘源文件。
 from datetime import date, datetime, time
 from pathlib import Path
 
@@ -11,6 +11,7 @@ from app.integrations.ishares_sprint_cnya import MAX_BYTES, URL, fetch_cnya
 from app.services import direction_1d_sprint as base
 from app.services import direction_1d_sprint_fxi_gap_data as parser
 from app.services import direction_1d_sprint_fxi_overnight_data as timing
+from app.services import material_content as _sources
 
 SOURCE = "ISHARES_CNYA_LATEST_COMPLETED_US_VALUATION_GAP"
 SLOTS = ("0700", "0730", "0800")
@@ -31,7 +32,7 @@ def history():
         base.read(folder / name)
         for name in ("plan.json", "request.json", "capture.json", "result.json", "history.json")
     )
-    raw = (folder / "response.xls").read_bytes()
+    raw = _sources.source_bytes(folder / "response.xls")
     if (
         plan["url"] != URL
         or request["url"] != URL
@@ -46,13 +47,13 @@ def history():
         or result["history_hash"] != base.digest(snapshot)
         or len(raw) != capture["bytes"]
         or len(raw) > MAX_BYTES
-        or hashlib.sha256(raw).hexdigest() != capture["sha256"]
+        or _sources.content_digest(raw) != capture["sha256"]
         or result["status"] != "FEASIBLE_NOT_TRAINED"
-        or hashlib.sha256((folder / "probe.py").read_bytes()).hexdigest() != plan["script_sha256"]
-        or hashlib.sha256((base.PROJECT / "app/integrations/ishares_sprint_cnya.py").read_bytes()).hexdigest()
+        or _sources.content_digest(_sources.source_bytes(folder / "probe.py")) != plan["script_sha256"]
+        or _sources.content_digest(_sources.source_bytes(base.PROJECT / "app/integrations/ishares_sprint_cnya.py"))
         != plan["client_sha256"]
-        or hashlib.sha256(Path(parser.__file__).read_bytes()).hexdigest() != plan["parser_sha256"]
-        or hashlib.sha256(Path(timing.__file__).read_bytes()).hexdigest() != plan["timing_sha256"]
+        or _sources.content_digest(_sources.source_bytes(Path(parser.__file__))) != plan["parser_sha256"]
+        or _sources.content_digest(_sources.source_bytes(Path(timing.__file__))) != plan["timing_sha256"]
         or datetime.fromisoformat(request["at"]) > datetime.fromisoformat(capture["at"])
     ):
         raise ValueError("CNYA_HISTORICAL_SOURCE_CHANGED")
@@ -87,8 +88,8 @@ def load(target):
         or datetime.fromisoformat(meta["received_at"]) > datetime.fromisoformat(value["at"])
     ):
         raise ValueError("CNYA_LIVE_RESPONSE_CHANGED_OR_LATE")
-    raw = (folder / f"raw/{slot}.xls").read_bytes()
-    if hashlib.sha256(raw).hexdigest() != meta["body_sha256"] or len(raw) != meta["bytes"]:
+    raw = _sources.source_bytes(folder / f"raw/{slot}.xls")
+    if _sources.content_digest(raw) != meta["body_sha256"] or len(raw) != meta["bytes"]:
         raise ValueError("CNYA_LIVE_RAW_CHANGED")
     closed_before(datetime.fromisoformat(meta["received_at"]), value["base"], target)
     points = parse(raw)
@@ -105,14 +106,14 @@ def capture(at):
         raise ValueError("CNYA_LIVE_WINDOW_CLOSED")
     target, base_day = window["target_nav_date"], window["base_nav_date"]
     folder = root() / target
-    if (folder / "input.json").exists():
+    if _sources.location_exists(folder / "input.json"):
         return load(target)
     deadline = datetime.combine(date.fromisoformat(target), time(8, 30), base.ZONE)
     if base.now() >= deadline:
         raise ValueError("CNYA_LIVE_DEADLINE_REACHED")
     slot = "0800" if at.time() >= time(8) else "0730" if at.time() >= time(7, 30) else "0700"
     attempt = folder / f"requests/{slot}.json"
-    if attempt.exists() or len(list((folder / "requests").glob("*.json"))) >= 3:
+    if _sources.location_exists(attempt) or len(list((folder / "requests").glob("*.json"))) >= 3:
         raise ValueError("CNYA_LIVE_SLOT_OR_BUDGET_EXHAUSTED")
     closed_before(base.now(), base_day, target)
     needed = required(base_day, target)
@@ -123,15 +124,14 @@ def capture(at):
         meta = {
             "received_at": base.now().isoformat(),
             "source": SOURCE,
-            "body_sha256": hashlib.sha256(body).hexdigest(),
+            "body_sha256": _sources.content_digest(body),
             "bytes": len(body),
             "headers": headers,
             "request_hash": base.digest(request),
         }
         raw_path = folder / f"raw/{slot}.xls"
         raw_path.parent.mkdir(parents=True, exist_ok=True)
-        with raw_path.open("xb") as file:
-            file.write(body)
+        _sources.write_source(raw_path, body)
         base.save(folder / f"raw/{slot}.json", meta)
         if datetime.fromisoformat(meta["received_at"]) >= deadline:
             raise ValueError("CNYA_LIVE_RESPONSE_LATE")

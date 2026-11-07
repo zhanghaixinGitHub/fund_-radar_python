@@ -55,7 +55,7 @@ def prepare():
             protected[str(p)] = sha(p)
     save(OUT / "protection-before.json", {"files": protected})
     workspace = []
-    for repo in [Path("C:/WebStormProject/workSpace05"), PYTHON, Path("C:/ideaProject/workSpace12")]:
+    for repo in [Path("D:/Project-FullStack/workSpace01/01-vue"), PYTHON, Path("D:/Project-FullStack/workSpace01/02-java")]:
         head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
         status = subprocess.check_output(
             ["git", "-C", str(repo), "status", "--short", "--untracked-files=all"], text=True, encoding="utf-8"

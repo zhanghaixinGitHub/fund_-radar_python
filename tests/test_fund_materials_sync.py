@@ -135,6 +135,7 @@ def test_market_materials_pipeline_keeps_one_click_running_until_holdings_check_
 
     # 旧002112研究采集器不再属于一键同步；这里验证真正共用的市场持仓入口。
     monkeypatch.setattr(MarketFundPreparation, "sync_holdings", holdings_check)
+    monkeypatch.setattr(MarketFundPreparation, "sync_share_classes", lambda *a, **kw: {"status": "SUCCEEDED"})
     monkeypatch.setattr(
         MarketFundPreparation,
         "sync_material",
@@ -362,8 +363,10 @@ def test_cms_index_refresh_does_not_mean_pdf_was_revised():
 
 def test_financial_publication_versions_survive_and_unchanged_recheck_has_no_updates(tmp_path_factory, monkeypatch):
     from app.services import fund_exposure_field_enrichment as module
+    from app.services import fund_materials_store as versions
 
     root = tmp_path_factory.mktemp("finver")
+    monkeypatch.setattr(versions, "PROJECT", root / "project-history")
     monkeypatch.setattr(module, "SUPPLEMENT", root / "supplement")
     monkeypatch.setattr(module, "LIVE", root / "materials-live")
     monkeypatch.setattr(module, "plan", lambda: {"end_date": "20260924"})
@@ -399,7 +402,9 @@ def test_financial_publication_versions_survive_and_unchanged_recheck_has_no_upd
     rows[1][-1] = 125
     result = module.update_financials(["300308.SZ"], "20260925", check_id="corrected")
     assert result["updated"] == 1 and result["created"] == 0
-    archives = (root / "materials-live/supplement/enriched-financials/300308.SZ/versions").glob("*.json")
+    # D盘测试目录更深时，沿用生产中的短路径归档；两种位置均须保留完整旧值。
+    archives = list((root / "materials-live/supplement/enriched-financials/300308.SZ/versions").glob("*.json"))
+    archives += list((root / "project-history/.local-runs/material-version-archives").glob("*.json"))
     assert any(read(path)["value"].get("rows") == baseline for path in archives)
 
 

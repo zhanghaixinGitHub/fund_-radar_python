@@ -18,6 +18,7 @@ from app.services.fund_exposure_common import read, save
 from app.services.fund_information_analysis import narrative
 from app.services.fund_information_contracts import time_context
 from app.services.fund_information_snapshot import prepare
+from app.services.material_content import material_operation
 from app.services.prediction_contract import PredictionFailure, prediction_policy, target_dates
 from app.services.prediction_direction import direction_fields
 
@@ -112,10 +113,7 @@ def _matched_future_sessions(data, documents, sessions, coverage_end, calendar_h
         or own.get("kind") != "PROSPECTUS"
         # 部分基金原文明确写“共同交易日”。下方本已只延续中外交易日完全一致
         # 的区间，识别这个更严格的真实条款不意味着放开任一市场单独休市的日期。
-        or not (
-            listed_clause
-            or re.search(r"估值日为本基金相关的证券(?:[/／、]期货)?交易场所的(?:共同)?交易日", body)
-        )
+        or not (listed_clause or re.search(r"估值日为本基金相关的证券(?:[/／、]期货)?交易场所的(?:共同)?交易日", body))
     ):
         raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "本基金未来估值日条款仍待核验")
     target = date.fromisoformat(data["window"]["target_nav_date"])
@@ -197,6 +195,7 @@ def freeze_packet(directory: Path, code: str, horizon: str, materials_path=None)
     }
 
 
+@material_operation
 def import_review(packet_path: Path, review_path: Path) -> dict:
     """只导入本机完成的资料审阅；发布对象和时间由冻结包与数据库决定。"""
     packet, review = read(packet_path), read(review_path)

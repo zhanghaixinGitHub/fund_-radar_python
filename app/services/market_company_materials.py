@@ -1,6 +1,6 @@
 """基金披露公司资料的共享采集缓存；只调用登记已授权的接口，不扩大002112试点许可。"""
 
-import hashlib
+# 原始响应统一归档外接盘；历史路径只作为数据库别名，不生成C盘源文件。
 import re
 import time
 from copy import deepcopy
@@ -11,13 +11,15 @@ from pathlib import Path
 import httpx
 
 from app.core.config import get_settings
+from app.services import material_content as _sources
 from app.services.direction_1d_protocol import calendar, digest
 from app.services.fund_exposure_common import now, read
 from app.services.fund_exposure_quotes import permission, published_quote_end
 from app.services.fund_materials_store import versioned_save
+from app.services.material_content import content_digest, location_exists, source_bytes
 
 _FIELDS = {
-    "daily": ["ts_code", "trade_date", "close", "pct_chg", "amount"],
+    "daily": ["ts_code", "trade_date", "close", "pre_close", "pct_chg", "amount"],
     "income": ["ts_code", "ann_date", "end_date", "revenue", "n_income"],
     "balancesheet": ["ts_code", "ann_date", "end_date", "total_assets", "total_liab"],
     "cashflow": ["ts_code", "ann_date", "end_date", "n_cashflow_act"],
@@ -52,13 +54,16 @@ class MarketCompanyCollector:
             return self._daily_cache[1:]
         path = self.root / "queries" / (key + ".json")
         current = now()
-        if path.exists():
+        if location_exists(path):
             cached = read(path)
-            if current < datetime.fromisoformat(cached["expires_at"]) and current - datetime.fromisoformat(
-                cached["received_at"]
-            ) < timedelta(hours=24):
-                raw = (self.root / cached["file"]).read_bytes()
-                if hashlib.sha256(raw).hexdigest() != cached["sha256"]:
+            cache_age = timedelta(minutes=30) if api == "daily" else timedelta(hours=24)
+            if (
+                cached.get("rows")
+                and current < datetime.fromisoformat(cached["expires_at"])
+                and current - datetime.fromisoformat(cached["received_at"]) < cache_age
+            ):
+                raw = source_bytes(self.root / cached["file"])
+                if content_digest(raw) != cached["sha256"]:
                     raise ValueError("MARKET_COMPANY_SOURCE_HASH")
                 if api == "daily":
                     self._daily_cache = (key, cached["rows"], cached)
@@ -89,18 +94,17 @@ class MarketCompanyCollector:
         if not isinstance(rows, list) or len(rows) >= 10000 or any(len(r) != len(_FIELDS[api]) for r in rows):
             raise ValueError("MARKET_COMPANY_SOURCE_ROWS")
         rows = [dict(zip(_FIELDS[api], row, strict=True)) for row in rows]
-        sha = hashlib.sha256(raw).hexdigest()
+        sha = content_digest(raw)
         raw_path = self.root / "sources" / (sha + ".json")
         raw_path.parent.mkdir(parents=True, exist_ok=True)
-        if raw_path.exists():
-            if hashlib.sha256(raw_path.read_bytes()).hexdigest() != sha:
+        if location_exists(raw_path):
+            if content_digest(source_bytes(raw_path)) != sha:
                 raise ValueError("MARKET_COMPANY_SOURCE_HASH")
         else:
             try:
-                with raw_path.open("xb") as stream:
-                    stream.write(raw)
+                _sources.write_source(raw_path, raw)
             except FileExistsError:
-                if hashlib.sha256(raw_path.read_bytes()).hexdigest() != sha:
+                if content_digest(source_bytes(raw_path)) != sha:
                     raise ValueError("MARKET_COMPANY_SOURCE_HASH") from None
         receipt = {
             "file": raw_path.relative_to(self.root).as_posix(),
@@ -111,8 +115,11 @@ class MarketCompanyCollector:
             "expires_at": (current + timedelta(days=self.source["retention_days"])).isoformat(),
             "rows": rows,
         }
-        versioned_save(path, receipt)
-        if api == "daily":
+        # 空响应是真实失败尝试，不冻结为24小时成功缓存；后续资料披露后允许补查。
+        versioned_save(self.root / "query-attempts" / (digest(receipt) + ".json"), receipt)
+        if rows:
+            versioned_save(path, receipt)
+        if api == "daily" and rows:
             self._daily_cache = (key, rows, receipt)
         return rows, receipt
 
@@ -120,7 +127,15 @@ class MarketCompanyCollector:
         """行情和财务分别报告覆盖；未登记的财务权限不能被002112历史探针结果替代。"""
         if code in self._companies:
             return deepcopy(self._companies[code])
-        value = {"stockCode": code, "quote": None, "financials": {}, "sources": [], "gaps": []}
+        value = {
+            "stockCode": code,
+            "quote": None,
+            "financials": {},
+            "sources": [],
+            "gaps": [],
+            "attempts": [],
+            "errors": [],
+        }
         if not re.fullmatch(r"[0-9]{6}\.(SH|SZ|BJ)", code):
             value["gaps"].append("该市场尚无已登记的公司行情与财务采集适配")
             return value
@@ -132,15 +147,25 @@ class MarketCompanyCollector:
             try:
                 params = {"trade_date": end.strftime("%Y%m%d")} if api == "daily" else {"ts_code": code}
                 rows, receipt = self.query(api, params)
+                value["attempts"].append(
+                    {
+                        "api": api,
+                        "rows": len(rows),
+                        "receipt": {
+                            key: receipt[key]
+                            for key in ("file", "sha256", "api", "params", "received_at", "expires_at")
+                        },
+                    }
+                )
                 own = [row for row in rows if row["ts_code"] == code]
                 if api == "daily":
                     if len(own) != 1 or own[0]["trade_date"] != end.strftime("%Y%m%d"):
                         raise ValueError("MARKET_COMPANY_QUOTE_MISSING")
-                    for field in ("close", "pct_chg", "amount"):
+                    for field in ("close", "pre_close", "pct_chg", "amount"):
                         number = Decimal(str(own[0][field]))
                         if (
                             not number.is_finite()
-                            or (field == "close" and number <= 0)
+                            or (field in {"close", "pre_close"} and number <= 0)
                             or (field == "amount" and number < 0)
                         ):
                             raise ValueError("MARKET_COMPANY_QUOTE_VALUE")
@@ -160,6 +185,13 @@ class MarketCompanyCollector:
                 value["sources"].append({k: receipt[k] for k in ("file", "sha256", "api", "received_at", "expires_at")})
             except (ValueError, OSError, httpx.HTTPError, KeyError, InvalidOperation) as error:
                 value["gaps"].append(f"{api}：{type(error).__name__}")
+                value["errors"].append(
+                    {
+                        "api": api,
+                        "type": type(error).__name__,
+                        "reason": str(error) if isinstance(error, ValueError) else type(error).__name__,
+                    }
+                )
         versioned_save(self.root / "companies" / (code + ".json"), value)
         self._companies[code] = deepcopy(value)
         return value

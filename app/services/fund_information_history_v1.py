@@ -4,7 +4,7 @@
 登记来源与标题范围内分页齐全；正文与语义仍须分别核验。
 """
 
-import hashlib
+# 原始响应统一归档外接盘；历史路径只作为数据库别名，不生成C盘源文件。
 import json
 import re
 import time
@@ -16,6 +16,8 @@ from urllib.parse import urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from app.services import material_content as _sources
+
 ZONE = timezone(timedelta(hours=8))
 ROOT = Path(__file__).resolve().parents[2] / ".local-runs/fund-exposure-002112"
 OLD = ROOT / "information-research/20260928-v1"
@@ -24,16 +26,15 @@ QUERY = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
 
 
 def sha(path):
-    with Path(path).open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+    return _sources.content_digest(_sources.source_bytes(path))
 
 
 def digest(value):
-    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    return _sources.content_digest(json.dumps(value, ensure_ascii=False, sort_keys=True).encode())
 
 
 def read(path):
-    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    value = json.loads(_sources.source_text(path, encoding="utf-8"))
     # 旧来源使用 payload 封装；完整性通过外层文件哈希单独固定。
     return value["payload"] if isinstance(value, dict) and set(value) == {"hash", "payload"} else value
 
@@ -42,7 +43,7 @@ def save(path, value):
     """排他保存，恢复时只复用相同内容；绝不覆盖另一版证据。"""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
+    if _sources.location_exists(path):
         if read(path) != value:
             raise ValueError("IMMUTABLE_ARTIFACT_CONFLICT:" + path.name)
         return
@@ -170,14 +171,14 @@ class BoundedPublicReader:
         key = digest({"url": url, "params": params})
         target = self.directory / "requests" / (key + ".json")
         receipt = self.directory / "receipts" / (key + ".json")
-        if receipt.exists():
+        if _sources.location_exists(receipt):
             saved = read(receipt)
             if not saved["ok"]:
                 raise ValueError("PREVIOUS_PUBLIC_REQUEST_FAILED:" + saved["reason"])
             if sha(saved["path"]) != saved["sha256"]:
                 raise ValueError("PUBLIC_RAW_CHANGED")
-            return Path(saved["path"]).read_bytes(), saved
-        if target.exists():
+            return _sources.source_bytes(Path(saved["path"])), saved
+        if _sources.location_exists(target):
             raise ValueError("INTERRUPTED_PUBLIC_REQUEST_NO_AUTORETRY")
         consumed = sum(read(p)["group"] == group for p in (self.directory / "requests").glob("*.json"))
         if consumed >= self.limits[group]:
@@ -200,8 +201,7 @@ class BoundedPublicReader:
                         raise ValueError("PUBLIC_RESPONSE_SIZE_LIMIT")
             blob = self.directory / "raw" / key
             blob.parent.mkdir(parents=True, exist_ok=True)
-            with blob.open("xb") as stream:
-                stream.write(raw)
+            _sources.write_source(blob, raw)
             result = {
                 "ok": True,
                 "url": url,

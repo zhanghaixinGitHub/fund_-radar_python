@@ -4,13 +4,14 @@
 用作更早考察日的计分输入，也不声称已遍历发行人的全部目录。
 """
 
-import hashlib
 import json
 import re
 import unicodedata
 from datetime import date
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
+
+from app.services.material_content import content_digest, source_bytes, source_exists, source_size
 
 
 def publication_proof_refs(refs: list[dict]) -> list[dict]:
@@ -42,10 +43,10 @@ def publication_proof_refs(refs: list[dict]) -> list[dict]:
 
 def _read_proof(ref: dict, root: Path) -> bytes:
     path = (root / ref["file"]).resolve()
-    if not path.is_relative_to(root.resolve() / "sources") or not path.is_file() or path.stat().st_size > 20_000_000:
+    if not path.is_relative_to(root.resolve() / "sources") or not source_exists(path) or source_size(path) > 20_000_000:
         raise ValueError("PUBLICATION_EVIDENCE_PATH_SIZE")
-    raw = path.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != ref["sha256"]:
+    raw = source_bytes(path)
+    if content_digest(raw) != ref["sha256"]:
         raise ValueError("PUBLICATION_EVIDENCE_HASH")
     return raw
 
@@ -70,17 +71,23 @@ def verify_prospectus_publication(ref: dict, root: Path, code: str, as_of: date)
     notice = evidence["notice_index"]
     notice_origin = urlsplit(notice["url"])
     if any(
-        source.scheme != "https" or source.hostname != "www.fsfund.com" or source.port not in (None, 443)
-        or source.username or source.password
-        or source.query or source.fragment
+        source.scheme != "https"
+        or source.hostname != "www.fsfund.com"
+        or source.port not in (None, 443)
+        or source.username
+        or source.password
+        or source.query
+        or source.fragment
         for source in (origin, notice_origin)
     ):
         raise ValueError("PROSPECTUS_PUBLICATION_ISSUER_UNSUPPORTED")
     catalog_raw = _read_proof(evidence["catalog"], root)
     catalog = json.loads(catalog_raw)
     if (
-        not isinstance(catalog, dict) or catalog.get("code") != "0000"
-        or not isinstance(catalog.get("data"), list) or len(catalog["data"]) > 100
+        not isinstance(catalog, dict)
+        or catalog.get("code") != "0000"
+        or not isinstance(catalog.get("data"), list)
+        or len(catalog["data"]) > 100
         or any(not isinstance(row, dict) for row in catalog["data"])
     ):
         raise ValueError("PROSPECTUS_PUBLICATION_CATALOG_SCHEMA")
@@ -94,14 +101,20 @@ def verify_prospectus_publication(ref: dict, root: Path, code: str, as_of: date)
     actual_date = date(int(published[:4]), int(published[4:6]), int(published[6:]))
     title = ref.get("title", "")
     if (
-        str(actual_date) != ref.get("published_on") or actual_date > as_of
-        or _clean(row.get("title", "")) != _clean(title) or "招募说明书" not in title
+        str(actual_date) != ref.get("published_on")
+        or actual_date > as_of
+        or _clean(row.get("title", "")) != _clean(title)
+        or "招募说明书" not in title
         or urljoin("https://www.fsfund.com/", row.get("articleFile", "")) != ref["url"]
     ):
         raise ValueError("PROSPECTUS_PUBLICATION_ROW_CONFLICT")
     # 已观察到更晚的适用版本时不得悄悄退回旧书；未来公开版本不提前使用。
-    newer = [r for r in catalog["data"] if _clean(r.get("title", "")) == _clean(title)
-             and published < str(r.get("publishDate", "")) <= as_of.strftime("%Y%m%d")]
+    newer = [
+        r
+        for r in catalog["data"]
+        if _clean(r.get("title", "")) == _clean(title)
+        and published < str(r.get("publishDate", "")) <= as_of.strftime("%Y%m%d")
+    ]
     if newer:
         raise ValueError("PROSPECTUS_NEWER_LISTED_VERSION_AVAILABLE")
     raw = _read_proof(notice, root)
@@ -115,14 +128,15 @@ def verify_prospectus_publication(ref: dict, root: Path, code: str, as_of: date)
     qualified = []
     for match in re.finditer(re.escape(_clean(title)), body):
         # 必须是本条标题紧邻的渠道和第一个日期，不能跨到下一条公告挑日期。
-        suffix = body[match.end():match.end() + 90]
+        suffix = body[match.end() : match.end() + 90]
         item_date = re.match(r"基金管理人网站(?:[,，、][\u4e00-\u9fff]+){0,5}(20\d{2}-\d{2}-\d{2})", suffix)
         if item_date and item_date[1] == str(actual_date):
-            qualified.append(body[max(0, match.start() - 15):match.end() + item_date.end()])
+            qualified.append(body[max(0, match.start() - 15) : match.end() + item_date.end()])
     if not qualified:
         raise ValueError("PROSPECTUS_PUBLICATION_NOTICE_ROW_MISSING")
     return {
-        "published_on": str(actual_date), "catalog_article_id": evidence["article_id"],
+        "published_on": str(actual_date),
+        "catalog_article_id": evidence["article_id"],
         "source_hashes": [evidence["catalog"]["sha256"], notice["sha256"]],
         "notice_excerpt": qualified[-1],
         "scope": "RETROSPECTIVE_PUBLICATION_METADATA_ONLY_NOT_ECONOMIC_INPUT_OR_COMPLETE_DIRECTORY_PROOF",

@@ -1,6 +1,5 @@
 """同类比较专用的已核实分类快照；与评级、预测和个人账户资料隔离。"""
 
-import hashlib
 import logging
 from datetime import date, datetime
 from functools import lru_cache
@@ -102,9 +101,11 @@ def _verified_snapshot(path: str, modified_ns: int, source_root: str) -> PeerSna
             if ref.sha256 in verified:
                 continue
             original = (root / ref.file).resolve()
-            if not original.is_relative_to(root / "sources") or original.stat().st_size > 30_000_000:
+            from app.services.material_content import content_digest, source_bytes, source_size
+
+            if not original.is_relative_to(root / "sources") or source_size(original) > 30_000_000:
                 raise ValueError("peer original path or size invalid")
-            if hashlib.sha256(original.read_bytes()).hexdigest() != ref.sha256:
+            if content_digest(source_bytes(original)) != ref.sha256:
                 raise ValueError("peer original hash mismatch")
             verified.add(ref.sha256)
     return packet

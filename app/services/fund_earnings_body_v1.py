@@ -4,6 +4,7 @@
 代码均受哈希保护；本模块不导入模型、不读取标签、不改变目录覆盖率。
 """
 
+# 原件路径只是数据库别名；业务读取不再打开C/D盘源文件。
 import json
 from collections import Counter
 from datetime import datetime
@@ -11,6 +12,7 @@ from pathlib import Path
 
 import pypdfium2 as pdfium
 
+from app.services import material_content as _source_store
 from app.services.fund_earnings_batch_v4 import (
     PYTHON,
     EarningsBatch,
@@ -37,7 +39,7 @@ def reconcile_pending(previous):
     expected = []
     for position, row in enumerate(original, 1):
         path = previous / "documents" / (row["announcementId"] + ".json")
-        if path.exists():
+        if _source_store.location_exists(path):
             document = read(path)
             if document["row"] != row:
                 raise ValueError("PREVIOUS_DOCUMENT_METADATA_CHANGED")
@@ -63,7 +65,7 @@ def body_purpose(row):
 
 class BodyContinuation(EarningsBatch):
     def prepare(self, previous_name):
-        if (self.out / "plan.json").exists():
+        if _source_store.location_exists(self.out / "plan.json"):
             plan = self.check_plan()
             if Path(plan["previous_run"]).name != previous_name:
                 raise ValueError("RESUME_PREDECESSOR_CHANGED")
@@ -92,7 +94,7 @@ class BodyContinuation(EarningsBatch):
         for path, expected in protected.items():
             if sha(path) != expected:
                 raise ValueError("PROTECTED_EVIDENCE_CHANGED:" + path)
-        protected.update({str(p): sha(p) for p in previous.rglob("*") if p.is_file()})
+        protected.update({str(p): sha(p) for p in previous.rglob("*") if _source_store.source_exists(p)})
         ledger = list((OLD / "fit-ledger").glob("*.json"))
         if len(ledger) != 12 or not all(read(p)["budget_consumed"] for p in ledger):
             raise ValueError("FIT_LEDGER_NEEDS_RECONCILIATION")
@@ -163,7 +165,7 @@ class BodyContinuation(EarningsBatch):
 
     def collect(self):
         plan = self.check_plan()
-        if (self.out / "collection-stop.json").exists():
+        if _source_store.location_exists(self.out / "collection-stop.json"):
             raise ValueError("COLLECTION_ALREADY_STOPPED_USE_AUDIT")
         for path, expected in read(self.out / "protection-before.json")["files"].items():
             if sha(path) != expected:
@@ -173,7 +175,7 @@ class BodyContinuation(EarningsBatch):
             for item in plan["items"]:
                 row = item["row"]
                 target = self.out / "documents" / (row["announcementId"] + ".json")
-                if target.exists():
+                if _source_store.location_exists(target):
                     continue
                 reason = body_purpose(row)
                 if reason:
@@ -188,7 +190,7 @@ class BodyContinuation(EarningsBatch):
                             receipt = cache[0]
                             if sha(receipt["path"]) != receipt["sha256"]:
                                 raise ValueError("CACHED_SOURCE_CHANGED")
-                            raw = Path(receipt["path"]).read_bytes()
+                            raw = _source_store.source_bytes(Path(receipt["path"]))
                         else:
                             raw, receipt = reader.fetch(url, group="body", maximum_bytes=plan["maximum_pdf_bytes"])
                         if len(raw) > plan["maximum_pdf_bytes"]:
@@ -265,7 +267,7 @@ class BodyContinuation(EarningsBatch):
                 or sha(receipt["path"]) != receipt["sha256"]
             ):
                 raise ValueError("SOURCE_IDENTITY_OR_BYTES_CHANGED")
-            pages, metadata = extract_pdf(Path(receipt["path"]).read_bytes(), plan["maximum_pdf_pages"])
+            pages, metadata = extract_pdf(_source_store.source_bytes(Path(receipt["path"])), plan["maximum_pdf_pages"])
             proof = issuer_identity(row, pages)
             if (
                 [normalize(p) for p in pages] != [normalize(p) for p in d["pages"]]

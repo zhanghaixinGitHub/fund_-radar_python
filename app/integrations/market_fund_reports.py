@@ -1,6 +1,5 @@
 """基金市场公开报告目录与原文；仅正常公开读取，缓存正文、留存失败和来源版本。"""
 
-import hashlib
 import json
 import re
 import time
@@ -13,6 +12,7 @@ from app.integrations.dbfund_reports import bounded_get
 from app.integrations.public_fund_reports import BODY_URL, CATALOG_URL, report_period
 from app.services.fund_exposure_common import _publish, now
 from app.services.fund_materials_store import versioned_save
+from app.services.material_content import content_digest, location_exists, source_bytes, source_size
 
 TABLE_URL = "https://fundf10.eastmoney.com/FundArchivesDatas.aspx"
 
@@ -54,11 +54,11 @@ class MarketReportClient:
             raise
 
     def _archive(self, raw: bytes, suffix: str, url: str, params: dict) -> dict:
-        sha = hashlib.sha256(raw).hexdigest()
+        sha = content_digest(raw)
         p = self.root / "sources" / (sha + suffix)
         p.parent.mkdir(parents=True, exist_ok=True)
-        if p.exists():
-            if hashlib.sha256(p.read_bytes()).hexdigest() != sha:
+        if location_exists(p):
+            if content_digest(source_bytes(p)) != sha:
                 raise ValueError("MARKET_REPORT_ARCHIVE_HASH")
         else:
             # 来源正文不可覆盖；并发入口由业务锁串行执行。
@@ -123,7 +123,7 @@ class MarketReportClient:
         if previous and previous.get("source"):
             ref = previous["source"]
             p = (self.root / ref["file"]).resolve()
-            if not p.is_relative_to(self.root.resolve()) or hashlib.sha256(p.read_bytes()).hexdigest() != ref["sha256"]:
+            if not p.is_relative_to(self.root.resolve()) or content_digest(source_bytes(p)) != ref["sha256"]:
                 raise ValueError("MARKET_REPORT_CACHED_HASH")
             return ref
         params = {"client_source": "web_fund", "show_all": 1, "art_code": entry["id"]}
@@ -158,10 +158,15 @@ class MarketReportClient:
 
 
 def read_source(root: Path, reference: dict) -> bytes:
+    """按受控来源引用读库，原件迁走后继续校验库内长度和原始来源摘要。
+
+    路径必须属于调用者的资料根目录；20MB限制先查库内原始长度，不能先stat已迁走的
+    原文件。独立临时目录的显式解析仍沿用统一读取器的实体文件兼容行为。
+    """
     path = (root / reference["file"]).resolve()
-    if not path.is_relative_to(root.resolve()) or path.stat().st_size > 20_000_000:
+    if not path.is_relative_to(root.resolve()) or source_size(path) > 20_000_000:
         raise ValueError("MARKET_REPORT_SOURCE_PATH")
-    raw = path.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != reference["sha256"]:
+    raw = source_bytes(path)
+    if content_digest(raw) != reference["sha256"]:
         raise ValueError("MARKET_REPORT_SOURCE_HASH")
     return raw

@@ -1,7 +1,5 @@
 """德邦官网公开报告目录和 PDF 持仓解析，限定单基金与正常公开读取。"""
 
-import hashlib
-import io
 import re
 import time
 from datetime import date, datetime, timedelta
@@ -11,11 +9,12 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
-from pypdf import PdfReader
 
 from app.services.direction_1d_protocol import ZONE, digest
 from app.services.fund_exposure_common import ROOT, blob, initialize, now, read, save
 from app.services.fund_materials_store import versioned_save
+from app.services.material_content import content_digest, location_exists, source_bytes
+from app.services.material_content import document_reader as PdfReader
 
 ORIGIN = "https://www.dbfund.com.cn"
 PRODUCT = ORIGIN + "/products/hunhe/002112/index.html"
@@ -355,7 +354,7 @@ def acquire(*, incremental=False, extended_history=False, progress=lambda *args:
     directory = ROOT / "readiness-extended" if extended_history else ROOT
     parser_version = EXTENDED_PARSER_VERSION if extended_history else PARSER_VERSION
     results, errors, recovered = [], [], []
-    previous = read(directory / "report-result.json") if (directory / "report-result.json").exists() else {}
+    previous = read(directory / "report-result.json") if location_exists(directory / "report-result.json") else {}
     headers = {"User-Agent": "Mozilla/5.0", "Referer": PRODUCT}
     with httpx.Client(timeout=httpx.Timeout(25, connect=5), headers=headers, follow_redirects=False) as client:
         entries = catalog(client, extended_history=True) if extended_history else catalog(client)
@@ -368,14 +367,14 @@ def acquire(*, incremental=False, extended_history=False, progress=lambda *args:
             key = digest(entry["url"])
             receipt = directory / "report-receipts" / f"{key}.json"
             receipt_source = receipt
-            if extended_history and not receipt.exists():
+            if extended_history and not location_exists(receipt):
                 receipt_source = ROOT / "report-receipts" / f"{key}.json"
             catalog_key = {k: v for k, v in entry.items() if k != "catalog_received_at"}
             try:
-                if receipt_source.exists():
+                if location_exists(receipt_source):
                     saved = read(receipt_source)
-                    raw = (ROOT / saved["file"]).read_bytes()
-                    if hashlib.sha256(raw).hexdigest() != saved["sha256"]:
+                    raw = source_bytes(ROOT / saved["file"])
+                    if content_digest(raw) != saved["sha256"]:
                         raise ValueError("REPORT_CACHED_PDF_CHANGED")
                     last_check = datetime.fromisoformat(saved.get("checked_at", saved["received_at"]))
                     changed = saved.get("catalog_hash") and saved["catalog_hash"] != digest(catalog_key)
@@ -386,7 +385,7 @@ def acquire(*, incremental=False, extended_history=False, progress=lambda *args:
                             raise ValueError("REPORT_RESPONSE_NOT_PDF")
                         sha, name = blob(fresh, "pdf")
                         archive = directory / "report-receipt-versions" / (digest(saved) + ".json")
-                        if not archive.exists():
+                        if not location_exists(archive):
                             save(archive, saved)
                         received = saved["received_at"] if sha == saved["sha256"] else now().isoformat()
                         revised = saved.get("revised_after_receipt", False) or sha != saved["sha256"]
@@ -411,9 +410,9 @@ def acquire(*, incremental=False, extended_history=False, progress=lambda *args:
                     saved = {"url": entry["url"], "sha256": sha, "file": name, "received_at": now().isoformat()}
                     save(receipt, saved)
                     time.sleep(0.3)
-                pdf = PdfReader(io.BytesIO(raw))
+                pdf = PdfReader(raw)
                 path = directory / "reports" / f"{saved['sha256']}-{parser_version}.json"
-                if path.exists():
+                if location_exists(path):
                     results.append(read(path))
                     continue
                 if len(pdf.pages) > 180:
@@ -455,7 +454,7 @@ def acquire(*, incremental=False, extended_history=False, progress=lambda *args:
                         try:
                             parsed = recover_report(client, entry, failure)
                             path = directory / "reports" / f"{parsed['raw']['sha256']}-{parser_version}.json"
-                            if not path.exists():
+                            if not location_exists(path):
                                 save(path, parsed)
                             results.append(read(path))
                             recovered.append({"primary_failure": failure, "receipt": parsed["raw"]})

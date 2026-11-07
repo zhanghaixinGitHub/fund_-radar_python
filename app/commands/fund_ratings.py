@@ -29,6 +29,28 @@ def main():
             "prepare-public",
             "activate-public",
             "publish-reviewed",
+            "register-update",
+            "prepare-r5",
+            "prepare-management",
+            "prepare-direct-index",
+            "prepare-passive-holdings",
+            "prepare-passive-index",
+            "prepare-passive-components",
+            "prepare-passive-execution",
+            "prepare-passive-performance",
+            "prepare-stability",
+            "prepare-active-execution",
+            "prepare-gold-components",
+            "prepare-enhanced-performance",
+            "prepare-bosera-performance",
+            "prepare-active-performance",
+            "prepare-active-broad-components",
+            "prepare-bd500-performance",
+            "prepare-mixed-performance",
+            "prepare-ca005187-execution",
+            "prepare-health-stock-liquidity-interval",
+            "prepare-gf-battery-liquidity-interval",
+            "prepare-fees",
         ),
     )
     parser.add_argument("--as-of", type=date.fromisoformat)
@@ -81,7 +103,91 @@ def main():
         result = update_ratings(args.fund_code, as_of=args.as_of, event_review=args.event_review)
     else:
         with Session(get_engine()) as session, session.begin():
-            if args.action == "publish-reviewed":
+            if args.action in {"prepare-r5", "prepare-management", "prepare-direct-index", "prepare-passive-holdings",
+                               "prepare-passive-index", "prepare-passive-components", "prepare-passive-execution",
+                               "prepare-fees", "prepare-passive-performance", "prepare-stability",
+                               "prepare-active-execution",
+                               "prepare-gold-components", "prepare-enhanced-performance", "prepare-bosera-performance",
+                               "prepare-active-performance", "prepare-active-broad-components", "prepare-bd500-performance",
+                               "prepare-mixed-performance", "prepare-ca005187-execution",
+                               "prepare-health-stock-liquidity-interval", "prepare-gf-battery-liquidity-interval"}:
+                if not args.file or not args.output:
+                    parser.error("编译新评分需要真实原始观察 --file 和清单 --output；仅编译，不发布")
+                from app.services.fund_rating_pipeline import (
+                    prepare_gf_battery_liquidity_interval,
+                    prepare_health_stock_liquidity_interval,
+                )
+                from app.services.fund_rating_pipeline_prepare import (
+                    prepare_active_broad_components,
+                    prepare_active_execution,
+                    prepare_active_performance,
+                    prepare_bd500_performance,
+                    prepare_bosera_performance,
+                    prepare_ca005187_execution,
+                    prepare_complete,
+                    prepare_direct_index,
+                    prepare_enhanced_performance,
+                    prepare_fees,
+                    prepare_gold_components,
+                    prepare_management,
+                    prepare_mixed_performance,
+                    prepare_passive_components,
+                    prepare_passive_execution,
+                    prepare_passive_holdings,
+                    prepare_passive_performance,
+                    prepare_stability,
+                )
+                from app.services.fund_rating_reviewed_snapshot import archive_root
+
+                request = json.loads(args.file.read_text(encoding="utf-8"))
+                if args.action == "prepare-r5":
+                    result = prepare_complete(session, request["packet"], request["anchors"], root=archive_root())
+                elif args.action in {"prepare-direct-index", "prepare-passive-index"}:
+                    result = prepare_direct_index(session, request["packet"], request["anchors"], root=archive_root())
+                elif args.action == "prepare-passive-holdings":
+                    result = prepare_passive_holdings(session, request, root=archive_root())
+                elif args.action == "prepare-passive-components":
+                    result = prepare_passive_components(session, request, root=archive_root())
+                elif args.action == "prepare-passive-execution":
+                    result = prepare_passive_execution(session, request, root=archive_root())
+                elif args.action == "prepare-passive-performance":
+                    result = prepare_passive_performance(session, request, root=archive_root())
+                elif args.action == "prepare-stability":
+                    result = prepare_stability(session, request, root=archive_root())
+                elif args.action == "prepare-active-execution":
+                    result = prepare_active_execution(session, request, root=archive_root())
+                elif args.action == "prepare-gold-components":
+                    result = prepare_gold_components(session, request, root=archive_root())
+                elif args.action == "prepare-enhanced-performance":
+                    result = prepare_enhanced_performance(session, request, root=archive_root())
+                elif args.action == "prepare-bosera-performance":
+                    result = prepare_bosera_performance(session, request, root=archive_root())
+                elif args.action == "prepare-active-performance":
+                    result = prepare_active_performance(session, request, root=archive_root())
+                elif args.action == "prepare-active-broad-components":
+                    result = prepare_active_broad_components(session, request, root=archive_root())
+                elif args.action == "prepare-bd500-performance":
+                    result = prepare_bd500_performance(session, request, root=archive_root())
+                elif args.action == "prepare-mixed-performance":
+                    result = prepare_mixed_performance(session, request, root=archive_root())
+                elif args.action == "prepare-ca005187-execution":
+                    result = prepare_ca005187_execution(session, request, root=archive_root())
+                elif args.action == "prepare-health-stock-liquidity-interval":
+                    result = prepare_health_stock_liquidity_interval(session, request, root=archive_root())
+                elif args.action == "prepare-gf-battery-liquidity-interval":
+                    result = prepare_gf_battery_liquidity_interval(session, request, root=archive_root())
+                elif args.action == "prepare-fees":
+                    result = prepare_fees(session, request, root=archive_root())
+                else:
+                    result = prepare_management(session, request, root=archive_root())
+            elif args.action == "register-update":
+                if not args.file:
+                    parser.error("register-update 需要已核真实资料清单 --file；仅登记，不发布")
+                from app.services.fund_rating_pipeline import register_update
+                from app.services.fund_rating_reviewed_snapshot import archive_root
+
+                result = register_update(archive_root(), json.loads(args.file.read_text(encoding="utf-8")))
+            elif args.action == "publish-reviewed":
                 if not args.file or not args.reason:
                     parser.error("publish-reviewed 需要已归档研究清单 --file 和明确 --reason")
                 from app.services.fund_rating_reviewed_snapshot import publish_reviewed

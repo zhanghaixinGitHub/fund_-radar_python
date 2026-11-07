@@ -1,0 +1,155 @@
+
+  5.4 报告期末按公允价值占基金资产净值比例大小排序的前十名股票及存托凭证投资明细
+
+                                              所
+
+                                                  所属                        占基金
+                                              在                    公允价值
+
+        公司名称（英  公司名称（中  证券      国家    数量                资产净
+ 序号                                        证                    （人民币
+
+            文）          文）      代码      （地  （股）                值比例
+                                              券                      元）
+
+                                                  区)                          （％）
+                                              市
+
+
+                                          场
+
+                                          纽
+
+                                          约
+
+    PBF ENERGY  PBF ENERGY  PBF  证
+
+1  INC-CLASS A  INC-CLASS A  US  券  美国  14,086.00  7,301,242.81    2.65
+                                          交
+
+                                          易
+
+                                          所
+
+                                          纽
+
+                                          约
+
+      VALERO      VALERO    VLO  证
+
+2    ENERGY      ENERGY    US  券  美国  2,771.00  7,233,950.74    2.63
+      CORP          CORP            交
+
+                                          易
+
+                                          所
+
+                                          纽
+
+                                          约
+
+    HF SINCLAIR  HF SINCLAIR  DINO  证
+
+3      CORP          CORP      US  券  美国  9,966.00  7,203,533.75    2.62
+                                          交
+
+                                          易
+
+                                          所
+
+                                          纽
+
+                                          约
+
+  EXXONMOBIL  EXXONMOBIL  XOM  证
+
+4    HOLDINGS    HOLDINGS    US  券  美国  6,562.00  7,192,854.44    2.62
+      CORP          CORP            交
+
+                                          易
+
+                                          所
+
+                                          纽
+
+                                          约
+
+    MARATHON    MARATHON  MPC  证
+
+5  PETROLEUM  PETROLEUM    US  券  美国  2,698.00  7,185,295.37    2.61
+      CORP          CORP            交
+
+                                          易
+
+                                          所
+
+                                          纽
+
+                                          约
+
+    PAR PACIFIC  PAR PACIFIC  PARR  证
+
+6    HOLDINGS    HOLDINGS    US  券  美国  12,964.00  7,126,555.33    2.59
+        INC            INC              交
+
+                                          易
+
+                                          所
+
+                                          纽
+
+                                          约
+
+                                  PSX  证
+
+7  PHILLIPS 66    PHILLIPS 66    US  券  美国  4,133.00  7,106,852.13    2.58
+                                          交
+
+                                          易
+
+                                          所
+
+8  MURPHY OIL  MURPHY OIL  MUR  纽  美国  28,021.00  6,986,571.26    2.54
+
+
+          CORP          CORP      US  约
+
+                                              证
+
+                                              券
+
+                                              交
+
+                                              易
+
+                                              所
+
+                                              纽
+
+                                              约
+
+        CHEVRON    CHEVRON    CVX  证
+
+  9      CORP          CORP      US  券  美国  5,041.00  6,933,264.22    2.52
+                                              交
+
+                                              易
+
+                                              所
+
+                                              纽
+
+                                              约
+
+        DELEK US    DELEK US    DK  证
+
+  10  HOLDINGS    HOLDINGS    US  券  美国  14,316.00  6,881,473.39    2.50
+            INC            INC              交
+
+                                              易
+
+                                              所
+
+  注：所用证券代码采用当地市场代码。
+
+  5.5 报告期末按债券信用等级分类的债券投资组合

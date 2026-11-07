@@ -7,6 +7,7 @@
 
 import json
 import re
+import unicodedata
 from datetime import date
 from decimal import localcontext
 from urllib.parse import urlsplit
@@ -93,7 +94,9 @@ def _gross_asset_book(pages: list[str]) -> dict:
     }
     if any(assets.get(key, 0) != 0 for key in unsupported):
         raise ValueError("QUALITY_STRUCTURE_OTHER_ASSETS_NOT_LOOKED_THROUGH")
-    if "本报告期末本基金未持有衍生金融资产/负债" not in compact(text):
+    # 报告也会将主语写在报告期之前，均是明确当期无衍生资产及负债；
+    # 一般投资政策或只披露资产为零仍不能替代负债范围。
+    if not re.search(r"(?:本报告期末本基金|本基金本报告期末)未持有衍生金融资产/负债", compact(text)):
         raise ValueError("QUALITY_STRUCTURE_DERIVATIVE_LIABILITIES_UNVERIFIED")
     bond_section = section(text, r"(?m)^7\.5\s+期末按债券品种", r"(?m)^7\.6\s")
     rows = {}
@@ -115,7 +118,9 @@ def _gross_asset_book(pages: list[str]) -> dict:
         "其他",
         "合计",
     ]
-    if set(rows) != set(range(1, 11)) or [rows[i][0] for i in range(1, 11)] != labels:
+    if (set(rows) != set(range(1, 11))
+            or [unicodedata.normalize("NFKC", rows[i][0]) for i in range(1, 11)]
+            != [unicodedata.normalize("NFKC", label) for label in labels]):
         raise ValueError("QUALITY_STRUCTURE_BOND_CATEGORIES_INCOMPLETE")
     bond_total = decimal(b["bond_amount"])
     bond_proof = identify_nonnegative_parts(str(bond_total), {

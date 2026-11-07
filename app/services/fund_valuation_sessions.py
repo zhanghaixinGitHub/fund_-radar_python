@@ -46,6 +46,112 @@ def hk_closed_dates(document: dict, year: int) -> set[date]:
     return closed if len(closed) >= 15 else set()
 
 
+def verified_jp_holiday_reference(material: dict, documents: dict, code: str, quote: dict, window: dict) -> dict | None:
+    """核实日本休市日的最近收盘参考，保留真实行情日而不推算基金估值。
+
+    仅用于人民币QDII、基准日JPX休市且目标日正常交易的同年窗口。必须同时
+    绑定本份额报告与估值条款、完整官方日历、当日JPY中间价、前一有效交易日
+    的完整收盘来源；证券停牌、较早价格及目标休市均不能通过此分支。
+    """
+    try:
+        e = material.get("calendar_evidence") or {}
+        base, target = [date.fromisoformat(window[k]) for k in ("base_nav_date", "target_nav_date")]
+        if (
+            e.get("policy") != "QDII_CNY_VERIFIED_SESSION_V1"
+            or e.get("base_date") != str(base)
+            or e.get("target_date") != str(target)
+            or base.year != target.year
+            or target.weekday() >= 5
+            or not (code.endswith(".JP") or code == "TOPIX" and material.get("market", {}).get(code) == quote)
+        ):
+            return None
+        calendar_ref = e.get("calendar_refs", {}).get("JP")
+        calendar = documents.get(calendar_ref, {})
+        parsed = json.loads(calendar["body"])
+        if (
+            calendar.get("kind") != "EXCHANGE_CALENDAR"
+            or urlparse(calendar.get("url", "")).hostname != "www.jpx.co.jp"
+            or parsed["year"] != base.year
+            or len(parsed["closed_dates"]) < 20
+            or "3:30 pm" not in parsed["hours_source_text"]
+            or urlparse(parsed["hours_source_url"]).hostname != "www.jpx.co.jp"
+        ):
+            return None
+        closed = {date.fromisoformat(d) for d in parsed["closed_dates"]}
+        if base not in closed or target in closed:
+            return None
+        previous = base - timedelta(days=1)
+        while previous.year == base.year and (previous.weekday() >= 5 or previous in closed):
+            previous -= timedelta(days=1)
+        if previous.year != base.year or quote.get("date") != str(previous):
+            return None
+        own = material["fund_code"]
+        report = documents.get(e.get("report_ref"), {})
+        prospectus = documents.get(e.get("prospectus_ref"), {})
+        clauses = e.get("holiday_valuation_quotes", {})
+        if (
+            report.get("kind") != "REPORT"
+            or own not in report.get("codes", [])
+            or prospectus.get("kind") != "PROSPECTUS"
+            or own not in prospectus.get("codes", [])
+            or set(clauses) != {"close", "fx"}
+            or any(not isinstance(q, str) or not q or q not in prospectus.get("body", "") for q in clauses.values())
+        ):
+            return None
+        compact, compact_fx = [re.sub(r"\s+", "", clauses[k]) for k in ("close", "fx")]
+        if not (
+            re.search(r"估值日(?:无交易|没有交易)", compact)
+            and "最近交易日" in compact
+            and "收盘价" in compact
+            and "汇率" in compact_fx
+            and "中间价" in compact_fx
+        ):
+            return None
+        fx = documents.get(e.get("fx_ref"), {})
+        if fx.get("kind") != "FX_REFERENCE_DATA" or urlparse(fx.get("url", "")).hostname not in {
+            "www.safe.gov.cn",
+            "www.chinamoney.com.cn",
+        }:
+            return None
+        if not any(
+            r.get("date") == str(base)
+            and r.get("currency") == "JPY"
+            and math.isfinite(float(r["cny_per_unit"]))
+            and float(r["cny_per_unit"]) > 0
+            for r in json.loads(fx["body"])["rates"]
+        ):
+            return None
+        close = datetime.combine(previous, time(15, 30), ZoneInfo("Asia/Tokyo"))
+        source = documents.get(quote.get("source_ref"), {})
+        if (
+            quote.get("currency") != "JPY"
+            or quote.get("valuation_market") != "JP"
+            or quote.get("session") != "REGULAR_CLOSE"
+            or quote.get("change_pct") is None
+            or not math.isfinite(float(quote.get("close", 0)))
+            or float(quote.get("close", 0)) <= 0
+            or not math.isfinite(float(quote["change_pct"]))
+            or datetime.fromisoformat(quote["closed_at"]) != close
+            or source.get("kind") != "MARKET_DATA"
+            or datetime.fromisoformat(source["available_at"]) < close
+            or (
+                material.get("as_of")
+                and datetime.fromisoformat(source["available_at"]) > datetime.fromisoformat(material["as_of"])
+            )
+        ):
+            return None
+        return {
+            "reference_date": str(previous),
+            "valuation_date": str(base),
+            "calendar_ref": calendar_ref,
+            "prospectus_ref": e["prospectus_ref"],
+            "fx_ref": e["fx_ref"],
+            "reason": "JP_EXCHANGE_HOLIDAY_LAST_SESSION_REFERENCE",
+        }
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+
+
 def verified_hk_holiday_reference(material: dict, documents: dict, code: str, quote: dict, window: dict) -> dict | None:
     """绑定本基金条款、官方日历、汇率及真实收盘来源，验证休市日参考资料。
 

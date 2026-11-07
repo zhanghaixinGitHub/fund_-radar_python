@@ -43,12 +43,16 @@ def digest(value):
 
 
 def file_hash(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    from app.services.material_content import content_digest, source_bytes
+
+    return content_digest(source_bytes(path))
 
 
 def read_json(path):
     """兼容既有 hash/payload 封装，校验内容；不接受 JSON 非有限数值。"""
-    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    from app.services.material_content import source_text
+
+    value = json.loads(source_text(path, encoding="utf-8"))
     if isinstance(value, dict) and set(value) == {"hash", "payload"}:
         if digest(value["payload"]) != value["hash"]:
             raise ValueError("CONTENT_HASH_CHANGED")

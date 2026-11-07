@@ -4,7 +4,6 @@
 不能把另缺一列外汇价格当作无法计算历史风险的理由。其他资产或表格格式不猜测。
 """
 
-import hashlib
 import json
 import re
 from copy import deepcopy
@@ -15,6 +14,7 @@ from pathlib import Path
 from app.core.config import get_settings
 from app.services import fund_rating_public_market as market
 from app.services.fund_rating_rules import decimal
+from app.services.material_content import content_digest, source_bytes
 
 BASIS = "PUBLIC_DISCLOSURE_GLOBAL_EQUITY_CNY_V1"
 SCOPE = {"basis": BASIS, "asset": "GLOBAL_ACTIVE_EQUITY", "currency": "CNY"}
@@ -87,8 +87,8 @@ def facts(refs: dict, root: Path, code: str, name: str, as_of: date) -> dict:
 
     def read(label):
         ref = refs[label]
-        raw = (root / ref["file"]).read_bytes()
-        if hashlib.sha256(raw).hexdigest() != ref["sha256"]:
+        raw = source_bytes(root / ref["file"])
+        if content_digest(raw) != ref["sha256"]:
             raise ValueError("RATING_GLOBAL_ORIGINAL_HASH")
         return raw
 

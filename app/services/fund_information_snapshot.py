@@ -15,6 +15,7 @@ from app.services.direction_1d_protocol import ZONE, digest, features, input_day
 from app.services.fund_exposure_common import ROOT, read
 from app.services.fund_information_contracts import time_context
 from app.services.fund_materials_store import source_path
+from app.services.material_content import source_exists
 
 ACTIVE_FILE = ROOT.parent / "direction-1d-information/analysis-active.json"
 
@@ -49,7 +50,7 @@ def prepare(now, fund_code="002112", materials_path=None) -> dict:
         if materials_path is not None
         else (Path(get_settings().fund_material_directory) / "comprehensive" / f"{fund_code}.json")
     )
-    if materials_path is not None or path.is_file() or fund_code != "002112":
+    if materials_path is not None or source_exists(path) or fund_code != "002112":
         from app.services.fund_comprehensive_materials import prepare as prepare_general
 
         return prepare_general(now, fund_code, path)

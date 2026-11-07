@@ -5,7 +5,6 @@
 子集距离。它不能写入 allocation_deviation，更不能证明日常投资合规。
 """
 
-import hashlib
 import re
 import unicodedata
 from calendar import monthrange
@@ -16,6 +15,8 @@ from itertools import combinations
 from math import comb
 from pathlib import Path
 from urllib.parse import urlsplit
+
+from app.services.material_content import content_digest, source_bytes, source_exists
 
 VERSION = "QUALITY_ALLOCATION_EVIDENCE_20261017_3"
 
@@ -89,18 +90,19 @@ def project_half_l1(weights: list, constraints: list[dict]) -> dict:
     for i in range(size):
         limits.append((tuple(Fraction(-int(i == j)) for j in range(size)), Fraction(0)))
     # 目标折点和预算平面也参与顶点划分。重复平面只影响效率，不影响证明。
-    planes = list(dict.fromkeys(limits + [
-        (tuple(Fraction(int(i == j)) for j in range(size)), point[i]) for i in range(size)
-    ]))
+    planes = list(
+        dict.fromkeys(limits + [(tuple(Fraction(int(i == j)) for j in range(size)), point[i]) for i in range(size)])
+    )
     candidates = comb(len(planes), size - 1)
     if candidates > 100_000:
         raise ValueError("ALLOCATION_EXACT_VERTEX_BUDGET_EXCEEDED")
     best, witness, feasible = None, None, 0
     for selected in combinations(planes, size - 1):
-        vertex = _solve((tuple(Fraction(1) for _ in point),) + tuple(row for row, _ in selected),
-                        (Fraction(1),) + tuple(value for _, value in selected))
-        if vertex is None or any(sum(a * b for a, b in zip(row, vertex, strict=True)) > upper
-                                 for row, upper in limits):
+        vertex = _solve(
+            (tuple(Fraction(1) for _ in point),) + tuple(row for row, _ in selected),
+            (Fraction(1),) + tuple(value for _, value in selected),
+        )
+        if vertex is None or any(sum(a * b for a, b in zip(row, vertex, strict=True)) > upper for row, upper in limits):
             continue
         feasible += 1
         distance = sum(abs(a - b) for a, b in zip(vertex, point, strict=True)) / 2
@@ -108,9 +110,13 @@ def project_half_l1(weights: list, constraints: list[dict]) -> dict:
             best, witness = distance, vertex
     if best is None:
         raise ValueError("ALLOCATION_ALLOWED_SET_EMPTY")
-    return {"method": "EXACT_RATIONAL_PIECEWISE_LINEAR_VERTEX_ENUMERATION", "distance": _stored(best),
-            "projected_weights": [_stored(value) for value in witness],
-            "enumerated_intersections": candidates, "feasible_intersections": feasible}
+    return {
+        "method": "EXACT_RATIONAL_PIECEWISE_LINEAR_VERTEX_ENUMERATION",
+        "distance": _stored(best),
+        "projected_weights": [_stored(value) for value in witness],
+        "enumerated_intersections": candidates,
+        "feasible_intersections": feasible,
+    }
 
 
 def _compact(text: str) -> str:
@@ -129,30 +135,36 @@ def contract_allocation_clauses(pages: list[str]) -> dict:
     for start in scope_starts:
         stop = text.find("三、投资策略", start.end())
         if stop > start.end() and stop - start.end() < 12000:
-            sections.append(text[start.end():stop])
+            sections.append(text[start.end() : stop])
     starts = list(re.finditer(r"四、投资限制1、组合限制基金的投资组合应遵循以下限制[:：]", text))
     if len(sections) != 1 or len(starts) != 1:
         raise ValueError("ALLOCATION_CONTRACT_COMPLETE_SECTION_UNPARSED")
     stop = text.find("2、禁止行为", starts[0].end())
     if stop < 0:
         raise ValueError("ALLOCATION_CONTRACT_RESTRICTION_END_UNPARSED")
-    restrictions = text[starts[0].end():stop]
+    restrictions = text[starts[0].end() : stop]
     adjustment = re.search(r"除上述", restrictions)
     if adjustment is None:
         raise ValueError("ALLOCATION_CONTRACT_ADJUSTMENT_SECTION_UNPARSED")
-    adjustment_excerpt = restrictions[adjustment.start():]
-    restrictions = restrictions[:adjustment.start()]
+    adjustment_excerpt = restrictions[adjustment.start() :]
+    restrictions = restrictions[: adjustment.start()]
     markers = list(re.finditer(r"\((\d{1,2})\)", restrictions))
     # 最后一个编号之后的调整期条文不能丢失，单列保留，而非默认为免责。
     if [int(m[1]) for m in markers] != list(range(1, len(markers) + 1)) or not markers:
         raise ValueError("ALLOCATION_CONTRACT_CLAUSE_SEQUENCE_UNVERIFIED")
-    clauses = [{"clause_id": int(m[1]), "excerpt": restrictions[m.end():
-                markers[i+1].start() if i+1 < len(markers) else len(restrictions)]}
-               for i, m in enumerate(markers)]
-    pattern = (r"本基金(?:投资组合中)?股票、存托凭证(?:资产)?(?:的)?投资"
-               r"(?:比例为(?P<basis>基金资产(?:总值|净值)?)的|占基金资产的比例为)(?P<low>\d+(?:\.\d+)?)%"
-               r"[-—至～](?P<high>\d+(?:\.\d+)?)%[,，]其中港股通标的股票(?:的)?"
-               r"投资比例不超过本基金股票资产的(?P<hk>\d+(?:\.\d+)?)%")
+    clauses = [
+        {
+            "clause_id": int(m[1]),
+            "excerpt": restrictions[m.end() : markers[i + 1].start() if i + 1 < len(markers) else len(restrictions)],
+        }
+        for i, m in enumerate(markers)
+    ]
+    pattern = (
+        r"本基金(?:投资组合中)?股票、存托凭证(?:资产)?(?:的)?投资"
+        r"(?:比例为(?P<basis>基金资产(?:总值|净值)?)的|占基金资产的比例为)(?P<low>\d+(?:\.\d+)?)%"
+        r"[-—至～](?P<high>\d+(?:\.\d+)?)%[,，]其中港股通标的股票(?:的)?"
+        r"投资比例不超过本基金股票资产的(?P<hk>\d+(?:\.\d+)?)%"
+    )
     matches = [re.search(pattern, part) for part in (sections[0], clauses[0]["excerpt"])]
     if any(m is None for m in matches) or any(matches[0][k] != matches[1][k] for k in ("low", "high", "hk")):
         raise ValueError("ALLOCATION_STOCK_HK_CONSTRAINT_MISSING_OR_CONFLICTING")
@@ -164,19 +176,35 @@ def contract_allocation_clauses(pages: list[str]) -> dict:
     low, high, hk = (_number(matches[0][k]) / 100 for k in ("low", "high", "hk"))
     if not 0 <= low <= high <= 1 or not 0 <= hk <= 1:
         raise ValueError("ALLOCATION_CONTRACT_RATIO_RANGE")
-    return {"stock_lower": _stored(low), "stock_upper": _stored(high), "hk_of_stock_upper": _stored(hk),
-            "scope_excerpt": sections[0], "stock_constraint_excerpt": matches[0][0],
-            "ratio_denominator_evidence": {"literal": basis, "economic_basis": identified_basis,
-                "state": ("EXPLICIT_CONTRACT_DENOMINATOR" if identified_basis
-                          else "CONTRACT_RATIO_DENOMINATOR_UNRESOLVED"),
-                "scope": "NOT_INFERRED_FROM_REPORT_COLUMN_OR_FUND_NAME", "excerpt": matches[0][0]},
-            "combination_clauses": clauses, "adjustment_and_transition_excerpt": adjustment_excerpt,
-            "full_allowed_set_remaining": [
-                {"reason": "CASH_AND_DERIVATIVE_SCOPE_FROM_INVESTMENT_RANGE", "excerpt": sections[0]},
-                *[{"reason": "CONTRACT_CLAUSE_NOT_TRANSLATED_TO_COMPLETE_ALLOWED_SET", **item}
-                  for item in clauses if item["clause_id"] != 1]],
-            "source_pages": [i+1 for i, page in enumerate(pages)
-                             if "二、投资范围" in _compact(page) or "四、投资限制" in _compact(page)]}
+    return {
+        "stock_lower": _stored(low),
+        "stock_upper": _stored(high),
+        "hk_of_stock_upper": _stored(hk),
+        "scope_excerpt": sections[0],
+        "stock_constraint_excerpt": matches[0][0],
+        "ratio_denominator_evidence": {
+            "literal": basis,
+            "economic_basis": identified_basis,
+            "state": ("EXPLICIT_CONTRACT_DENOMINATOR" if identified_basis else "CONTRACT_RATIO_DENOMINATOR_UNRESOLVED"),
+            "scope": "NOT_INFERRED_FROM_REPORT_COLUMN_OR_FUND_NAME",
+            "excerpt": matches[0][0],
+        },
+        "combination_clauses": clauses,
+        "adjustment_and_transition_excerpt": adjustment_excerpt,
+        "full_allowed_set_remaining": [
+            {"reason": "CASH_AND_DERIVATIVE_SCOPE_FROM_INVESTMENT_RANGE", "excerpt": sections[0]},
+            *[
+                {"reason": "CONTRACT_CLAUSE_NOT_TRANSLATED_TO_COMPLETE_ALLOWED_SET", **item}
+                for item in clauses
+                if item["clause_id"] != 1
+            ],
+        ],
+        "source_pages": [
+            i + 1
+            for i, page in enumerate(pages)
+            if "二、投资范围" in _compact(page) or "四、投资限制" in _compact(page)
+        ],
+    }
 
 
 def _industry_hk_amount(text: str) -> dict:
@@ -185,11 +213,11 @@ def _industry_hk_amount(text: str) -> dict:
     foreign = list(re.finditer(r"[5678]\.2\.2\s*(?:报告期末)?按行业分类的港股通投资股票投资组合", text))
     if len(domestic) != 1 or len(foreign) != 1 or domestic[0].end() >= foreign[0].start():
         raise ValueError("ALLOCATION_DOMESTIC_HK_SECTION_PAIR_UNPARSED")
-    end = re.search(r"[5678]\.3\s*(?:报告期末|期末)", text[foreign[0].end():])
+    end = re.search(r"[5678]\.3\s*(?:报告期末|期末)", text[foreign[0].end() :])
     if end is None:
         raise ValueError("ALLOCATION_HK_SECTION_END_UNPARSED")
-    own = text[domestic[0].end():foreign[0].start()]
-    abroad = text[foreign[0].end():foreign[0].end()+end.start()]
+    own = text[domestic[0].end() : foreign[0].start()]
+    abroad = text[foreign[0].end() : foreign[0].end() + end.start()]
     total_pattern = r"(?m)^\s*合\s*计\s+([\d,]+\.\d{2})\s+[\d.]+"
     own_totals = re.findall(total_pattern, own)
     hk_totals = re.findall(total_pattern, abroad)
@@ -198,10 +226,13 @@ def _industry_hk_amount(text: str) -> dict:
         raise ValueError("ALLOCATION_DOMESTIC_HK_TOTAL_CONFLICT_OR_MISSING")
     if absence is None and len(hk_totals) != 1:
         raise ValueError("ALLOCATION_HK_EXACT_TOTAL_OR_ABSENCE_MISSING")
-    return {"domestic_amount": own_totals[0].replace(",", ""),
-            "hk_amount": "0.00" if absence else hk_totals[0].replace(",", ""),
-            "basis": "EXPLICIT_PERIOD_END_HK_ABSENCE" if absence else "EXACT_HK_INDUSTRY_TOTAL",
-            "excerpt": _compact(abroad), "domestic_excerpt": _compact(own)}
+    return {
+        "domestic_amount": own_totals[0].replace(",", ""),
+        "hk_amount": "0.00" if absence else hk_totals[0].replace(",", ""),
+        "basis": "EXPLICIT_PERIOD_END_HK_ABSENCE" if absence else "EXACT_HK_INDUSTRY_TOTAL",
+        "excerpt": _compact(abroad),
+        "domestic_excerpt": _compact(own),
+    }
 
 
 def report_allocation_point(block: str, amounts: dict, *, industry_text: str = "") -> dict:
@@ -221,20 +252,21 @@ def report_allocation_point(block: str, amounts: dict, *, industry_text: str = "
     total, equity = _number(amounts["合计"]), _number(amounts["权益投资"])
     if total <= 0 or not 0 <= foreign <= stock <= total or stock != equity:
         raise ValueError("ALLOCATION_STOCK_EQUITY_OR_TOTAL_NOT_RECONCILED")
-    if industry and (foreign != _number(industry["hk_amount"]) or
-                     _number(industry["domestic_amount"]) + foreign != stock):
+    if industry and (
+        foreign != _number(industry["hk_amount"]) or _number(industry["domestic_amount"]) + foreign != stock
+    ):
         raise ValueError("ALLOCATION_DOMESTIC_HK_AND_STOCK_AMOUNTS_NOT_RECONCILED")
-    hk_excerpt = re.search(
-        r"上表权益投资中通过港股通交易机制投资的港股金额(?:为)?人民币[\d,]+\.\d{2}元", body)
-    return {"amounts_cny": {"stock": stocks[0].replace(",", ""), "hk_stock": foreign_text,
-                            "total_assets": amounts["合计"]},
-            "weights": [_stored((stock-foreign)/total), _stored(foreign/total), _stored((total-stock)/total)],
-            "categories": ["DOMESTIC_STOCK_AND_DR", "HK_CONNECT_STOCK", "OTHER_ASSET_COMPLEMENT"],
-            "hk_amount_excerpt": hk_excerpt[0] if hk_excerpt else industry["excerpt"],
-            "industry_reconciliation": industry,
-            "denominator": "TOTAL_ASSETS_NOT_NAV",
-            "denominator_scope": "ASSET_COORDINATE_SYSTEM_NOT_CONTRACT_RATIO_EVIDENCE",
-            "unobserved_asset_rows_imputed": []}
+    hk_excerpt = re.search(r"上表权益投资中通过港股通交易机制投资的港股金额(?:为)?人民币[\d,]+\.\d{2}元", body)
+    return {
+        "amounts_cny": {"stock": stocks[0].replace(",", ""), "hk_stock": foreign_text, "total_assets": amounts["合计"]},
+        "weights": [_stored((stock - foreign) / total), _stored(foreign / total), _stored((total - stock) / total)],
+        "categories": ["DOMESTIC_STOCK_AND_DR", "HK_CONNECT_STOCK", "OTHER_ASSET_COMPLEMENT"],
+        "hk_amount_excerpt": hk_excerpt[0] if hk_excerpt else industry["excerpt"],
+        "industry_reconciliation": industry,
+        "denominator": "TOTAL_ASSETS_NOT_NAV",
+        "denominator_scope": "ASSET_COORDINATE_SYSTEM_NOT_CONTRACT_RATIO_EVIDENCE",
+        "unobserved_asset_rows_imputed": [],
+    }
 
 
 def report_product_net_assets(pages: list[str], *, observed_on: str, total_assets: str) -> dict:
@@ -250,28 +282,30 @@ def report_product_net_assets(pages: list[str], *, observed_on: str, total_asset
     quarter = re.search(r"(20\d{2})年第([1-4])季度报告", compact[:2500])
     if quarter:
         year, q = map(int, quarter.groups())
-        end = date(year, q*3, monthrange(year, q*3)[1])
+        end = date(year, q * 3, monthrange(year, q * 3)[1])
         if end != observed:
             raise ValueError("ALLOCATION_NAV_QUARTER_PERIOD_MISMATCH")
         blocks = list(re.finditer(r"3\.1\s*主要财务指标", text))
         if len(blocks) != 1:
             raise ValueError("ALLOCATION_NAV_QUARTER_FINANCIAL_SECTION_UNPARSED")
-        tail = text[blocks[0].end():]
+        tail = text[blocks[0].end() :]
         stop = re.search(r"3\.2\s*基金净值表现", tail)
         if stop is None:
             raise ValueError("ALLOCATION_NAV_FINANCIAL_SECTION_END_UNPARSED")
-        body = tail[:stop.start()]
-        period = (rf"报告期[（(]{year}年{(q-1)*3+1}月1日[-－—至～]+"
-                  rf"{year}年{q*3}月{observed.day}日[）)]")
+        body = tail[: stop.start()]
+        period = (
+            rf"报告期[（(]{year}年{(q - 1) * 3 + 1}月1日[-－—至～]+"
+            rf"{year}年{q * 3}月{observed.day}日[）)]"
+        )
         if "人民币元" not in _compact(body) or not re.search(period, _compact(body)):
             raise ValueError("ALLOCATION_NAV_FINANCIAL_PERIOD_OR_CNY_UNVERIFIED")
-        basic = compact[:compact.find("3.1主要财务指标")]
+        basic = compact[: compact.find("3.1主要财务指标")]
         names = re.search(r"下属分级基金的基金简称(.{2,70}?A)(.{2,70}?C)下属分级基金的交易代码", basic)
         codes = re.search(r"下属分级基金的交易代码(\d{6})(\d{6})(?!\d)", basic)
         if names is None or codes is None or codes[1] == codes[2]:
             raise ValueError("ALLOCATION_NAV_EXPLICIT_TWO_SHARE_CLASS_HEADER_REQUIRED")
         header = _compact(body).split("1.本期已实现收益")[0]
-        if names[1]+names[2] not in header:
+        if names[1] + names[2] not in header:
             raise ValueError("ALLOCATION_NAV_FINANCIAL_SHARE_CLASS_ORDER_UNBOUND")
         money = r"(\d[\d,]*\.\d{2})"
         rows = list(re.finditer(rf"(?m)^\s*4\.\s*期末基金资产净值\s+{money}\s+{money}[ \t]*$", body))
@@ -279,9 +313,14 @@ def report_product_net_assets(pages: list[str], *, observed_on: str, total_asset
             raise ValueError("ALLOCATION_NAV_CURRENT_SHARE_CLASS_VALUES_UNPARSED")
         parts = [value.replace(",", "") for value in rows[0].groups()]
         nav = sum(map(_number, parts))
-        proof = {"basis": "EXPLICIT_CURRENT_A_C_NET_ASSETS_SUM", "share_codes": list(codes.groups()),
-                 "share_names": list(names.groups()), "share_net_assets_cny": parts,
-                 "original_row": rows[0][0], "period_excerpt": re.search(period, _compact(body))[0]}
+        proof = {
+            "basis": "EXPLICIT_CURRENT_A_C_NET_ASSETS_SUM",
+            "share_codes": list(codes.groups()),
+            "share_names": list(names.groups()),
+            "share_net_assets_cny": parts,
+            "original_row": rows[0][0],
+            "period_excerpt": re.search(period, _compact(body))[0],
+        }
     else:
         from app.services.fund_quality_v2_accounting import accounting_observations
         from app.services.fund_quality_v2_stock_book import periodic_financial_view
@@ -295,21 +334,32 @@ def report_product_net_assets(pages: list[str], *, observed_on: str, total_asset
             # 首年报告确实只有本期末一列时，使用独立的严格版式适配；不
             # 修改成熟的两列读取器，也不把第二列缺席理解成比较期为0。
             return _first_year_single_column_net_assets(view, observed=observed, total_assets=total_assets) | {
-                "financial_parser_view": edits}
+                "financial_parser_view": edits
+            }
         rows = facts["observations"]
         if not {"net_assets", "total_assets", "total_liabilities"} <= rows.keys():
             raise ValueError("ALLOCATION_NAV_CURRENT_BALANCE_TOTALS_UNPARSED")
         nav = _number(rows["net_assets"]["value"])
-        if (_number(rows["total_assets"]["value"]) != _number(total_assets) or
-                nav + _number(rows["total_liabilities"]["value"]) != _number(total_assets)):
+        if _number(rows["total_assets"]["value"]) != _number(total_assets) or nav + _number(
+            rows["total_liabilities"]["value"]
+        ) != _number(total_assets):
             raise ValueError("ALLOCATION_NAV_EXACT_ASSETS_LIABILITIES_EQUATION_CONFLICT")
-        proof = {"basis": "EXPLICIT_CURRENT_CNY_BALANCE_NET_ASSETS", "net_asset_row": rows["net_assets"],
-                 "total_assets_row": rows["total_assets"], "liabilities_row": rows["total_liabilities"],
-                 "financial_parser_view": edits}
+        proof = {
+            "basis": "EXPLICIT_CURRENT_CNY_BALANCE_NET_ASSETS",
+            "net_asset_row": rows["net_assets"],
+            "total_assets_row": rows["total_assets"],
+            "liabilities_row": rows["total_liabilities"],
+            "financial_parser_view": edits,
+        }
     if not 0 < nav <= _number(total_assets):
         raise ValueError("ALLOCATION_NAV_NOT_POSITIVE_OR_EXCEEDS_TOTAL_ASSETS")
-    return {"net_assets_cny": _stored(nav)["value"], "observed_on": observed_on, "unit": "CNY_YUAN",
-            "proof": proof, "scope": "PRODUCT_NET_ASSETS_NOT_CONTRACT_DENOMINATOR_ACCEPTANCE"}
+    return {
+        "net_assets_cny": _stored(nav)["value"],
+        "observed_on": observed_on,
+        "unit": "CNY_YUAN",
+        "proof": proof,
+        "scope": "PRODUCT_NET_ASSETS_NOT_CONTRACT_DENOMINATOR_ACCEPTANCE",
+    }
 
 
 def _first_year_single_column_net_assets(pages: list[str], *, observed: date, total_assets: str) -> dict:
@@ -321,15 +371,15 @@ def _first_year_single_column_net_assets(pages: list[str], *, observed: date, to
     headers = list(re.finditer(r"(?m)^[ \t]*([567])\.1[ \t]+资产负债表[ \t]*$", text))
     if len(headers) != 1:
         raise ValueError("ALLOCATION_NAV_ONE_COLUMN_UNIQUE_BALANCE_BODY_REQUIRED")
-    tail = text[headers[0].end():]
+    tail = text[headers[0].end() :]
     end = re.search(rf"(?m)^[ \t]*{headers[0][1]}\.2[ \t]+利润表", tail)
     if end is None:
         raise ValueError("ALLOCATION_NAV_ONE_COLUMN_BALANCE_END_MISSING")
-    body = tail[:end.start()]
+    body = tail[: end.start()]
     first_row = re.search(r"(?m)^[ \t]*资产[:：][ \t]*$", body)
     if first_row is None:
         raise ValueError("ALLOCATION_NAV_ONE_COLUMN_ASSET_BODY_MISSING")
-    header = body[:first_row.start()]
+    header = body[: first_row.start()]
     day = f"{observed.year}年{observed.month}月{observed.day}日"
     if "单位:人民币元" not in _compact(header) or not _compact(header).endswith("资产附注号本期末" + day):
         raise ValueError("ALLOCATION_NAV_ONE_COLUMN_CNY_DATE_LAYOUT_UNVERIFIED")
@@ -341,18 +391,37 @@ def _first_year_single_column_net_assets(pages: list[str], *, observed: date, to
         rows[label] = {"value": matches[0][1].replace(",", ""), "original_row": matches[0][0]}
     nav = _number(rows["净资产合计"]["value"])
     total = _number(total_assets)
-    if (not 0 < nav <= total or _number(rows["资产总计"]["value"]) != total or
-            _number(rows["负债和净资产总计"]["value"]) != total or
-            nav + _number(rows["负债合计"]["value"]) != total):
+    if (
+        not 0 < nav <= total
+        or _number(rows["资产总计"]["value"]) != total
+        or _number(rows["负债和净资产总计"]["value"]) != total
+        or nav + _number(rows["负债合计"]["value"]) != total
+    ):
         raise ValueError("ALLOCATION_NAV_ONE_COLUMN_EXACT_BALANCE_CONFLICT")
-    return {"net_assets_cny": _stored(nav)["value"], "observed_on": str(observed), "unit": "CNY_YUAN",
-            "proof": {"basis": "EXPLICIT_FIRST_YEAR_SINGLE_CURRENT_CNY_COLUMN", "rows": rows,
-                      "column_header_excerpt": header, "inception_excerpt": inception[0]},
-            "scope": "PRODUCT_NET_ASSETS_NOT_CONTRACT_DENOMINATOR_ACCEPTANCE"}
+    return {
+        "net_assets_cny": _stored(nav)["value"],
+        "observed_on": str(observed),
+        "unit": "CNY_YUAN",
+        "proof": {
+            "basis": "EXPLICIT_FIRST_YEAR_SINGLE_CURRENT_CNY_COLUMN",
+            "rows": rows,
+            "column_header_excerpt": header,
+            "inception_excerpt": inception[0],
+        },
+        "scope": "PRODUCT_NET_ASSETS_NOT_CONTRACT_DENOMINATOR_ACCEPTANCE",
+    }
 
 
-def allocation_history(*, refs: list[dict], root: Path, reports: list[dict],
-                       required_dates: list[str], legal_name: str, as_of: date, code: str) -> dict:
+def allocation_history(
+    *,
+    refs: list[dict],
+    root: Path,
+    reports: list[dict],
+    required_dates: list[str],
+    legal_name: str,
+    as_of: date,
+    code: str,
+) -> dict:
     """以实际历史合同和报告计算约束子集距离，按经济日去重并列清精确阻塞。
 
     发布日仅用于信息可得性筛选。合同修订标题未证明法律生效日，所以保留
@@ -367,32 +436,46 @@ def allocation_history(*, refs: list[dict], root: Path, reports: list[dict],
         if ref.get("label") != "contract-amendment-notice":
             continue
         try:
-            file = (root/ref["file"]).resolve()
-            if not file.is_relative_to((root/"sources").resolve()) or not file.is_file():
+            file = (root / ref["file"]).resolve()
+            if not file.is_relative_to((root / "sources").resolve()) or not source_exists(file):
                 raise ValueError("CONTRACT_NOTICE_ARCHIVE_PATH")
-            amendment_notices.append(verify_cmf_fee_amendment(
-                file.read_bytes(), ref, refs=refs, root=root, legal_name=legal_name, as_of=as_of))
+            amendment_notices.append(
+                verify_cmf_fee_amendment(
+                    source_bytes(file), ref, refs=refs, root=root, legal_name=legal_name, as_of=as_of
+                )
+            )
         except (ValueError, KeyError, OSError) as exc:
             gaps.append({"source_hashes": [ref["sha256"]], "source_url": ref["url"], "reason": str(exc)})
     for ref in refs:
         if ref.get("label") != "historical-contract" or legal_name + "基金合同" not in ref.get("title", ""):
             continue
-        item = {"source_hashes": [ref["sha256"]], "source_url": ref["url"],
-                "published_on": ref.get("published_on"), "title": ref.get("title")}
+        item = {
+            "source_hashes": [ref["sha256"]],
+            "source_url": ref["url"],
+            "published_on": ref.get("published_on"),
+            "title": ref.get("title"),
+        }
         try:
             address = urlsplit(ref["url"])
-            if (address.scheme != "https" or address.hostname != "static.cmfchina.com" or address.query
-                    or address.fragment or address.username or address.password or address.port not in {None, 443}
-                    or not re.fullmatch(r"/fundarticle/\d{8}/\d+\.pdf", address.path)):
+            if (
+                address.scheme != "https"
+                or address.hostname != "static.cmfchina.com"
+                or address.query
+                or address.fragment
+                or address.username
+                or address.password
+                or address.port not in {None, 443}
+                or not re.fullmatch(r"/fundarticle/\d{8}/\d+\.pdf", address.path)
+            ):
                 raise ValueError("ALLOCATION_CONTRACT_ISSUER_ROUTE_UNSUPPORTED")
             published = date.fromisoformat(ref["published_on"])
             if published > as_of:
                 raise ValueError("ALLOCATION_CONTRACT_PUBLISHED_AFTER_AS_OF")
-            file = (root/ref["file"]).resolve()
-            if not file.is_relative_to((root/"sources").resolve()):
+            file = (root / ref["file"]).resolve()
+            if not file.is_relative_to((root / "sources").resolve()):
                 raise ValueError("ALLOCATION_CONTRACT_OUTSIDE_SOURCE_ARCHIVE")
-            raw = file.read_bytes()
-            if hashlib.sha256(raw).hexdigest() != ref["sha256"]:
+            raw = source_bytes(file)
+            if content_digest(raw) != ref["sha256"]:
                 raise ValueError("ALLOCATION_CONTRACT_ACTUAL_HASH_CHANGED")
             pages, _ = public_document(raw, ref, code, "基金合同")
             if legal_name not in _compact(pages[0])[:1000]:
@@ -404,8 +487,10 @@ def allocation_history(*, refs: list[dict], root: Path, reports: list[dict],
                 revision = str(date(*map(int, registered.groups())))
                 notices = [notice for notice in amendment_notices if notice["effective_on"] == revision]
                 if notices:
-                    item.update(registered_revision_notice_evidence=notices,
-                        version_binding_gap="REGISTERED_REVISION_HAS_NOTICE_EFFECTIVE_DATE_BUT_COMPLETE_VERSION_CHAIN_UNPROVED")
+                    item.update(
+                        registered_revision_notice_evidence=notices,
+                        version_binding_gap="REGISTERED_REVISION_HAS_NOTICE_EFFECTIVE_DATE_BUT_COMPLETE_VERSION_CHAIN_UNPROVED",
+                    )
             contracts.append(item)
         except (ValueError, KeyError, OSError) as exc:
             gaps.append(item | {"reason": str(exc)})
@@ -414,15 +499,17 @@ def allocation_history(*, refs: list[dict], root: Path, reports: list[dict],
         rows = [r for r in reports if r.get("observed_on") == day]
         points = [r for r in rows if "allocation_asset_point" in r]
         item = {"observed_on": day, "source_hashes": sorted({h for r in rows for h in r["source_hashes"]})}
-        known = {tuple((w["numerator"], w["denominator"]) for w in r["allocation_asset_point"]["weights"])
-                 for r in points}
+        known = {
+            tuple((w["numerator"], w["denominator"]) for w in r["allocation_asset_point"]["weights"]) for r in points
+        }
         nav_points = [r for r in points if r["allocation_asset_point"].get("net_asset_evidence")]
         nav_values = {_number(r["allocation_asset_point"]["net_asset_evidence"]["net_assets_cny"]) for r in nav_points}
         if not points or len(points) != len(rows) or len(known) != 1 or len(nav_values) > 1:
-            item.update(reason="ALLOCATION_REPORT_POINT_MISSING_OR_COUNTERPART_CONFLICT",
-                        report_gaps=[r.get("allocation_point_gap", r.get("error", "COUNTERPART_VALUE_CONFLICT"))
-                                     for r in rows],
-                        net_asset_counterpart_values=[_stored(v) for v in sorted(nav_values)])
+            item.update(
+                reason="ALLOCATION_REPORT_POINT_MISSING_OR_COUNTERPART_CONFLICT",
+                report_gaps=[r.get("allocation_point_gap", r.get("error", "COUNTERPART_VALUE_CONFLICT")) for r in rows],
+                net_asset_counterpart_values=[_stored(v) for v in sorted(nav_values)],
+            )
         else:
             # 同一经济日的年报/四季报不重复入均值。不同版本条款只输出各自
             # 条件距离；不能按距离最好/最差挑合同，更不能把发布日期当生效日。
@@ -432,55 +519,86 @@ def allocation_history(*, refs: list[dict], root: Path, reports: list[dict],
                 # 顺序决定是否有净资产场景，也不把旧版布尔核验当作净资产。
                 chosen_nav = min(nav_points, key=lambda row: row["source_hashes"][0])
                 point["net_asset_evidence"] = chosen_nav["allocation_asset_point"]["net_asset_evidence"]
-                point["net_asset_supporting_source_hashes"] = sorted({
-                    h for row in nav_points for h in row["source_hashes"]})
+                point["net_asset_supporting_source_hashes"] = sorted(
+                    {h for row in nav_points for h in row["source_hashes"]}
+                )
                 point.pop("net_assets_gap", None)
             eligible = [c for c in contracts if c["published_on"] <= day]
             projections = []
             for contract in eligible:
                 clauses = contract["clauses"]
-                low, high, hk = (Fraction(int(clauses[k]["numerator"]), int(clauses[k]["denominator"]))
-                                 for k in ("stock_lower", "stock_upper", "hk_of_stock_upper"))
+                low, high, hk = (
+                    Fraction(int(clauses[k]["numerator"]), int(clauses[k]["denominator"]))
+                    for k in ("stock_lower", "stock_upper", "hk_of_stock_upper")
+                )
                 denominator = clauses["ratio_denominator_evidence"]
                 basis = denominator["economic_basis"]
-                scenarios = (["TOTAL_ASSETS", "NET_ASSETS"] if basis is None else [basis])
+                scenarios = ["TOTAL_ASSETS", "NET_ASSETS"] if basis is None else [basis]
                 for scenario in scenarios:
                     net = point.get("net_asset_evidence")
                     if scenario == "NET_ASSETS" and not net:
                         continue
                     # 坐标权重仍按总资产求和为1。若场景采用净资产为合同
                     # 分母，缩放合同阈值，不能将按净资产权重误塞入simplex。
-                    scale = (_number(net["net_assets_cny"]) / _number(point["amounts_cny"]["total_assets"])
-                             if scenario == "NET_ASSETS" else Fraction(1))
+                    scale = (
+                        _number(net["net_assets_cny"]) / _number(point["amounts_cny"]["total_assets"])
+                        if scenario == "NET_ASSETS"
+                        else Fraction(1)
+                    )
                     result = project_half_l1(
                         [Fraction(int(w["numerator"]), int(w["denominator"])) for w in point["weights"]],
-                        [{"coefficients": [1, 1, 0], "upper": high*scale},
-                         {"coefficients": [-1, -1, 0], "upper": -low*scale},
-                         {"coefficients": [-hk, 1-hk, 0], "upper": 0}])
-                    projections.append({"contract_source_hashes": contract["source_hashes"], **result,
-                        "asset_coordinate_basis": "TOTAL_ASSETS", "contract_denominator_scenario": scenario,
-                        "denominator_evidence": denominator,
-                        "denominator_assumption": ("HYPOTHETICAL_FUND_ASSETS_EQUALS_" + scenario
-                                                   if basis is None else None),
-                        "conditions": ["EFFECTIVE_CONTRACT_VERSION_NOT_BOUND", "FULL_ALLOWED_SET_UNRESOLVED"] +
-                                      (["CONTRACT_RATIO_DENOMINATOR_UNRESOLVED"] if basis is None else []),
-                        "source_threshold_rescaling": _stored(scale)})
-            item.update(asset_point=point, conditional_subset_projections=projections,
-                        reason="FULL_ALLOWED_SET_EFFECTIVE_VERSION_AND_DENOMINATOR_NOT_RESOLVED" if projections
-                               else "CONTRACT_DENOMINATOR_NET_ASSET_POINT_REQUIRED" if eligible
-                               else "NO_PRIOR_PARSED_CONTRACT_CANDIDATE",
-                        full_metric_value=None,
-                        missing_constraints=["CASH_AND_REQUIRED_MARGIN", "OTHER_CONTRACT_PORTFOLIO_LIMITS",
-                                             "EFFECTIVE_CONTRACT_VERSION_BINDING"] +
-                            (["CONTRACT_RATIO_DENOMINATOR_UNRESOLVED"] if any(
-                                c["clauses"]["ratio_denominator_evidence"]["economic_basis"] is None for c in eligible)
-                             else []),
-                        net_asset_point_gap=point.get("net_assets_gap"))
+                        [
+                            {"coefficients": [1, 1, 0], "upper": high * scale},
+                            {"coefficients": [-1, -1, 0], "upper": -low * scale},
+                            {"coefficients": [-hk, 1 - hk, 0], "upper": 0},
+                        ],
+                    )
+                    projections.append(
+                        {
+                            "contract_source_hashes": contract["source_hashes"],
+                            **result,
+                            "asset_coordinate_basis": "TOTAL_ASSETS",
+                            "contract_denominator_scenario": scenario,
+                            "denominator_evidence": denominator,
+                            "denominator_assumption": (
+                                "HYPOTHETICAL_FUND_ASSETS_EQUALS_" + scenario if basis is None else None
+                            ),
+                            "conditions": ["EFFECTIVE_CONTRACT_VERSION_NOT_BOUND", "FULL_ALLOWED_SET_UNRESOLVED"]
+                            + (["CONTRACT_RATIO_DENOMINATOR_UNRESOLVED"] if basis is None else []),
+                            "source_threshold_rescaling": _stored(scale),
+                        }
+                    )
+            item.update(
+                asset_point=point,
+                conditional_subset_projections=projections,
+                reason="FULL_ALLOWED_SET_EFFECTIVE_VERSION_AND_DENOMINATOR_NOT_RESOLVED"
+                if projections
+                else "CONTRACT_DENOMINATOR_NET_ASSET_POINT_REQUIRED"
+                if eligible
+                else "NO_PRIOR_PARSED_CONTRACT_CANDIDATE",
+                full_metric_value=None,
+                missing_constraints=[
+                    "CASH_AND_REQUIRED_MARGIN",
+                    "OTHER_CONTRACT_PORTFOLIO_LIMITS",
+                    "EFFECTIVE_CONTRACT_VERSION_BINDING",
+                ]
+                + (
+                    ["CONTRACT_RATIO_DENOMINATOR_UNRESOLVED"]
+                    if any(c["clauses"]["ratio_denominator_evidence"]["economic_basis"] is None for c in eligible)
+                    else []
+                ),
+                net_asset_point_gap=point.get("net_assets_gap"),
+            )
         observations.append(item)
-    return {"version": VERSION, "window_required_report_dates": sorted(set(required_dates)),
-            "contract_candidates": contracts, "contract_parse_gaps": gaps,
-            "amendment_notice_evidence": amendment_notices,
-            "observations": observations,
-            "observation_count": len(observations), "independent_products_added": 0,
-            "scope": "CONDITIONAL_CONTRACT_SUBSET_DISTANCE_NOT_FULL_ALLOCATION_METRIC",
-            "scoring_metric": None}
+    return {
+        "version": VERSION,
+        "window_required_report_dates": sorted(set(required_dates)),
+        "contract_candidates": contracts,
+        "contract_parse_gaps": gaps,
+        "amendment_notice_evidence": amendment_notices,
+        "observations": observations,
+        "observation_count": len(observations),
+        "independent_products_added": 0,
+        "scope": "CONDITIONAL_CONTRACT_SUBSET_DISTANCE_NOT_FULL_ALLOCATION_METRIC",
+        "scoring_metric": None,
+    }

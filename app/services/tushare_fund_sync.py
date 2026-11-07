@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -1484,8 +1485,20 @@ def _normalize_fund_status(source_status: str | None) -> str:
 
 
 def _derive_share_class(fund_name: str) -> str:
-    """只识别常见的末尾份额字母，其余保持未指定，避免将 ETF 等简称误判。"""
-    suffix = fund_name.strip()[-1:].upper()
+    """从明确的份额后缀识别类别，币种代码不能充当份额字母。
+
+    来源会把人民币C类写成“名称-C-CNY”；直接取末字母会误登记为Y。
+    仅处理有分隔符的已知币种后缀；没有明确份额或币种未知时保持未指定，
+    不根据币种猜A/C，也不改变净值所绑定的具体来源代码。
+    """
+    name = fund_name.strip().upper()
+    currency_codes = {"CNY", "CNH", "USD", "HKD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "SGD"}
+    structured = re.search(r"(?:^|[-\s])([ACEHRY])[-\s]+([A-Z]{3})$", name)
+    if structured:
+        return structured[1] if structured[2] in currency_codes else "UNSPECIFIED"
+    if any(name.endswith(code) for code in currency_codes):
+        return "UNSPECIFIED"
+    suffix = name[-1:]
     return suffix if suffix in {"A", "C", "E", "H", "R", "Y"} else "UNSPECIFIED"
 
 

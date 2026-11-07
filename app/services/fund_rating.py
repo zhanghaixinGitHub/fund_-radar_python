@@ -26,6 +26,7 @@ from app.schemas.fund_rating import RatingDetail, RatingPage
 from app.services.fund_rating_inputs import canonical, catalog, digest, empty_evidence, prepare
 from app.services.fund_rating_metrics import stability
 from app.services.fund_rating_rules import DIMENSIONS, GRADES, calculate, candidate, decimal, grade
+from app.services.material_content import material_operation, material_read_cache
 
 logger = get_logger(__name__)
 METRIC_LABELS = {
@@ -192,6 +193,7 @@ def _public(member: dict, computed: dict | None, config: dict, product_count: in
     }
 
 
+@material_operation
 def update_ratings(
     fund_code: str | None = None,
     *,
@@ -201,6 +203,7 @@ def update_ratings(
     progress_reporter=None,
     due_only: bool = False,
     ready_codes: set[str] | None = None,
+    new_rule_ready_codes: set[str] | None = None,
     event_review: bool = False,
 ) -> dict:
     """有界市场目录任务；单份额仅选所属完整类别，任何 GET 都不会调用此函数。"""
@@ -233,15 +236,39 @@ def update_ratings(
 
                 pinned = reviewed_current_bases(session, [r["fund_code"] for r in rows])
                 snapshot_codes = sorted(code for code, basis in pinned.items() if basis == SNAPSHOT_BASIS)
-                # 这些产品已按用户批准的部分/区间契约发布。旧采集器没有新契约的完整
-                # 原始输入，不能把新结果降回旧公式；新期需要重新核验并追加资料清单。
+                from app.services.fund_rating_pipeline import staged_codes
+
+                # 新规则基金交给正式更新器；已登记的完整原始包也在这里接管早期量尺。
+                # 只从旧计算类别移出，不再排除后仅返回deferred而无人继续处理。
+                snapshot_codes = sorted(set(snapshot_codes) | staged_codes(root, [r["fund_code"] for r in rows]))
                 rows = [r for r in rows if r["fund_code"] not in snapshot_codes]
                 groups = prepare(session, rows, as_of, frozen)
+            from app.services.fund_rating_pipeline import update_new_rules
+
+            new_codes = [fund_code] if fund_code in snapshot_codes else snapshot_codes if not fund_code else []
+            new_report = (
+                update_new_rules(
+                    new_codes,
+                    engine=engine,
+                    root=root,
+                    as_of=as_of,
+                    progress=progress_reporter,
+                    eligible_codes=new_rule_ready_codes,
+                )
+                if new_codes
+                else None
+            )
             if fund_code:
                 if fund_code in snapshot_codes:
-                    return {"target": 1, "rated": 0, "notRated": 0, "categories": [], "failures": [],
-                            "grades": {}, "reasons": {}, "alreadyCurrent": [],
-                            "deferred": [fund_code], "reviewedSnapshotUpdatesRequired": [fund_code]}
+                    return {
+                        **new_report,
+                        "categories": [],
+                        "grades": {},
+                        "reasons": {},
+                        "alreadyCurrent": [],
+                        "deferred": [],
+                        "newRule": new_report,
+                    }
                 groups = {k: v for k, v in groups.items() if any(m["fund_code"] == fund_code for m in v)}
                 if not groups:
                     raise LookupError("RATING_FUND_NOT_FOUND")
@@ -250,15 +277,15 @@ def update_ratings(
                 ):
                     raise ValueError("RATING_EVENT_REVIEW_DATA_INCOMPLETE")
             report = {
-                "target": sum(map(len, groups.values())),
-                "rated": 0,
-                "notRated": 0,
+                "target": sum(map(len, groups.values())) + (new_report["target"] if new_report else 0),
+                "rated": new_report["rated"] if new_report else 0,
+                "notRated": new_report["notRated"] if new_report else 0,
                 "categories": [],
-                "failures": [],
+                "failures": list(new_report["failures"]) if new_report else [],
                 "grades": {},
                 "reasons": {},
-                "deferred": snapshot_codes if not fund_code else [],
-                "reviewedSnapshotUpdatesRequired": snapshot_codes if not fund_code else [],
+                "deferred": [],
+                "newRule": new_report,
                 "alreadyCurrent": [],
             }
             reasons, grades = Counter(), Counter()
@@ -490,6 +517,7 @@ def _category(engine, root, category, members, as_of, frozen, *, evaluation_kind
     }
 
 
+@material_read_cache
 def read(codes: list[str], *, rating_ref: str | None = None, detail: bool = False, engine=None):
     """一次 REPEATABLE READ 快照解析当前指针；不采集、不计算、不写库、不读个人数据。"""
     if not 1 <= len(codes) <= 100 or any(len(c) != 6 or not c.isascii() or not c.isdigit() for c in codes):
@@ -514,7 +542,23 @@ def read(codes: list[str], *, rating_ref: str | None = None, detail: bool = Fals
         if rating_ref:
             query = query.where(RatingBatch.batch_id == rating_ref)
         else:
-            query = query.where(RatingBatch.batch_id.in_(select(RatingCurrent.batch_id)))
+            # 同一份额切换新方法后，旧类别指针保留供历史回看。当前展示按
+            # 原有“评价日、完成时间”顺序选最新批次；不再同时重读并核验
+            # 已被新批次覆盖的旧输入。最新批次损坏或撤回仍照常失败/隐藏，
+            # 不回退旧分；显式历史引用继续核验所选原批次。
+            latest = (
+                select(RatingResult.fund_code, RatingBatch.batch_id.label("selected_batch_id"))
+                .join(RatingBatch, RatingBatch.batch_id == RatingResult.batch_id)
+                .where(
+                    RatingResult.fund_code.in_(codes),
+                    RatingBatch.status == "PUBLISHED",
+                    RatingBatch.batch_id.in_(select(RatingCurrent.batch_id)),
+                )
+                .distinct(RatingResult.fund_code)
+                .order_by(RatingResult.fund_code, RatingBatch.as_of_date.desc(), RatingBatch.completed_at.desc())
+                .subquery()
+            )
+            query = query.where(RatingBatch.batch_id.in_(select(latest.c.selected_batch_id)))
         batches = session.scalars(query.order_by(RatingBatch.as_of_date.desc(), RatingBatch.completed_at.desc())).all()
         context = load_validation_rows(session, batches)
         method_ids = {batch.methodology_id for batch in batches if batch.methodology_id}
@@ -543,8 +587,9 @@ def read(codes: list[str], *, rating_ref: str | None = None, detail: bool = Fals
                 method = methods.get(batch.methodology_id)
                 # 一批可能同时含缺资料行和已评级行；不能以本次查询遇到的第一行决定规则是否有效。
                 if (
-                    any(r.status in {"RATED", "PARTIAL"} for r in complete_results)
-                    or batch.input_snapshot.get("method", {}).get("basis") == "PUBLIC_REVIEWED_QUALITY_SNAPSHOT_V3"
+                    any(r.status in {"RATED", "SCORED", "PARTIAL"} for r in complete_results)
+                    # 早期未适配产品的冻结方法可能明确为 null，仍须正常返回缺项。
+                    or (batch.input_snapshot.get("method") or {}).get("basis") == "PUBLIC_REVIEWED_QUALITY_SNAPSHOT_V3"
                 ):
                     allowed = (
                         {
@@ -574,13 +619,22 @@ def read(codes: list[str], *, rating_ref: str | None = None, detail: bool = Fals
             if row:
                 result, batch = row
                 item = summary(result, batch, invalid=not validity[batch.batch_id], now=now)
-                if not rating_ref and item["status"] in {"RATED", "PARTIAL"}:
+                if not rating_ref and item["status"] in {"RATED", "SCORED", "PARTIAL"}:
                     from app.services.fund_market_review import rating_review_required
 
                     if rating_review_required(code):
                         # 复用已有资料待更新状态，不篡改历史分数；新事项没有审阅前不继续显示有效等级。
                         item.update(
-                            status="STALE", grade=None, gradeLabel=None, message="新增事项待复核，暂不展示当前等级"
+                            status="STALE",
+                            grade=None,
+                            gradeLabel=None,
+                            score=None,
+                            # 列表不经过详情的展示过滤，必须同步隐藏失效的部分分和覆盖率，
+                            # 避免同一待复核基金在列表仍看起来具有当前有效评分。
+                            scoreRange=None,
+                            partialScore=None,
+                            scoreCoverage=None,
+                            message="新增事项待复核，暂不展示当前等级",
                         )
                 if detail:
                     item.update(result.public_evidence)

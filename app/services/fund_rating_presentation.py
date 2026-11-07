@@ -39,12 +39,15 @@ def enrich_published_detail(item: dict, result, snapshot: dict) -> dict:
     """
     from app.services.fund_rating_reviewed_snapshot import BASIS as SNAPSHOT_BASIS
 
-    if snapshot.get("method", {}).get("basis") == SNAPSHOT_BASIS:
+    # 未适配产品保留空方法；缺项状态不能因为展示补充而变成接口异常。
+    if (snapshot.get("method") or {}).get("basis") == SNAPSHOT_BASIS:
+        if item.get("status") == "SCORED" and result.status == "SCORED":
+            return {**item, "score": _point(result.score)}
         output = {**item, "score": None}
         if item.get("status") in {"PARTIAL", "NOT_RATED"}:
             return output
         # 失效的区间/部分分与完整分一样隐藏，不把旧结果继续当当前结果。
-        output.update(scoreRange=None, partialScore=None, scoreCoverage=None)
+        output.update(score=None, scoreRange=None, partialScore=None, scoreCoverage=None)
         output["dimensions"] = [{**d, "score": None, "scoreRange": None} for d in item.get("dimensions", [])]
         return output
     rated = item.get("status") == "RATED" and result.status == "RATED"

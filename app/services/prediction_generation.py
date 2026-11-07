@@ -3,7 +3,7 @@
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, time
-from uuid import uuid4
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
@@ -635,18 +635,24 @@ def resolve_pending_targets(limit=100):
     return {"checked": len(pending), "resolved": resolved_count}
 
 
-def verify_outcomes(limit=100, *, checked_before=None):
+def verify_outcomes(limit=100, *, checked_before=None, prediction_ids=None):
     """追加到期答案；批次水位使分页只检查本轮尚未处理的原预测，缺资料仍保留等待。"""
     from app.services.prediction_contract import reinvested_series
 
     now = datetime.now(UTC)
+    selected = None
+    if prediction_ids is not None:
+        if not prediction_ids or len(prediction_ids) > 500:
+            raise PredictionFailure("OUTCOME_SCOPE_INVALID", "VALIDATION", "历史核对范围必须为有界原预测编号")
+        selected = sorted({str(UUID(str(value))) for value in prediction_ids})
     # 每日00:30的任务仍处于UTC前一天；到期判断必须使用北京时间，否则会漏掉刚结束的估值日。
     due_before = (checked_before or now).astimezone(ZoneInfo("Asia/Shanghai")).date()
     with get_engine().connect() as c:
         records = rows(
             c,
-            """SELECT prediction_id,payload FROM fund_prediction_record
+            """SELECT prediction_id,payload,content_hash FROM fund_prediction_record
             WHERE mode='LIVE' AND coalesce(payload->>'endDate',payload->>'nominalEndDate')<:due_before
+            AND (CAST(:prediction_ids AS uuid[]) IS NULL OR prediction_id=ANY(CAST(:prediction_ids AS uuid[])))
             AND (CAST(:checked_before AS timestamptz) IS NULL OR
               (generated_at<=:checked_before AND NOT EXISTS
                 (SELECT 1 FROM prediction_check_state s WHERE s.prediction_id=fund_prediction_record.prediction_id
@@ -657,12 +663,18 @@ def verify_outcomes(limit=100, *, checked_before=None):
             limit=min(limit, 500),
             due_before=str(due_before),
             checked_before=checked_before,
+            prediction_ids=selected,
         )
     completed = created = pending = failed = 0
     for record in records:
         prediction = record["payload"]
         check_status, check_payload = "PENDING_DATA", {"summary": "到期净值或分红核验水位尚未齐备"}
         try:
+            if fingerprint(prediction) != record["content_hash"]:
+                raise PredictionFailure("PREDICTION_EVIDENCE_HASH_MISMATCH", "OUTCOME", "原预测摘要未通过核对")
+            from app.services.fund_prediction_outcome_calendar import restored_calendar
+
+            verified = restored_calendar(prediction)
             # 新收益从已取得的基准净值计算；旧预测仍使用原startDate，禁止重写旧成绩。
             start_day = date.fromisoformat(prediction.get("baseNavDate", prediction["startDate"]))
             data = read_fund_data(
@@ -670,6 +682,7 @@ def verify_outcomes(limit=100, *, checked_before=None):
                 now,
                 start=start_day,
                 legacy_calendar=not nav_anchored(policy_for_record(prediction)),
+                **({"verified_calendar": verified} if verified is not None else {}),
             )
             end = prediction["endDate"]
             if not end:

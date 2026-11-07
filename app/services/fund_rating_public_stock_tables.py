@@ -15,7 +15,7 @@ _ROW = re.compile(r"^\s*(\d{1,4})\s+(\d{5,6})(?=\s|[\u4e00-\u9fff])\s*(.*)$")
 _INTEGER = r"(?:\d+|\d{1,3}(?:,\d{3})+)"
 
 
-def cells(lines: list[str]) -> tuple[str, list[str]]:
+def cells(lines: list[str], *, verified_name: str | None = None) -> tuple[str, list[str]]:
     """枚举折行单元格的唯一合法拼接；不补任何数字，金额必须明确到分。"""
     # PDF 的金额末位有时换到下一行，但同一行的最右侧占比已经先输出。
     # 只处理“金额恰缺一位小数 + 下一行只有一位数字”的确定布局，不把页码、
@@ -28,7 +28,15 @@ def cells(lines: list[str]) -> tuple[str, list[str]]:
         )
         if wrapped:
             return wrapped[1], [wrapped[2], wrapped[3] + lines[1].strip(), wrapped[4]]
-    tokens = " ".join(lines).split()
+    content = " ".join(lines)
+    if verified_name:
+        # 退市简称的数字后缀可能与数量混排（例如“中天 3 95,400”）。
+        # 只有上层已从公司本期原报告核准完整简称时才明确名称边界。
+        prefix = re.match(r"^\s*" + r"\s*".join(map(re.escape, verified_name)) + r"\s+", content)
+        if not prefix:
+            raise ValueError("RATING_STOCK_VERIFIED_NAME_CONFLICT")
+        content = content[prefix.end():]
+    tokens = content.split()
     words, numbers = [], []
     for token in tokens:
         if re.fullmatch(r"[\d,.]+%?|[-－—]", token):
@@ -46,12 +54,16 @@ def cells(lines: list[str]) -> tuple[str, list[str]]:
             and re.fullmatch(r"(?:\d+(?:\.\d+)?%?|[-－—])", values[2])
         ):
             choices.append(values)
-    if len(choices) != 1 or not words:
+    if (not verified_name and len(numbers) == 4 and re.fullmatch(r"[135]", numbers[0])
+            and re.fullmatch(r"\d{1,3}(?:,\d{3})+", numbers[1])):
+        raise ValueError("RATING_STOCK_NUMERIC_NAME_PROOF_REQUIRED")
+    if len(choices) != 1 or (not words and not verified_name) or (verified_name and words):
         raise ValueError("RATING_STOCK_CELLS_INCOMPLETE_OR_AMBIGUOUS")
-    return "".join(words), choices[0]
+    return verified_name or "".join(words), choices[0]
 
 
-def parse(pages: list[str], stock_amount: str, net_assets: str, *, require_industry: bool = True) -> dict:
+def parse(pages: list[str], stock_amount: str, net_assets: str, *, require_industry: bool = True,
+          verified_securities: dict | None = None) -> dict:
     """解析全部股票并合并同一代码的指数/非指数分表，拒绝未统一的跨市场行业分类。"""
     from app.services.fund_rating_public_market import section, stock_pages
 
@@ -84,7 +96,8 @@ def parse(pages: list[str], stock_amount: str, net_assets: str, *, require_indus
             if re.fullmatch(r"\d{1,3}", line) and re.search(r"20\d{2}\s*年.*报告$", lines[offset - 1].strip()):
                 continue
             rest.append(line)
-        name, values = cells([first, *rest])
+        identity = (verified_securities or {}).get(code, {})
+        name, values = cells([first, *rest], verified_name=identity.get('name'))
         quantity, amount, weight = values
         if require_industry and len(code) == 5:
             raise ValueError("RATING_MARKET_MIXED_INDUSTRY_TAXONOMY")
@@ -101,6 +114,10 @@ def parse(pages: list[str], stock_amount: str, net_assets: str, *, require_indus
         )
         if exchange is None:
             raise ValueError("RATING_STOCK_EXCHANGE_UNKNOWN")
+        if identity:
+            if identity.get('market') != '.NQ' or not re.fullmatch(r'400\d{3}', code):
+                raise ValueError('RATING_STOCK_VERIFIED_MARKET_CONFLICT')
+            exchange = identity['market']
         security = code + exchange
         row = positions.setdefault(
             security,
@@ -153,7 +170,8 @@ def parse(pages: list[str], stock_amount: str, net_assets: str, *, require_indus
     }
 
 
-def parse_disclosed(pages: list[str], stock_amount: str, net_assets: str) -> dict:
+def parse_disclosed(pages: list[str], stock_amount: str, net_assets: str, *,
+                    verified_securities: dict | None = None) -> dict:
     """持仓用途核对全部股票与独立行业表，单列有原文证明的替代款增值。
 
     股票资产账面金额有时含可退替代款估值增值，证券明细却不含该非证券项目。
@@ -164,7 +182,7 @@ def parse_disclosed(pages: list[str], stock_amount: str, net_assets: str) -> dic
     from app.services.fund_rating_public_market import section, stock_pages
 
     try:
-        result = parse(pages, stock_amount, net_assets, require_industry=False)
+        result = parse(pages, stock_amount, net_assets, require_industry=False, verified_securities=verified_securities)
         result["substitution_increment_cny"] = "0"
         return result
     except ValueError as error:
@@ -174,7 +192,14 @@ def parse_disclosed(pages: list[str], stock_amount: str, net_assets: str) -> dic
     asset = section(text, r"(?m)^\s*7\.1\s+[^\n]*资产组合情况", r"(?m)^\s*7\.2\s")
     industry = section(text, r"(?m)^\s*7\.2\s+[^\n]*按行业分类", r"(?m)^\s*7\.3\s")
     note = compact(asset)
-    if not re.search(r"股票[^。]{0,50}含可退替代款[^。]{0,10}估值增值", note):
+    included = re.search(r"(?:股票|权益投资项)[^。]{0,50}含可退替代款[^。]{0,10}估值增值", note)
+    difference_note = re.search(
+        r"投资组合报表中股票投资市值与按行业分类股票投资组合报表中股票总市值之间的"
+        r"差异是由于可退替代款估值增值引起的", note
+    )
+    # 平安原件明确说明两张表差异的唯一原因；同样继续要求账面股票项、
+    # 独立行业合计和逐证券合计三方守恒，不因没有使用“含”字拒收实据。
+    if not included and not difference_note:
         raise ValueError("HOLDINGS_SUBSTITUTION_NOTE_UNVERIFIED")
     equity = re.findall(r"(?m)^\s*其中[：:]\s*股票\s+([\d,]+\.\d{2})\s+[\d.]+\s*$", asset)
     totals = re.findall(r"(?m)^\s*合计\s+([\d,]+\.\d{2})\s+[\d.]+\s*$", industry)
@@ -189,7 +214,7 @@ def parse_disclosed(pages: list[str], stock_amount: str, net_assets: str) -> dic
     if difference == 0:
         raise ValueError("HOLDINGS_SUBSTITUTION_INCREMENT_RANGE")
     # 使用真实行业合计作为证券金额，再逐证券相加对账；任何遗漏仍会失败。
-    result = parse(pages, str(disclosed), net_assets, require_industry=False)
+    result = parse(pages, str(disclosed), net_assets, require_industry=False, verified_securities=verified_securities)
     if abs(sum(Decimal(row["value_cny"]) for row in result["reported_industries"]) - disclosed) > Decimal(".02"):
         raise ValueError("HOLDINGS_SUBSTITUTION_INDUSTRY_CONFLICT")
     result.update(

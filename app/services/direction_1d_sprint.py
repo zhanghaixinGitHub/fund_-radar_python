@@ -126,7 +126,7 @@ def snapshot():
         return {"status": "ALREADY_CAPTURED"}
     context = live_context(
         PROJECT / ".local-runs/direction-1d-calibration-preflight-20260913/runtime-after.json",
-        Path("C:/ideaProject/workSpace12/.env"),
+        Path("D:/Project-FullStack/workSpace01/02-java/.env"),
     )
     if not (ROOT / "scope.json").exists():
         save(ROOT / "scope.json", context)

@@ -11,6 +11,22 @@ from app.services.fund_quality_v2_governance import (
 )
 
 
+def test_manager_senior_staff_subsection_stops_before_custodian_and_trading_table():
+    pages = [
+        "基金管理人：测试基金管理有限公司\n"
+        "11.6 管理人、托管人及其高级管理人员受稽查或处罚等情况\n"
+        "11.6.1 管理人及其高级管理人员受稽查或处罚等情况\n"
+        "本报告期内，基金管理人及其相关高级管理人员无受稽查或处罚等情况。\n"
+        "11.6.2 托管人及其高级管理人员受稽查或处罚等情况\n"
+        "托管人事实不能替代管理人。\n11.7 基金租用证券公司交易单元的有关情况\n交易金额10000。"
+    ]
+    items = report_governance_sections(
+        pages, coverage=(date(2025, 1, 1), date(2025, 12, 31)), source_hash="isolated_fixture", source_url="TEST_ONLY"
+    )
+    assert len(items) == 1 and items[0]["scope"] == "MANAGER_AND_SENIOR_STAFF"
+    assert "托管人事实" not in items[0]["excerpt"] and "交易金额" not in items[0]["excerpt"]
+
+
 @pytest.mark.parametrize("counter", ["第 66 页 共 71 页", "66"])
 def test_adverse_report_statement_across_pages_is_not_clean_governance_or_regulator_acceptance(counter):
     pages = [
@@ -61,12 +77,13 @@ def test_verified_bare_page_number_is_removed_from_field_but_raw_quote_kept():
         "管理人采取整改措施的情况 公司自述完成整改。\n11.6.2 管理人相关从业人员受调查或处罚等情况\n"
         "本期无。\n11.6.3 托管人受调查或处罚等情况\n本期无。",
     ]
-    values = report_governance_sections(pages, coverage=(date(2025, 1, 1), date(2025, 12, 31)),
-                                         source_hash="TEST_ONLY", source_url="TEST_ONLY")
-    event = values[0]['reported_events'][0]
-    assert event['reported_measures'] == '责令改正'
-    assert '\n3\n' in values[0]['excerpt']
-    assert any(row['page'] == 3 and row['removed_header'] == '3' for row in values[0]['parser_header_edits'])
+    values = report_governance_sections(
+        pages, coverage=(date(2025, 1, 1), date(2025, 12, 31)), source_hash="TEST_ONLY", source_url="TEST_ONLY"
+    )
+    event = values[0]["reported_events"][0]
+    assert event["reported_measures"] == "责令改正"
+    assert "\n3\n" in values[0]["excerpt"]
+    assert any(row["page"] == 3 and row["removed_header"] == "3" for row in values[0]["parser_header_edits"])
 
 
 def test_interleaved_reprint_reasons_and_split_remediation_label_are_not_clean_fields():
@@ -77,12 +94,13 @@ def test_interleaved_reprint_reasons_and_split_remediation_label_are_not_clean_f
         "11.6.2 管理人相关从业人员受调查或处罚等情况\n本期无。\n"
         "11.6.3 托管人受调查或处罚等情况\n本期无。"
     )
-    values = report_governance_sections([text], coverage=(date(2025, 1, 1), date(2025, 12, 31)),
-                                         source_hash="TEST_ONLY", source_url="TEST_ONLY")
-    event = values[0]['reported_events'][0]
-    assert event['field_state'] == 'LAYOUT_AMBIGUOUS_RAW_TEXT_ONLY'
-    assert len(event['layout_warnings']) == 2
-    assert event['reported_remediation'] == '（如提出整改意公司自述见）完成。'
+    values = report_governance_sections(
+        [text], coverage=(date(2025, 1, 1), date(2025, 12, 31)), source_hash="TEST_ONLY", source_url="TEST_ONLY"
+    )
+    event = values[0]["reported_events"][0]
+    assert event["field_state"] == "LAYOUT_AMBIGUOUS_RAW_TEXT_ONLY"
+    assert len(event["layout_warnings"]) == 2
+    assert event["reported_remediation"] == "（如提出整改意公司自述见）完成。"
 
 
 def test_declaration_coverage_unions_overlaps_and_keeps_missing_quarter():
@@ -98,26 +116,33 @@ def test_declaration_coverage_unions_overlaps_and_keeps_missing_quarter():
 
 def test_old_combined_title_covers_company_and_senior_staff_but_not_all_staff():
     records = [
-        {'scope': 'COMBINED_MANAGER_CUSTODIAN_OR_STAFF', 'coverage': ['2024-01-01', '2024-12-31'],
-         'source_hashes': ['TEST_2024']},
-        *[{'scope': scope, 'coverage': ['2025-01-01', '2026-06-30'], 'source_hashes': ['TEST_LATER']}
-          for scope in ['MANAGER', 'MANAGER_RELATED_STAFF']],
+        {
+            "scope": "COMBINED_MANAGER_CUSTODIAN_OR_STAFF",
+            "coverage": ["2024-01-01", "2024-12-31"],
+            "source_hashes": ["TEST_2024"],
+        },
+        *[
+            {"scope": scope, "coverage": ["2025-01-01", "2026-06-30"], "source_hashes": ["TEST_LATER"]}
+            for scope in ["MANAGER", "MANAGER_RELATED_STAFF"]
+        ],
     ]
-    result = declaration_coverage(records+records, start=date(2023, 9, 30), end=date(2026, 9, 30))
-    assert result['by_report_scope']['MANAGER']['covered_days'] == 546
-    subjects = result['by_subject_scope']
-    assert subjects['MANAGER_COMPANY']['covered_days'] == 912
-    assert subjects['MANAGER_SENIOR_MANAGEMENT']['covered_days'] == 912
-    assert subjects['MANAGER_ALL_RELATED_STAFF']['covered_days'] == 546
-    assert subjects['MANAGER_COMPANY']['missing_intervals'] == [
-        ['2023-09-30', '2023-12-31'], ['2026-07-01', '2026-09-30']]
+    result = declaration_coverage(records + records, start=date(2023, 9, 30), end=date(2026, 9, 30))
+    assert result["by_report_scope"]["MANAGER"]["covered_days"] == 546
+    subjects = result["by_subject_scope"]
+    assert subjects["MANAGER_COMPANY"]["covered_days"] == 912
+    assert subjects["MANAGER_SENIOR_MANAGEMENT"]["covered_days"] == 912
+    assert subjects["MANAGER_ALL_RELATED_STAFF"]["covered_days"] == 546
+    assert subjects["MANAGER_COMPANY"]["missing_intervals"] == [
+        ["2023-09-30", "2023-12-31"],
+        ["2026-07-01", "2026-09-30"],
+    ]
 
 
 def test_report_outside_window_adds_neither_coverage_nor_source():
-    outside = {'scope': 'MANAGER', 'coverage': ['2022-01-01', '2022-12-31'], 'source_hashes': ['TEST_OLD']}
-    current = {'scope': 'MANAGER', 'coverage': ['2026-01-01', '2026-06-30'], 'source_hashes': ['TEST_NEW']}
+    outside = {"scope": "MANAGER", "coverage": ["2022-01-01", "2022-12-31"], "source_hashes": ["TEST_OLD"]}
+    current = {"scope": "MANAGER", "coverage": ["2026-01-01", "2026-06-30"], "source_hashes": ["TEST_NEW"]}
     result = declaration_coverage([outside, current], start=date(2023, 9, 30), end=date(2026, 9, 30))
-    assert result['by_subject_scope']['MANAGER_COMPANY']['source_hashes'] == ['TEST_NEW']
+    assert result["by_subject_scope"]["MANAGER_COMPANY"]["source_hashes"] == ["TEST_NEW"]
 
 
 def safe_html(entity="测试基金管理有限公司"):

@@ -89,3 +89,14 @@ def test_0030_uses_beijing_day_for_maturity_and_dividend_watermark(database, mon
     result = generation.verify_outcomes()
     assert result["checked"] == result["completed"] == 1
     assert result["pending"] == result["failed"] == 0
+
+
+def test_selected_saved_prediction_scope_does_not_recheck_other_records(database, monkeypatch):
+    seed(database, monkeypatch, 3)
+    with database.connect() as c:
+        identifier = str(c.execute(text("SELECT prediction_id FROM fund_prediction_record LIMIT 1")).scalar_one())
+    result = generation.verify_outcomes(prediction_ids=[identifier])
+    assert result["checked"] == result["created"] == 1
+    with database.connect() as c:
+        assert c.execute(text("SELECT count(*) FROM prediction_check_state")).scalar_one() == 1
+        assert str(c.execute(text("SELECT prediction_id FROM prediction_outcome")).scalar_one()) == identifier

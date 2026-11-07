@@ -54,6 +54,13 @@ def test_other_fund_or_unreviewed_bundle_cannot_supply_payment_facts():
     assert not enrich_published_detail(item, result, snapshot)["dimensions"][0]["metrics"]
 
 
+def test_unsupported_legacy_null_method_remains_readable():
+    item, result, snapshot = fixture("UNSUPPORTED")
+    snapshot["method"] = None
+    actual = enrich_published_detail(item, result, snapshot)
+    assert actual["score"] is None
+
+
 @pytest.mark.parametrize("value", [None, "NaN", "Infinity", True, "-1", "101"])
 def test_missing_or_invalid_score_does_not_become_zero(value):
     item, result, snapshot = fixture()

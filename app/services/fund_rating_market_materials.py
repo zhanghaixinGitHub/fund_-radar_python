@@ -3,26 +3,26 @@
 每个事实保留原件引用。已发布批次冻结完整说明，普通查询仅读取该批次。
 """
 
-import hashlib
 import json
 from copy import deepcopy
 from datetime import date, datetime
 from pathlib import Path
 
 from app.services.fund_rating_inputs import digest
+from app.services.material_content import content_digest, location_exists, source_bytes, source_size, source_text
 
 
 def load(root: Path, as_of: date, frozen: datetime) -> dict:
     """读取本机维护命令保存的有界不可变清单；不存在清单时沿用原有空态。"""
     pointer = root / "market-materials-current.json"
-    if not pointer.exists():
+    if not location_exists(pointer):
         return {}
-    reference = json.loads(pointer.read_text(encoding="utf8"))
+    reference = json.loads(source_text(pointer, encoding="utf8"))
     path = (root / reference["file"]).resolve()
-    if not path.is_relative_to(root.resolve() / "assessments") or path.stat().st_size > 20_000_000:
+    if not path.is_relative_to(root.resolve() / "assessments") or source_size(path) > 20_000_000:
         raise ValueError("RATING_MARKET_MATERIALS_PATH_SIZE")
-    raw = path.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != reference["sha256"]:
+    raw = source_bytes(path)
+    if content_digest(raw) != reference["sha256"]:
         raise ValueError("RATING_MARKET_MATERIALS_HASH")
     packet = json.loads(raw)
     if packet["version"] != 1 or packet["as_of_date"] != str(as_of):
@@ -45,8 +45,8 @@ def load(root: Path, as_of: date, frozen: datetime) -> dict:
             source = (root / ref["file"]).resolve()
             if (
                 not source.is_relative_to(root.resolve() / "sources")
-                or source.stat().st_size > 20_000_000
-                or hashlib.sha256(source.read_bytes()).hexdigest() != ref["sha256"]
+                or source_size(source) > 20_000_000
+                or content_digest(source_bytes(source)) != ref["sha256"]
             ):
                 raise ValueError("RATING_MARKET_MATERIALS_ORIGINAL")
     # 后补资料不属于较早冻结时点的已知事实；历史复算忽略它，而非使用它或使整批失败。

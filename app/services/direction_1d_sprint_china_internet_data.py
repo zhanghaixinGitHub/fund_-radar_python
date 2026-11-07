@@ -1,6 +1,6 @@
 """中国互联网ETF成交价格的一日输入，历史开发与真实08:30前采集各自留证。"""
 
-import hashlib
+# 原始响应统一归档外接盘；历史路径只作为数据库别名，不生成C盘源文件。
 from datetime import date, datetime, time
 
 import numpy as np
@@ -10,6 +10,7 @@ from app.services import direction_1d_sprint as base
 from app.services import direction_1d_sprint_fxi_overnight_data as timing
 from app.services import direction_1d_sprint_overnight as overnight
 from app.services import direction_1d_sprint_sector_data as slots
+from app.services import material_content as _sources
 
 SYMBOLS = ("KWEB",)
 SOURCE = "SINA_CHINA_INTERNET_ETF_QUOTE_V1"
@@ -81,19 +82,19 @@ def history():
     if result["status"] != "QUALIFIED_RAW_PRICE_HISTORY":
         raise ValueError("US_ETF_HISTORY_NOT_QUALIFIED")
     for name, digest in plan["code_hashes"].items():
-        if hashlib.sha256((base.PROJECT / name).read_bytes()).hexdigest() != digest:
+        if _sources.content_digest(_sources.source_bytes(base.PROJECT / name)) != digest:
             raise ValueError("US_ETF_HISTORY_PARSER_CHANGED")
     combined = {}
     for symbol in SYMBOLS:
         label = symbol
-        raw = (folder / f"response-{label}.bin").read_bytes()
+        raw = _sources.source_bytes(folder / f"response-{label}.bin")
         receipt, request = base.read(folder / f"receipt-{label}.json"), base.read(folder / f"request-{label}.json")
         if (
             request["url"] != url_for(symbol)
             or receipt["request_hash"] != base.digest(request)
             or receipt["status"] != "RECEIVED"
             or receipt["bytes"] != len(raw)
-            or receipt["sha256"] != hashlib.sha256(raw).hexdigest()
+            or receipt["sha256"] != _sources.content_digest(raw)
             or receipt["sha256"] != plan["raw_hashes"][symbol]
         ):
             raise ValueError("US_ETF_HISTORY_RAW_CHANGED")
@@ -110,7 +111,7 @@ def load_piece(target, base_day, symbol, slot):
     folder = root() / target / symbol
     meta = base.read(folder / f"raw/{slot}.json")
     request = base.read(folder / f"requests/{slot}.json")
-    raw = (folder / f"raw/{slot}.bin").read_bytes()
+    raw = _sources.source_bytes(folder / f"raw/{slot}.bin")
     deadline = datetime.combine(date.fromisoformat(target), time(8, 30), base.ZONE)
     received = datetime.fromisoformat(meta["received_at"])
     if (
@@ -126,7 +127,7 @@ def load_piece(target, base_day, symbol, slot):
         or not raw
         or len(raw) > MAX_BYTES
         or len(raw) != meta["bytes"]
-        or hashlib.sha256(raw).hexdigest() != meta["body_sha256"]
+        or _sources.content_digest(raw) != meta["body_sha256"]
     ):
         raise ValueError("US_ETF_LIVE_RAW_OR_TIME_CHANGED")
     closed_before(received, base_day, target)
@@ -170,14 +171,14 @@ def capture(at):
         return None
     base_day = days[days.index(target) - 1]
     path = root() / target / "input.json"
-    if path.exists():
+    if _sources.location_exists(path):
         return load(target)
     needed = required(base_day, target)
     combined, refs = {}, {}
     for symbol in SYMBOLS:
         folder = root() / target / symbol
         for previous in SLOTS:
-            if not (folder / f"raw/{previous}.json").exists():
+            if not _sources.location_exists(folder / f"raw/{previous}.json"):
                 continue
             try:
                 points, meta = load_piece(target, base_day, symbol, previous)
@@ -188,7 +189,7 @@ def capture(at):
         if symbol in combined:
             continue
         request_path = folder / f"requests/{slot}.json"
-        if request_path.exists():
+        if _sources.location_exists(request_path):
             continue
         request = {
             "at": base.now().isoformat(),
@@ -205,14 +206,13 @@ def capture(at):
             received = base.now().isoformat()
             raw_path = folder / f"raw/{slot}.bin"
             raw_path.parent.mkdir(parents=True, exist_ok=True)
-            with raw_path.open("xb") as output:
-                output.write(raw)
+            _sources.write_source(raw_path, raw)
             meta = {
                 "source": SOURCE,
                 "symbol": symbol,
                 "received_at": received,
                 "request_hash": base.digest(request),
-                "body_sha256": hashlib.sha256(raw).hexdigest(),
+                "body_sha256": _sources.content_digest(raw),
                 "bytes": len(raw),
                 "headers": headers,
             }

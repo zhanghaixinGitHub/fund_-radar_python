@@ -6,7 +6,6 @@
 债券及其他非股票受限事实不在本候选范围，不把未评估的金额记为零。
 """
 
-import hashlib
 import re
 from datetime import date
 
@@ -14,6 +13,7 @@ from app.services.fund_quality_v2_balance_proofs import strict_balance_values
 from app.services.fund_quality_v2_disclosures import report_period
 from app.services.fund_quality_v2_restrictions import full_asset_restriction_scope, restricted_securities
 from app.services.fund_rating_public_stock_tables import parse
+from app.services.material_content import content_digest
 
 VERSION = "QUALITY_FULL_STOCK_BOOK_20261017_6"
 
@@ -139,8 +139,8 @@ def periodic_financial_view(pages: list[str]) -> tuple[list[str], dict]:
     return view, {
         "chapter_edits": edits,
         "visible_money_tail_edits": money_edits,
-        "original_text_sha256": hashlib.sha256("\n".join(pages).encode("utf-8")).hexdigest(),
-        "parser_text_sha256": hashlib.sha256("\n".join(view).encode("utf-8")).hexdigest(),
+        "original_text_sha256": content_digest("\n".join(pages).encode("utf-8")),
+        "parser_text_sha256": content_digest("\n".join(view).encode("utf-8")),
         "scope": "ORIGINAL_DIGITS_PRESERVED_PARSER_VIEW_NOT_ORIGINAL_TEXT",
     }
 
@@ -181,8 +181,8 @@ def full_stock_book(pages: list[str], *, report_end: date) -> dict:
             "edits": edits,
             "visible_money_tail_edits": money_edits,
             "restriction_layout_edits": stock_edits,
-            "original_text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-            "parser_text_sha256": hashlib.sha256("\n".join(view).encode("utf-8")).hexdigest(),
+            "original_text_sha256": content_digest(text.encode("utf-8")),
+            "parser_text_sha256": content_digest("\n".join(view).encode("utf-8")),
             "scope": "ORIGINAL_DIGITS_PRESERVED_PARSER_VIEW_NOT_ORIGINAL_TEXT",
         },
     }

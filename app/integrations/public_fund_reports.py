@@ -4,21 +4,20 @@
 转载正文保留完整响应、来源和实际接收时间，不能冒充管理人 PDF 原文。
 """
 
-import hashlib
-import io
 import json
 import re
 import time
 from datetime import datetime, timedelta
 
 import httpx
-from pypdf import PdfReader
 
 from app.integrations.dbfund_reports import bounded_get
 from app.integrations.fund_report_layout_v3 import parse_text
 from app.services.direction_1d_protocol import digest
 from app.services.fund_exposure_common import ROOT, blob, now, read
 from app.services.fund_materials_store import versioned_save
+from app.services.material_content import content_digest, location_exists, source_bytes
+from app.services.material_content import document_reader as PdfReader
 
 CATALOG_URL = "https://api.fund.eastmoney.com/f10/JJGG"
 BODY_URL = "https://np-cnotice-fund.eastmoney.com/api/content/ann"
@@ -77,13 +76,13 @@ class ReportClient:
         if not catalog and not re.fullmatch(r"AN\d{18}", str(params.get("art_code", ""))):
             raise ValueError("REPORT_ARTICLE_ID_INVALID")
         path = STORE / "receipts" / (digest({"url": url, "params": params}) + ".json")
-        old = read(path) if path.exists() else None
+        old = read(path) if location_exists(path) else None
         if old:
             due = now() - datetime.fromisoformat(old["checked_at"]) >= timedelta(days=30)
             reuse = old.get("check_id") == self.check_id if catalog else not due
             if reuse and not old.get("invalid"):
-                raw = (ROOT / old["file"]).read_bytes()
-                if hashlib.sha256(raw).hexdigest() != old["sha256"]:
+                raw = source_bytes(ROOT / old["file"])
+                if content_digest(raw) != old["sha256"]:
                     raise ValueError("REPORT_CACHED_BODY_CHANGED")
                 return json.loads(raw), old
         # 连续网络失败后停止本轮外呼，后续仍可复用成功缓存；避免来源故障时逐项轰击。
@@ -137,7 +136,7 @@ class ReportClient:
         """失败正文仍保留原文和版本；下一轮允许重新询问该项，不冻结一次空值或截断。"""
         params = {"client_source": "web_fund", "show_all": 1, "art_code": article_id}
         path = STORE / "receipts" / (digest({"url": BODY_URL, "params": params}) + ".json")
-        if path.exists():
+        if location_exists(path):
             value = read(path)
             versioned_save(path, {**value, "invalid": True})
 
@@ -150,10 +149,10 @@ class ReportClient:
         ):
             raise ValueError("REPORT_HOST_NOT_ALLOWED")
         path = STORE / "receipts" / (digest({"issuer_pdf": url}) + ".json")
-        old = read(path) if path.exists() else None
+        old = read(path) if location_exists(path) else None
         if old and now() - datetime.fromisoformat(old["checked_at"]) < timedelta(days=30):
-            raw = (ROOT / old["file"]).read_bytes()
-            if hashlib.sha256(raw).hexdigest() != old["sha256"]:
+            raw = source_bytes(ROOT / old["file"])
+            if content_digest(raw) != old["sha256"]:
                 raise ValueError("REPORT_CACHED_BODY_CHANGED")
             return raw, old
         if self.count >= 600:
@@ -242,7 +241,7 @@ def acquire_one(client: ReportClient, code: str, entry: dict):
     if code not in PEERS or entry.get("FUNDCODE") != code:
         raise ValueError("REPORT_PEER_SCOPE_INVALID")
     manifest = STORE / code / "manifest.json"
-    previous = read(manifest).get("documents", {}).get(entry["ID"]) if manifest.exists() else None
+    previous = read(manifest).get("documents", {}).get(entry["ID"]) if location_exists(manifest) else None
     if previous:
         path = STORE / previous["file"]
         parsed = read(path)
@@ -256,7 +255,7 @@ def acquire_one(client: ReportClient, code: str, entry: dict):
             and parsed.get("parser_version") == PARSER
             and now() - datetime.fromisoformat(receipt["checked_at"]) < timedelta(days=30)
         ):
-            if hashlib.sha256((ROOT / receipt["file"]).read_bytes()).hexdigest() != receipt["sha256"]:
+            if content_digest(source_bytes(ROOT / receipt["file"])) != receipt["sha256"]:
                 raise ValueError("REPORT_CACHED_BODY_CHANGED")
             return parsed, path, False
     try:
@@ -290,7 +289,7 @@ def _acquire_one(client: ReportClient, code: str, entry: dict, *, fallback=False
         else:
             raw, receipt = client.issuer_pdf(code, entry["ID"])
             official_entry = {"title": entry["TITLE"], "published_date": entry["published_date"]}
-        pdf = PdfReader(io.BytesIO(raw))
+        pdf = PdfReader(raw)
         if len(pdf.pages) > 180:
             raise ValueError("REPORT_PAGE_LIMIT")
         pages = [page.extract_text() for page in pdf.pages]
@@ -319,7 +318,7 @@ def _acquire_one(client: ReportClient, code: str, entry: dict, *, fallback=False
         raise ValueError("REPORT_BODY_PERIOD_MISMATCH")
     version = "-" + digest(receipt["received_at"])[:12] if receipt.get("revised_after_receipt") else ""
     target = STORE / code / "reports" / (receipt["sha256"] + version + "-" + PARSER + ".json")
-    if target.exists():
+    if location_exists(target):
         return read(target), target, False
     master = re.search(r"基金主代码\s*[:：]?\s*(\d{6})", text)
     parsed = parse_text(

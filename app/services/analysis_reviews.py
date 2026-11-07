@@ -103,7 +103,9 @@ def prepare_archive(directory: Path, fund_code: str, target_date: str) -> tuple[
                 raise ValueError("ANALYSIS_REVIEW_RANGE_INVALID")
         receipt = document["receipt"]
         original = directory / "sources" / Path(receipt["file"]).name
-        if hashlib.sha256(original.read_bytes()).hexdigest() != receipt["sha256"]:
+        from app.services.material_content import content_digest, source_bytes
+
+        if content_digest(source_bytes(original)) != receipt["sha256"]:
             raise ValueError("ANALYSIS_REVIEW_SOURCE_CHANGED")
         sources[document["id"]] = {
             "title": "公告原文" if document["review_scope"] == "FULL_TEXT" else "财务报告原文（采用片段）",
@@ -127,7 +129,9 @@ def prepare_archive(directory: Path, fund_code: str, target_date: str) -> tuple[
             files["source:" + source_id] = {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "value": receipt}
             if receipt_path.is_file():
                 original = directory / "sources" / Path(receipt["file"]).name
-                if hashlib.sha256(original.read_bytes()).hexdigest() != receipt["sha256"]:
+                from app.services.material_content import content_digest, source_bytes
+
+                if content_digest(source_bytes(original)) != receipt["sha256"]:
                     raise ValueError("ANALYSIS_REVIEW_SOURCE_CHANGED")
             sources[source_id] = {
                 "title": "披露报告原文" if receipt_path.is_file() else "已留存行情回执",

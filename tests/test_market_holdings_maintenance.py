@@ -33,6 +33,28 @@ def test_disclosure_daily_normal_weekly_and_missed_week_catchup(day, last, expec
     assert maintenance.due(date.fromisoformat(day), last) is expected
 
 
+def test_market_scope_includes_active_public_disclosure_funds(monkeypatch):
+    """公开披露新增目录与供应商目录同属市场，不能在独立维护时只剩旧来源。"""
+    rows = [{'fund_code':'000003','fund_name':'公开披露基金'},
+            {'fund_code':'001021','fund_name':'供应商基金'}]
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def execute(self, statement):
+            sql = str(statement)
+            if sql.startswith('SELECT'):
+                assert "status='ACTIVE'" in sql and 'source_code=' not in sql
+                return self
+        def mappings(self): return iter(rows)
+
+    class Engine:
+        def connect(self): return Connection()
+
+    monkeypatch.setattr(maintenance,'get_engine',Engine)
+    assert maintenance.market_scope() == rows
+
+
 class Client:
     def __init__(self, entries):
         self.entries, self.body_downloads, self.count = entries, 0, 0

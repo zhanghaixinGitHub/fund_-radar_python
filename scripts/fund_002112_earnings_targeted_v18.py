@@ -38,7 +38,7 @@ def workspace():
                 for key, args in {"head": ["rev-parse", "HEAD"], "status": ["status", "--short"]}.items()
             },
         }
-        for p in [Path("C:/WebStormProject/workSpace05"), PYTHON, Path("C:/ideaProject/workSpace12")]
+        for p in [Path("D:/Project-FullStack/workSpace01/01-vue"), PYTHON, Path("D:/Project-FullStack/workSpace01/02-java")]
     ]
 
 

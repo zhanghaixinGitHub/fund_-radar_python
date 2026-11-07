@@ -52,7 +52,9 @@ class RatingDimension(PublicModel):
 
 class RatingSummary(PublicModel):
     fundCode: str
-    status: Literal["RATED", "PARTIAL", "NOT_RATED", "UNSUPPORTED", "STALE", "NOT_FOUND", "WITHDRAWN"]
+    status: Literal["RATED", "SCORED", "PARTIAL", "NOT_RATED", "UNSUPPORTED", "STALE", "NOT_FOUND", "WITHDRAWN"]
+    # 完整数字分可以先于等级发布；仅透传正式结果，不将部分分作为总分。
+    score: str | None = None
     grade: str | None = None
     gradeLabel: str | None = None
     asOfDate: str | None = None
@@ -85,7 +87,7 @@ class RatingDates(PublicModel):
 
 
 class RatingDetail(RatingSummary):
-    # 仅基金详情展示正式综合分；市场列表摘要保持现有契约。
+    # 详情与摘要共用完整数字分；部分分仍通过partialScore和覆盖率独立表达。
     score: str | None = None
     summary: str
     comparison: RatingComparison

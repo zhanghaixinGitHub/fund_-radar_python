@@ -1,7 +1,5 @@
 """公开资料评级的真实输入适配与本机使用边界，不制造机构内部持有人/收付款明细。"""
 
-import hashlib
-import io
 import json
 from copy import deepcopy
 from datetime import UTC, date, datetime, timedelta
@@ -9,8 +7,6 @@ from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
-
-from pypdf import PdfReader
 
 from app.core.config import get_settings
 from app.services.fund_rating_disclosures import appointed_teams, compact, equity_balance, key_information
@@ -32,6 +28,8 @@ from app.services.fund_rating_public_policy import (
     RECONCILED_BASIS,
 )
 from app.services.fund_rating_rules import decimal
+from app.services.material_content import content_digest, source_bytes, source_exists, source_size
+from app.services.material_content import document_reader as PdfReader
 
 
 def report_facts(pages: list[str]) -> dict:
@@ -76,6 +74,7 @@ def validate_public_sources(bundle: dict, frozen: datetime, *, root: Path | None
     原商业/授权来源的规范化包仍走原门禁，部署到非local环境时本口径失效。
     """
     from app.services.fund_rating_reviewed_snapshot import BASIS as SNAPSHOT_BASIS
+
     if bundle.get("basis") == SNAPSHOT_BASIS:
         from app.services.fund_rating_reviewed_snapshot import validate_sources
 
@@ -122,9 +121,9 @@ def validate_public_sources(bundle: dict, frozen: datetime, *, root: Path | None
         if received.tzinfo is None or received > frozen:
             raise ValueError("RATING_PUBLIC_SOURCE_FUTURE")
         path = (root / ref["file"]).resolve()
-        if not path.is_relative_to(sources_directory) or not path.is_file() or path.stat().st_size > 20_000_000:
+        if not path.is_relative_to(sources_directory) or not source_exists(path) or source_size(path) > 20_000_000:
             raise ValueError("RATING_PUBLIC_SOURCE_PATH")
-        if hashlib.sha256(path.read_bytes()).hexdigest() != ref["sha256"]:
+        if content_digest(source_bytes(path)) != ref["sha256"]:
             raise ValueError("RATING_PUBLIC_SOURCE_HASH")
     if market or etf:
         # dfcfw 附件主机按东财公告目录逐件绑定身份；白名单不等于整域信任。
@@ -369,15 +368,15 @@ def verify_public_originals(bundle: dict) -> None:
         return
     root = Path(get_settings().fund_insight_directory) / "ratings"
     refs = {r["sha256"]: r for r in bundle["raw_archive"]}
-    raw = (root / refs[bundle["report_hash"]]["file"]).read_bytes()
-    pages = [p.extract_text() or "" for p in PdfReader(io.BytesIO(raw)).pages]
+    raw = source_bytes(root / refs[bundle["report_hash"]]["file"])
+    pages = [p.extract_text() or "" for p in PdfReader(raw).pages]
     if report_facts(pages) != bundle["disclosure"]:
         raise ValueError("RATING_PUBLIC_REPORT_FACT_CONFLICT")
     balance = equity_balance(pages, bundle["holdings"]["positions"])
     if any(balance[k] != bundle["holdings"][k] for k in ("net_assets", "balance_sheet")):
         raise ValueError("RATING_PUBLIC_BALANCE_FACT_CONFLICT")
-    raw = (root / refs[bundle["summary_hash"]]["file"]).read_bytes()
-    pages = [p.extract_text() or "" for p in PdfReader(io.BytesIO(raw)).pages]
+    raw = source_bytes(root / refs[bundle["summary_hash"]]["file"])
+    pages = [p.extract_text() or "" for p in PdfReader(raw).pages]
     if "基金类型混合型交易币种人民币" not in compact("\n".join(pages)):
         raise ValueError("RATING_PUBLIC_FUND_TYPE")
     info = key_information(pages)
@@ -388,9 +387,9 @@ def verify_public_originals(bundle: dict) -> None:
     prospectus = [r for r in refs.values() if "招募" in r["url"] and r["url"].endswith(".pdf")]
     if len(prospectus) != 1:
         raise ValueError("RATING_PUBLIC_MANAGER_SOURCE")
-    raw = (root / prospectus[0]["file"]).read_bytes()
+    raw = source_bytes(root / prospectus[0]["file"])
     teams = appointed_teams(
-        [p.extract_text() or "" for p in PdfReader(io.BytesIO(raw)).pages],
+        [p.extract_text() or "" for p in PdfReader(raw).pages],
         info,
         date.fromisoformat(bundle["history"]["dates"][0]),
         date.fromisoformat(bundle["as_of_date"]),
