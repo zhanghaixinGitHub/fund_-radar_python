@@ -21,6 +21,7 @@ def main():
         choices=(
             "audit",
             "update",
+            "review-incomplete",
             "import",
             "activate",
             "withdraw",
@@ -101,6 +102,12 @@ def main():
         if args.event_review and (not args.fund_code or not args.as_of):
             parser.error("重大事项复核必须指定 --fund-code 和 --as-of，并先补齐本期八维原件")
         result = update_ratings(args.fund_code, as_of=args.as_of, event_review=args.event_review)
+    elif args.action == "review-incomplete":
+        if not args.fund_code or not args.file or not args.reason:
+            parser.error("核查标记需要 --fund-code、--file 回执、--reason 结论，已有评级批次时还需 --batch")
+        from app.services.fund_rating_completion_review import record_incomplete_review
+
+        result = record_incomplete_review(args.fund_code, args.batch, args.file, args.reason)
     else:
         with Session(get_engine()) as session, session.begin():
             if args.action in {"prepare-r5", "prepare-management", "prepare-direct-index", "prepare-passive-holdings",

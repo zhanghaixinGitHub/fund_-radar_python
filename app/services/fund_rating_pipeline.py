@@ -133,9 +133,23 @@ def prepare_japan_active_execution(session: Session, request: dict, *, root: Pat
     return prepare(session, request, root=root)
 
 
+def prepare_japan_return(session: Session, request: dict, *, root: Path) -> dict:
+    """仅准备019449已核准日本主动参照的收益分项，其余维度原样保留。"""
+    from app.services.fund_rating_japan_return import prepare
+
+    return prepare(session, request, root=root)
+
+
 def prepare_huaan_qdii_relative(session: Session, request: dict, *, root: Path) -> dict:
     """从同路线真实独立产品补华安本C收益及稳定性，保留风险和跟踪等缺项。"""
     from app.services.fund_rating_huaan_qdii_relative import prepare
+
+    return prepare(session, request, root=root)
+
+
+def prepare_huaan_qdii_benchmark(session: Session, request: dict, *, root: Path) -> dict:
+    """从官方指数、实际汇率及定报精度核验补华安本C风险和目标执行。"""
+    from app.services.fund_rating_huaan_qdii_benchmark import prepare
 
     return prepare(session, request, root=root)
 
@@ -276,6 +290,12 @@ def update_new_rules(
                     candidate["money_inputs"] = _load(root, entry["money_input_archive"])
                 # 即使分数表未变，新增来源/身份/日期也必须核验，不能只比较研究文件。
                 validate_sources(candidate, datetime.now(UTC), root=root)
+                if old_bundle.get("evidence_v1_calculation") and not candidate.get("evidence_v1_calculation"):
+                    from app.services.fund_rating_evidence_publication import dossier_for
+
+                    dossier = dossier_for([candidate], root)
+                    entry = dossier["entries"][0]
+                    candidate = {**entry, "basis": BASIS, "reviewed_document": _load(root, entry["research_archive"])}
                 calculate(candidate, root=root)
                 same = old_bundle == candidate
                 if not same:

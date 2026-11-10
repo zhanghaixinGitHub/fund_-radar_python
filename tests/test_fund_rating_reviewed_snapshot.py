@@ -408,22 +408,34 @@ def db():
         admin.dispose()
 
 
-def test_real_postgres_publish_idempotency_read_and_tamper(db, dossier):
+def test_real_postgres_publish_idempotency_read_and_tamper(db, dossier, monkeypatch):
+    from app.services import fund_rating_public_inputs as public_inputs
+
     data, root, _ = dossier
     with Session(db) as session, session.begin():
         first = publish_reviewed(session, data, "隔离测试用户明确审阅", root=root)
     with Session(db) as session, session.begin():
         second = publish_reviewed(session, data, "隔离测试幂等复核", root=root)
     assert first["results"] == second["results"]
-    current = read(["000009"], detail=True, engine=db)
+    batch_id = first["results"][0]["batch"]
+
+    def unexpected_replay(*_args, **_kwargs):
+        pytest.fail("页面读取已发布版本时不应重放原件或复算")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(snapshots, "calculate", unexpected_replay)
+        patch.setattr(public_inputs, "validate_public_sources", unexpected_replay)
+        current = read(["000009"], detail=True, engine=db)
+        assert current["ratingRef"] == batch_id
+        assert read(["000009"], detail=True, rating_ref=batch_id, engine=db)["dimensions"] == current["dimensions"]
     assert current["status"] == "PARTIAL" and current["score"] is None and current["grade"] is None
     assert current["partialScore"] == "75.00" and current["scoreCoverage"]["pointWeight"] == "90"
     assert len(current["dimensions"]) == 8 and current["dimensions"][2]["score"] is None
     with Session(db) as session, session.begin():
-        row = session.get(RatingResult, (first["results"][0]["batch"], "000009"))
+        row = session.get(RatingResult, (batch_id, "000009"))
         row.public_evidence = {**row.public_evidence, "partialScore": "99.99"}
     with pytest.raises(ValueError, match="RESULT_MISMATCH"):
-        read(["000009"], detail=True, engine=db)
+        read(["000009"], detail=True, replay=True, engine=db)
 
 
 def test_real_postgres_failure_rolls_back_catalogue_and_pointer(db, dossier):

@@ -131,7 +131,7 @@ def verify_batch(
     context: RatingValidationRows | None = None,
     replay_results: bool = True,
 ) -> list[RatingResult]:
-    """核验哈希、数量、八维及映射；发布时复算原件，列表读取复用不可变发布结果。"""
+    """核验哈希、数量、八维及映射；发布时复算，页面读取数据库保护的不可变结果。"""
     if digest(batch.input_snapshot) != batch.input_hash:
         raise ValueError("RATING_BATCH_HASH_MISMATCH")
     members = (
@@ -165,7 +165,7 @@ def verify_batch(
             config = batch.input_snapshot.get("method") or {}
             expected_grade = grade(result.score)
             if config.get("basis") in REVIEWED_BASES:
-                from app.services.fund_rating_reviewed_quality import calculate
+                from app.services.fund_rating_reviewed_quality import calculate, capped_grade
 
                 frozen = next(m for m in batch.input_snapshot["members"] if m["fund_code"] == result.fund_code)
                 if (
@@ -173,10 +173,13 @@ def verify_batch(
                     or frozen["metrics"] != frozen["bundle"]["quality_metrics"]
                 ):
                     raise ValueError("RATING_QUALITY_FROZEN_OBSERVATIONS_MISMATCH")
-                rebuilt = calculate(frozen["metrics"], config=config)
-                if str(result.score) != rebuilt["score"] or result.dimension_values != rebuilt["dimensions"]:
-                    raise ValueError("RATING_QUALITY_RESULT_MISMATCH")
-                expected_grade = rebuilt["grade"]
+                if replay_results:
+                    rebuilt = calculate(frozen["metrics"], config=config)
+                    if str(result.score) != rebuilt["score"] or result.dimension_values != rebuilt["dimensions"]:
+                        raise ValueError("RATING_QUALITY_RESULT_MISMATCH")
+                    expected_grade = rebuilt["grade"]
+                else:
+                    expected_grade, _ = capped_grade(result.dimension_values, expected_grade)
             if result.grade != expected_grade or not result.valid_until:
                 raise ValueError("RATING_RESULT_INVALID")
             for value in result.dimension_values.values():
@@ -191,7 +194,7 @@ def inputs_valid(
     context: RatingValidationRows | None = None,
     replay_sources: bool = True,
 ) -> bool:
-    """发布时核验原件；读取时核验不可变证据及当前授权，不重复回放来源文件。"""
+    """发布或显式复核时回放原件；页面读取时核验已存证据及当前授权。"""
     members = (
         context.members.get(batch.batch_id, [])
         if context is not None
@@ -285,6 +288,11 @@ def publish(session: Session, batch: RatingBatch, *, rollback_reason: str | None
         old = session.get(RatingBatch, current.batch_id)
         if old.as_of_date > batch.as_of_date and not rollback_reason:
             raise RatingConflict("RATING_OLDER_BATCH")
+        if not rollback_reason:
+            previous_v1 = any(m.get("bundle", {}).get("evidence_v1_calculation") for m in old.input_snapshot["members"])
+            next_v1 = any(m.get("bundle", {}).get("evidence_v1_calculation") for m in batch.input_snapshot["members"])
+            if previous_v1 and not next_v1:
+                raise RatingConflict("RATING_EVIDENCE_V1_DOWNGRADE")
     if rollback_reason and any(r.status in {"RATED", "SCORED", "PARTIAL"} and r.valid_until <= now for r in results):
         raise ValueError("RATING_ROLLBACK_EXPIRED")
     if not current:

@@ -202,48 +202,7 @@ def compile_observations(inputs, *, root):
     )
     single = s[s.rfind("11.1 报告期内单一投资者") : s.rfind("11.2")]
     require(re.search("情况\\s*无[。.]", single), "SINGLE_HOLDER_DISCLOSURE_UNKNOWN")
-    a = s.rfind("6.4.13.3.1 报告期内本基金组合资产的流动性风险分析")
-    z = s.find("6.4.13.4", a)
-    operation = plain(s[a:z])
-    require(
-        a >= 0
-        and z > a
-        and ("开放日对本基金的申购赎回情况进行监控" in operation)
-        and ("本报告期内,本基金未发生重大流动性风险事件" in operation),
-        "ACTUAL_LIQUIDITY_EXECUTION",
-    )
-    a = s.rfind("5.1 报告期内本基金托管人")
-    z = s.find("§6", a)
-    trust = plain(s[a:z])
-    require(
-        a >= 0
-        and "对托管产品的投资行为进行监督" in trust
-        and ("独立地设置、登录和保管本产品的全套账册" in trust)
-        and ("进行会计核算和资产估值并与管理人建立对账机制" in trust),
-        "TRUSTEE_ACTUAL_OPERATION",
-    )
-    require(
-        "2026年8月27日复核" in u and all(t in u for t in ["本报告", "财务指标", "投资组合报告"]),
-        "TRUSTEE_SPECIFIC_REPORT_REVIEW",
-    )
-    a = legal.rfind("巨额赎回的处理方式")
-    mechanism = legal[a : a + 4300]
-    require(
-        a >= 0
-        and all(
-            
-                term in mechanism
-                for term in [
-                    "全额赎回",
-                    "当日接受赎回比例不低于上一开放日基金总份额的10%",
-                    "单个基金份额持有人超过上一开放日基金总份额30%",
-                    "无优先权",
-                ]
-            
-        ),
-        "ORDINARY_AND_SINGLE_LARGE_HOLDER_MECHANISMS",
-    )
-    require("契约型开放式" in u and "没有损害基金份额持有人利益的行为" in u, "CURRENT_MANAGER_HOLDER_EXECUTION")
+    operation, trust, mechanism = public_redemption(s, legal)
     from app.services.fund_rating_cmf_liquidity import COMPATIBLE_TYPES, FOUNDATION_GATES
     from app.services.fund_rating_cmf_liquidity import PROTOCOL as HOLDER_DOMAIN_PROTOCOL
 
@@ -309,6 +268,52 @@ def compile_observations(inputs, *, root):
             "does_not_clear_company_governance_or_other_dimensions": True,
         },
     }
+
+
+def public_redemption(s: str, legal: str) -> tuple[str, str, str]:
+    """只核公开申赎机制、报告期实际履职和托管复核。"""
+    u = plain(s)
+    a = s.rfind("6.4.13.3.1 报告期内本基金组合资产的流动性风险分析")
+    z = s.find("6.4.13.4", a)
+    operation = plain(s[a:z])
+    require(
+        a >= 0
+        and z > a
+        and ("开放日对本基金的申购赎回情况进行监控" in operation)
+        and ("本报告期内,本基金未发生重大流动性风险事件" in operation),
+        "ACTUAL_LIQUIDITY_EXECUTION",
+    )
+    a = s.rfind("5.1 报告期内本基金托管人")
+    z = s.find("§6", a)
+    trust = plain(s[a:z])
+    require(
+        a >= 0
+        and "对托管产品的投资行为进行监督" in trust
+        and ("独立地设置、登录和保管本产品的全套账册" in trust)
+        and ("进行会计核算和资产估值并与管理人建立对账机制" in trust),
+        "TRUSTEE_ACTUAL_OPERATION",
+    )
+    require(
+        "2026年8月27日复核" in u and all(t in u for t in ["本报告", "财务指标", "投资组合报告"]),
+        "TRUSTEE_SPECIFIC_REPORT_REVIEW",
+    )
+    a = legal.rfind("巨额赎回的处理方式")
+    mechanism = legal[a : a + 4300]
+    require(
+        a >= 0
+        and all(
+                term in mechanism
+                for term in [
+                    "全额赎回",
+                    "当日接受赎回比例不低于上一开放日基金总份额的10%",
+                    "单个基金份额持有人超过上一开放日基金总份额30%",
+                    "无优先权",
+                ]
+        ),
+        "ORDINARY_AND_SINGLE_LARGE_HOLDER_MECHANISMS",
+    )
+    require("契约型开放式" in u and "没有损害基金份额持有人利益的行为" in u, "CURRENT_MANAGER_HOLDER_EXECUTION")
+    return operation, trust, mechanism
 
 
 def originals(inputs, root):

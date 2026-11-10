@@ -122,6 +122,16 @@ def validate_sources(bundle: dict, frozen: datetime, *, root: Path | None = None
         or re.sub(r"\s+", "", bundle["identity"]["legal_name"]) not in re.sub(r"\s+", "", identity["title"])
     ):
         raise ValueError("RATING_SNAPSHOT_LEGAL_IDENTITY_MISMATCH")
+    if bundle.get("evidence_v1_calculation"):
+        from app.services.fund_rating_evidence_preview import REVISION
+
+        v1 = bundle["evidence_v1_calculation"]
+        if (
+            v1["revision"] != REVISION
+            or _read(bundle["evidence_v1_archive"], root) != v1
+            or any(key.endswith("_calculation") and key != "evidence_v1_calculation" for key in bundle)
+        ):
+            raise ValueError("RATING_EVIDENCE_V1_ARCHIVE_MISMATCH")
     if bundle.get("money_input_archive") and _read(bundle["money_input_archive"], root) != bundle.get("money_inputs"):
         raise ValueError("RATING_SNAPSHOT_MONEY_INPUT_HASH")
     if bundle.get("active_portfolio_components_calculation"):
@@ -167,7 +177,9 @@ def validate_sources(bundle: dict, frozen: datetime, *, root: Path | None = None
         "gf_battery_liquidity_interval_calculation",
         "active_broad_components_calculation",
         "japan_active_execution_calculation",
+        "japan_return_calculation",
         "huaan_qdii_relative_calculation",
+        "huaan_qdii_benchmark_calculation",
         "fund_013853_execution_calculation",
         "money_aggregate_components_calculation",
         "efunds_complete_holdings_calculation",
@@ -184,10 +196,18 @@ def validate_sources(bundle: dict, frozen: datetime, *, root: Path | None = None
         from app.services.fund_rating_japan_active_execution import check_binding
 
         check_binding(bundle, bundle["japan_active_execution_calculation"]["inputs"])
+    if bundle.get("japan_return_calculation"):
+        from app.services.fund_rating_japan_return import check_binding as check_japan_return
+
+        check_japan_return(bundle, bundle["japan_return_calculation"]["inputs"])
     if bundle.get("huaan_qdii_relative_calculation"):
         from app.services.fund_rating_huaan_qdii_relative import replay_snapshot as replay_huaan_relative
 
         replay_huaan_relative(bundle, bundle["reviewed_document"]["dimensions"], root=root)
+    if bundle.get("huaan_qdii_benchmark_calculation"):
+        from app.services.fund_rating_huaan_qdii_benchmark import replay_snapshot as replay_huaan_benchmark
+
+        replay_huaan_benchmark(bundle, bundle["reviewed_document"]["dimensions"], root=root)
     if bundle.get("fund_013853_execution_calculation"):
         from app.services.fund_rating_013853_execution import check_binding
 
@@ -424,10 +444,18 @@ def calculate(bundle: dict, *, root: Path | None = None) -> dict:
             from app.services.fund_rating_huaan_qdii_relative import replay_snapshot as replay_huaan_relative
 
             replay_huaan_relative(bundle, dimensions, root=root or archive_root())
+        if bundle.get("huaan_qdii_benchmark_calculation"):
+            from app.services.fund_rating_huaan_qdii_benchmark import replay_snapshot as replay_huaan_benchmark
+
+            replay_huaan_benchmark(bundle, dimensions, root=root or archive_root())
         if bundle.get("japan_active_execution_calculation"):
             from app.services.fund_rating_japan_active_execution import replay_snapshot as replay_japan_execution
 
             replay_japan_execution(bundle, dimensions, root=root or archive_root())
+        if bundle.get("japan_return_calculation"):
+            from app.services.fund_rating_japan_return import replay_snapshot as replay_japan_return
+
+            replay_japan_return(bundle, dimensions, root=root or archive_root())
         if bundle.get("active_portfolio_components_calculation"):
             from app.services.fund_rating_active_portfolio_components import replay_snapshot
 
@@ -771,6 +799,17 @@ def calculate(bundle: dict, *, root: Path | None = None) -> dict:
             if bundle.get("r5_calculation"):
                 raise ValueError("R5_PASSIVE_COMPONENT_CANNOT_CLAIM_COMPLETE")
         full = None
+        if bundle.get("evidence_v1_calculation"):
+            from app.services.fund_rating_evidence_preview import preview
+            from app.services.fund_rating_reviewed_quality import PASSIVE_BASIS, policy
+
+            full = preview(bundle, root or archive_root(), review_required=False)
+            expected_weights = policy(PASSIVE_BASIS)["weights"]
+            if full["status"] != "CANDIDATE" or any(
+                _number(weights[k]) != expected_weights[v]
+                or dimensions[k]["candidate"] != full["dimensions"][v] for k, v in KEYS.items()
+            ):
+                raise ValueError("RATING_EVIDENCE_V1_REPLAY_MISMATCH")
         if bundle.get("r5_calculation"):
             from app.services.fund_rating_r5 import calculate as calculate_r5
 
@@ -881,6 +920,8 @@ def public_evidence(bundle: dict, calculated: dict) -> dict:
     complete = calculated["status"] == "SCORED"
     if complete:
         summary = "八个维度已按真实资料完成综合评分；等级尚未确定。"
+        if bundle.get("evidence_v1_calculation"):
+            summary = "已按近一年口径完成八维综合评分。"
     return {
         "score": _display(calculated["score"]) if complete else None,
         "scoreRange": {"lower": _display(calculated["lower"]), "upper": _display(calculated["upper"])}
@@ -969,9 +1010,18 @@ def publish_reviewed(session: Session, dossier: dict, reason: str, *, root: Path
         selection = component.get("inputs", {}).get("cohort", {}).get("selection_source", {})
         if selection.get("sha256") == "1f8728dadf879cc5900bee7c7dd1e3053a9b75de727c1bd1946ddd5b0abb65c0":
             raise ValueError("RATING_PUBLICATION_COHORT_TRUNCATED_REBUILD_REQUIRED")
+    revision = "reviewed-partial-20261023"
+    v1_entries = [entry for entry in dossier["entries"] if entry.get("evidence_v1_calculation")]
+    if v1_entries:
+        from app.services.fund_market_review import rating_review_required
+        from app.services.fund_rating_evidence_preview import REVISION
+
+        if len(v1_entries) != len(codes) or any(rating_review_required(code) for code in codes):
+            raise ValueError("RATING_EVIDENCE_V1_PUBLICATION_SCOPE")
+        revision = REVISION
     config = {
         "basis": BASIS,
-        "revision": "reviewed-partial-20261023",
+        "revision": revision,
         "minimum_products": 1,
         "local_only": True,
         "independent_product_validation": False,

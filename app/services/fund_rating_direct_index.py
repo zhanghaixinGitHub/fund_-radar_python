@@ -73,31 +73,39 @@ def physical_page_prefix(pages: list[str]) -> list[str]:
 class Originals:
     """每次复算重新核原字节；路径限正式来源目录，摘要不可当成外部事实。"""
 
-    def __init__(self, inputs: dict, root: Path):
+    def __init__(self, inputs: dict, root: Path, *, lazy: bool = False):
         self.root = root.resolve()
         self.sources = inputs["sources"]
         self.raw = {}
         self.pages_cache = {}
         self.plain_cache = {}
-        for digest, ref in self.sources.items():
+        self.as_of_date = inputs["as_of_date"]
+        if not lazy:
+            for digest in self.sources:
+                self.load(digest)
+
+    def load(self, digest: str) -> bytes:
+        if digest not in self.raw:
+            ref = self.sources[digest]
             path = (self.root / ref["file"]).resolve()
             if not path.is_relative_to(self.root / "sources") or not source_exists(path):
                 raise ValueError("R5_DIRECT_INDEX_SOURCE_SCOPE")
             raw = source_bytes(path)
             if len(raw) > 50_000_000 or content_digest(raw) != digest or ref["sha256"] != digest:
                 raise ValueError("R5_DIRECT_INDEX_SOURCE_HASH")
-            if ref.get("published_on") and ref["published_on"] > inputs["as_of_date"]:
+            if ref.get("published_on") and ref["published_on"] > self.as_of_date:
                 raise ValueError("R5_DIRECT_INDEX_FUTURE_DOCUMENT")
             self.raw[digest] = raw
+        return self.raw[digest]
 
     def json(self, digest: str):
-        return json.loads(self.raw[digest])
+        return json.loads(self.load(digest))
 
     def pages(self, digest: str) -> list[str]:
         if digest not in self.pages_cache:
             ref = self.sources[digest]
             if ref["file"].lower().endswith(".pdf"):
-                self.pages_cache[digest] = [p.extract_text() or "" for p in PdfReader(self.raw[digest]).pages]
+                self.pages_cache[digest] = [p.extract_text() or "" for p in PdfReader(self.load(digest)).pages]
                 if ref.get("folio_prefix") == "PHYSICAL_PAGE_ONE_BASED":
                     self.pages_cache[digest] = physical_page_prefix(self.pages_cache[digest])
             else:
@@ -107,6 +115,7 @@ class Originals:
 
     def plain(self, digest: str) -> str:
         if digest not in self.plain_cache:
+            self.load(digest)
             self.plain_cache[digest] = _source_text(self.root, self.sources[digest])
         return self.plain_cache[digest]
 

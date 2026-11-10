@@ -64,6 +64,7 @@ class RatingSummary(PublicModel):
     scoreRange: RatingScoreRange | None = None
     partialScore: str | None = None
     scoreCoverage: RatingCoverage | None = None
+    incompleteReviewedOn: str | None = None
 
 
 class RatingComparison(PublicModel):

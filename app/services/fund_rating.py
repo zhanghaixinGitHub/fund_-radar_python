@@ -23,6 +23,7 @@ from app.repositories.fund_rating import (
     verify_batch,
 )
 from app.schemas.fund_rating import RatingDetail, RatingPage
+from app.services.fund_rating_completion_review import incomplete_reviewed_on
 from app.services.fund_rating_inputs import canonical, catalog, digest, empty_evidence, prepare
 from app.services.fund_rating_metrics import stability
 from app.services.fund_rating_rules import DIMENSIONS, GRADES, calculate, candidate, decimal, grade
@@ -518,8 +519,8 @@ def _category(engine, root, category, members, as_of, frozen, *, evaluation_kind
 
 
 @material_read_cache
-def read(codes: list[str], *, rating_ref: str | None = None, detail: bool = False, engine=None):
-    """一次 REPEATABLE READ 快照解析当前指针；不采集、不计算、不写库、不读个人数据。"""
+def read(codes: list[str], *, rating_ref: str | None = None, detail: bool = False, replay: bool = False, engine=None):
+    """从同一只读事务获取已发布版本；仅显式复核回放冻结输入和原件。"""
     if not 1 <= len(codes) <= 100 or any(len(c) != 6 or not c.isascii() or not c.isdigit() for c in codes):
         raise ValueError("RATING_CODES_INVALID")
     codes = list(dict.fromkeys(codes))
@@ -582,9 +583,9 @@ def read(codes: list[str], *, rating_ref: str | None = None, detail: bool = Fals
         validity = {}
         for batch in batches:
             if batch.batch_id not in validity:
-                complete_results = verify_batch(session, batch, context=context, replay_results=detail)
+                complete_results = verify_batch(session, batch, context=context, replay_results=replay)
                 valid = not batch.withdrawn and inputs_valid(
-                    session, batch, context=context, replay_sources=detail
+                    session, batch, context=context, replay_sources=replay
                 )
                 method = methods.get(batch.methodology_id)
                 # 一批可能同时含缺资料行和已评级行；不能以本次查询遇到的第一行决定规则是否有效。
@@ -662,5 +663,7 @@ def read(codes: list[str], *, rating_ref: str | None = None, detail: bool = Fals
                 item = {"fundCode": code, "status": "NOT_RATED", "message": "暂未评级"}
                 if detail:
                     item.update(empty_evidence({"fund_code": code}, "OTHER", now.date()))
+            if not rating_ref:
+                item["incompleteReviewedOn"] = incomplete_reviewed_on(item)
             items.append(item)
         return RatingDetail.model_validate(items[0]).model_dump() if detail else RatingPage(items=items).model_dump()

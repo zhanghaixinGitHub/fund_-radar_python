@@ -39,6 +39,27 @@ def test_read_failure_is_503_not_business_not_rated(client, monkeypatch):
     assert "HASH" not in response.text
 
 
+def test_incomplete_review_is_bound_to_fund_and_batch(tmp_path, monkeypatch):
+    from app.services import fund_rating as service, fund_rating_completion_review as review
+
+    monkeypatch.setattr(review, "get_settings", lambda: SimpleNamespace(fund_insight_directory=str(tmp_path)))
+    rating = {"fundCode": "013180", "status": "PARTIAL", "ratingRef": "a" * 64, "asOfDate": "2026-11-06"}
+    monkeypatch.setattr(service, "read", lambda codes: {"items": [rating]})
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text("{}", encoding="utf-8")
+
+    assert review.incomplete_reviewed_on(rating) is None
+    with pytest.raises(ValueError, match="批次"):
+        review.record_incomplete_review("013180", "b" * 64, receipt, "公开资料核查完毕")
+    result = review.record_incomplete_review("013180", rating["ratingRef"], receipt, "公开资料核查完毕")
+
+    assert review.incomplete_reviewed_on(rating) == result["reviewedOn"]
+    assert review.incomplete_reviewed_on({**rating, "fundCode": "159755"}) is None
+    assert review.incomplete_reviewed_on({**rating, "ratingRef": "b" * 64}) is None
+    assert review.incomplete_reviewed_on({**rating, "status": "STALE"}) is None
+    assert review.incomplete_reviewed_on({**rating, "status": "SCORED"}) is None
+
+
 @pytest.mark.parametrize("body", [{}, {"fundCode": ""}, {"fundCode": "００２１１２"}])
 def test_single_empty_input_never_becomes_all(client, monkeypatch, body):
     monkeypatch.setattr(fund_rating, "_start", lambda *_: pytest.fail("非法代码不能启动任务"))
