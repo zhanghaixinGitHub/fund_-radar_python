@@ -172,7 +172,6 @@ def list_fund_summaries(
     但 latest_nav_date 为 ``None``，由服务层明确标识为未同步。页码模式按基金
     类型连续排序，供界面分组展示；旧游标模式保持基金代码顺序以兼容既有调用方。
     """
-    latest_nav = _latest_nav_date_subquery()
     conditions = ()
     if keyword:
         normalized_keyword = f"%{keyword.strip()}%"
@@ -186,11 +185,7 @@ def list_fund_summaries(
     total_count = session.scalar(
         select(func.count()).select_from(FundShareClass).where(*conditions)
     )
-    statement: Select[tuple[FundShareClass, date | None]] = (
-        select(FundShareClass, latest_nav.c.latest_nav_date)
-        .outerjoin(latest_nav, latest_nav.c.fund_code == FundShareClass.fund_code)
-        .where(*conditions)
-    )
+    statement: Select[tuple[FundShareClass]] = select(FundShareClass).where(*conditions)
     if page is not None:
         statement = statement.order_by(_fund_type_order(), FundShareClass.fund_code.asc())
         statement = statement.offset((page - 1) * page_size).limit(page_size)
@@ -199,7 +194,8 @@ def list_fund_summaries(
             statement = statement.where(FundShareClass.fund_code > cursor)
         statement = statement.order_by(FundShareClass.fund_code.asc())
         statement = statement.limit(page_size + 1)
-    rows = tuple(session.execute(statement).all())
+    funds = tuple(session.scalars(statement).all())
+    rows = _attach_latest_nav_dates(session, funds)
     return FundSummaryPage(
         rows=_attach_performance(session, rows),
         total_count=int(total_count or 0),
@@ -228,16 +224,14 @@ def list_fund_summaries_by_codes(
     """批量读取指定基金的列表摘要，供 Java 组合当前用户关注页时使用。"""
     if not fund_codes:
         return ()
-    latest_nav = _latest_nav_date_subquery()
-    rows = tuple(
-        session.execute(
-            select(FundShareClass, latest_nav.c.latest_nav_date)
-            .outerjoin(latest_nav, latest_nav.c.fund_code == FundShareClass.fund_code)
+    funds = tuple(
+        session.scalars(
+            select(FundShareClass)
             .where(FundShareClass.fund_code.in_(fund_codes))
             .order_by(FundShareClass.fund_code.asc())
         ).all()
     )
-    return _attach_performance(session, rows)
+    return _attach_performance(session, _attach_latest_nav_dates(session, funds))
 
 
 def get_fund_summary(session: Session, fund_code: str) -> FundDetailSnapshot | None:
@@ -478,11 +472,9 @@ def get_current_market_same_type_comparison(
     if target.fund.status != "ACTIVE" or target.fund.source_code != _CURRENT_MARKET_SOURCE_CODE:
         return FundSameTypeComparisonResult(target=target, items=())
 
-    latest_nav = _latest_nav_date_subquery()
-    rows = tuple(
-        session.execute(
-            select(FundShareClass, latest_nav.c.latest_nav_date)
-            .outerjoin(latest_nav, latest_nav.c.fund_code == FundShareClass.fund_code)
+    funds = tuple(
+        session.scalars(
+            select(FundShareClass)
             .where(
                 FundShareClass.fund_type == target.fund.fund_type,
                 FundShareClass.status == "ACTIVE",
@@ -491,7 +483,7 @@ def get_current_market_same_type_comparison(
             .order_by(FundShareClass.fund_code.asc())
         ).all()
     )
-    summaries = _attach_performance(session, rows)
+    summaries = _attach_performance(session, _attach_latest_nav_dates(session, funds))
     source_by_code = _list_latest_nav_sources(
         session,
         {
@@ -532,13 +524,22 @@ def list_peer_nav_endpoints(
     return {code: tuple(values) for code, values in points.items()}
 
 
-def _latest_nav_date_subquery():
-    """返回每只基金的最近净值日期；净值数值另按来源确定性规则读取。"""
-    return (
-        select(NavDaily.fund_code, func.max(NavDaily.nav_date).label("latest_nav_date"))
-        .group_by(NavDaily.fund_code)
-        .subquery()
-    )
+def _attach_latest_nav_dates(
+    session: Session, funds: tuple[FundShareClass, ...]
+) -> tuple[tuple[FundShareClass, date | None], ...]:
+    """只聚合本次摘要涉及的基金，避免列表分页扫描全部历史净值。"""
+    if not funds:
+        return ()
+    codes = tuple(fund.fund_code for fund in funds)
+    latest_dates = {
+        fund_code: nav_date
+        for fund_code, nav_date in session.execute(
+            select(NavDaily.fund_code, func.max(NavDaily.nav_date))
+            .where(NavDaily.fund_code.in_(codes))
+            .group_by(NavDaily.fund_code)
+        ).all()
+    }
+    return tuple((fund, latest_dates.get(fund.fund_code)) for fund in funds)
 
 
 def _fund_type_order():

@@ -582,8 +582,10 @@ def read(codes: list[str], *, rating_ref: str | None = None, detail: bool = Fals
         validity = {}
         for batch in batches:
             if batch.batch_id not in validity:
-                complete_results = verify_batch(session, batch, context=context)
-                valid = not batch.withdrawn and inputs_valid(session, batch, context=context)
+                complete_results = verify_batch(session, batch, context=context, replay_results=detail)
+                valid = not batch.withdrawn and inputs_valid(
+                    session, batch, context=context, replay_sources=detail
+                )
                 method = methods.get(batch.methodology_id)
                 # 一批可能同时含缺资料行和已评级行；不能以本次查询遇到的第一行决定规则是否有效。
                 if (

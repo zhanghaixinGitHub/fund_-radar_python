@@ -125,9 +125,13 @@ def load_validation_rows(session: Session, batches: list[RatingBatch]) -> Rating
 
 
 def verify_batch(
-    session: Session, batch: RatingBatch, *, context: RatingValidationRows | None = None
+    session: Session,
+    batch: RatingBatch,
+    *,
+    context: RatingValidationRows | None = None,
+    replay_results: bool = True,
 ) -> list[RatingResult]:
-    """哈希、数量、八维及映射核验；损坏抛故障，绝不转换为业务资料不足。"""
+    """核验哈希、数量、八维及映射；发布时复算原件，列表读取复用不可变发布结果。"""
     if digest(batch.input_snapshot) != batch.input_hash:
         raise ValueError("RATING_BATCH_HASH_MISMATCH")
     members = (
@@ -150,7 +154,7 @@ def verify_batch(
         from app.services.fund_rating_reviewed_snapshot import verify_result
 
         if (batch.input_snapshot.get("method") or {}).get("basis") == SNAPSHOT_BASIS:
-            verify_result(result, batch)
+            verify_result(result, batch, replay=replay_results)
         if result.status == "SCORED" and (batch.input_snapshot.get("method") or {}).get("basis") != SNAPSHOT_BASIS:
             raise ValueError("RATING_COMPLETE_CALCULATION_REQUIRED")
         if result.status == "RATED":
@@ -180,7 +184,14 @@ def verify_batch(
     return results
 
 
-def inputs_valid(session: Session, batch: RatingBatch, *, context: RatingValidationRows | None = None) -> bool:
+def inputs_valid(
+    session: Session,
+    batch: RatingBatch,
+    *,
+    context: RatingValidationRows | None = None,
+    replay_sources: bool = True,
+) -> bool:
+    """发布时核验原件；读取时核验不可变证据及当前授权，不重复回放来源文件。"""
     members = (
         context.members.get(batch.batch_id, [])
         if context is not None
@@ -210,10 +221,16 @@ def inputs_valid(session: Session, batch: RatingBatch, *, context: RatingValidat
     legacy_rows = []
     for e, c in rows:
         if e.payload.get("basis") in PUBLIC_BASES:
-            try:
-                validate_public_sources(e.payload, datetime.now(UTC))
-            except ValueError:
-                return False
+            if replay_sources:
+                try:
+                    validate_public_sources(e.payload, datetime.now(UTC))
+                except ValueError:
+                    return False
+            else:
+                from app.core.config import get_settings
+
+                if get_settings().app_environment != "local":
+                    return False
             if e.payload.get("basis") in REVIEWED_BASES:
                 # 新口径仍依赖已授权供应商；撤销资格立即影响读取，不因属于公开资料分支绕过。
                 legacy_rows.append((e, c))

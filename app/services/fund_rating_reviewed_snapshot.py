@@ -918,7 +918,8 @@ def public_evidence(bundle: dict, calculated: dict) -> dict:
     }
 
 
-def verify_result(result: RatingResult, batch: RatingBatch) -> None:
+def verify_result(result: RatingResult, batch: RatingBatch, *, replay: bool = True) -> None:
+    """发布时完整复算；读取时只核验不可变结果与冻结输入，不重复读取原件。"""
     config = batch.input_snapshot["method"]
     members = batch.input_snapshot["members"]
     member = next(m for m in members if m["fund_code"] == result.fund_code)
@@ -927,6 +928,14 @@ def verify_result(result: RatingResult, batch: RatingBatch) -> None:
         raise ValueError("RATING_SNAPSHOT_REVIEW_SCOPE")
     if digest(bundle) != member["evidence_hash"]:
         raise ValueError("RATING_SNAPSHOT_BUNDLE_HASH")
+    if not replay:
+        if (
+            result.grade is not None
+            or not result.dimension_values
+            or set(result.dimension_values) != set(KEYS.values())
+        ):
+            raise ValueError("RATING_SNAPSHOT_RESULT_MISMATCH")
+        return
     calculated = calculate(bundle)
     expected = {KEYS[k]: v["candidate"] for k, v in calculated["dimensions"].items()}
     if (

@@ -2,9 +2,10 @@
 
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
-from app.repositories.fund_read import FundNavHistorySnapshot, _build_performance
+from app.repositories.fund_read import FundNavHistorySnapshot, _attach_latest_nav_dates, _build_performance
 
 
 def _point(nav_date: date, accumulated_nav: str, unit_nav: str | None = None) -> FundNavHistorySnapshot:
@@ -79,3 +80,19 @@ def test_cash_distribution_does_not_silently_become_total_return() -> None:
         )
     )
     assert result.day_change_rate == Decimal("-0.1")
+
+
+def test_latest_nav_aggregation_is_limited_to_selected_funds() -> None:
+    """分页摘要只聚合本页代码，缺少净值的基金仍保留空日期。"""
+    funds = (SimpleNamespace(fund_code="000001"), SimpleNamespace(fund_code="000002"))
+
+    class FakeSession:
+        def execute(self, statement):
+            assert "nav_daily.fund_code IN" in str(statement)
+            return SimpleNamespace(all=lambda: [("000002", date(2026, 9, 2))])
+
+    rows = _attach_latest_nav_dates(FakeSession(), funds)
+    assert [(fund.fund_code, nav_date) for fund, nav_date in rows] == [
+        ("000001", None),
+        ("000002", date(2026, 9, 2)),
+    ]

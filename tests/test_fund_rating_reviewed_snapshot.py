@@ -6,6 +6,7 @@ import os
 from copy import deepcopy
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, getcontext
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -13,10 +14,13 @@ from app.core.config import get_settings
 from app.db.base import Base
 from app.models.fund import FundMaster, FundShareClass
 from app.models.fund_rating import RatingBatch, RatingClassification, RatingCurrent, RatingMember, RatingResult
+from app.services import fund_rating_reviewed_snapshot as snapshots
 from app.services.fund_rating import read
+from app.services.fund_rating_inputs import digest
 from app.services.fund_rating_money_public import concentration
 from app.services.fund_rating_reviewed_snapshot import (
     BASIS,
+    KEYS,
     archive_root,
     calculate,
     public_evidence,
@@ -98,6 +102,63 @@ def test_missing_dimension_preserved_no_full_score(dossier):
     assert computed["status"] == "PARTIAL" and computed["point_weight"] == "90"
     assert Decimal(computed["partial_score"]) == 75 and computed["score"] is None and computed["grade"] is None
     assert computed["missing_weight"] == "10" and not computed["has_full_informative_interval"]
+
+
+def test_list_verification_reuses_published_result_without_replaying_originals(dossier, monkeypatch):
+    """发布默认仍完整复算；列表只读冻结结果，但输入摘要和八维结构仍须完整。"""
+    bundle = bundle_from(dossier)
+    computed = calculate(bundle)
+    code = bundle["fund_code"]
+    batch = SimpleNamespace(input_snapshot={
+        "method": {"approved_artifacts": {code: bundle["research_archive"]["sha256"]}},
+        "members": [{"fund_code": code, "bundle": bundle, "evidence_hash": digest(bundle)}],
+    })
+    result = SimpleNamespace(
+        fund_code=code,
+        status=computed["status"],
+        score=Decimal(computed["score"]) if computed["score"] is not None else None,
+        grade=None,
+        dimension_values={KEYS[key]: value["candidate"] for key, value in computed["dimensions"].items()},
+        public_evidence=public_evidence(bundle, computed),
+    )
+
+    def unexpected_replay(_bundle):
+        raise RuntimeError("unexpected original replay")
+
+    monkeypatch.setattr(snapshots, "calculate", unexpected_replay)
+    with pytest.raises(RuntimeError, match="unexpected original replay"):
+        snapshots.verify_result(result, batch)
+    snapshots.verify_result(result, batch, replay=False)
+    bundle["public_name"] = "篡改后的名称"
+    with pytest.raises(ValueError, match="RATING_SNAPSHOT_BUNDLE_HASH"):
+        snapshots.verify_result(result, batch, replay=False)
+
+
+def test_list_input_validation_does_not_replay_public_sources(dossier, monkeypatch):
+    """证据哈希和撤回状态逐次核验，公开原件只在发布路径重新读取。"""
+    from app.repositories.fund_rating import RatingValidationRows, inputs_valid
+    from app.services import fund_rating_public_inputs as public_inputs
+
+    bundle = bundle_from(dossier)
+    evidence_hash = digest(bundle)
+    evidence = SimpleNamespace(payload=bundle, evidence_hash=evidence_hash, revoked=False)
+    classification = SimpleNamespace(revoked=False)
+    member = SimpleNamespace(evidence_hash=evidence_hash)
+    batch = SimpleNamespace(batch_id="batch")
+    context = RatingValidationRows(
+        members={"batch": [member]},
+        results={},
+        evidence={evidence_hash: (evidence, classification)},
+        enabled_sources=set(),
+    )
+
+    def unexpected_replay(*_args, **_kwargs):
+        raise RuntimeError("unexpected source replay")
+
+    monkeypatch.setattr(public_inputs, "validate_public_sources", unexpected_replay)
+    with pytest.raises(RuntimeError, match="unexpected source replay"):
+        inputs_valid(None, batch, context=context)
+    assert inputs_valid(None, batch, context=context, replay_sources=False)
 
 
 @pytest.mark.parametrize("field", ["active_execution_calculation", "stability_calculation", "passive_performance_calculation",
