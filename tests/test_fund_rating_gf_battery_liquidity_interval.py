@@ -89,6 +89,25 @@ def test_current_binding_preserves_same_c_report_and_original_seven_graph():
         interval.check_binding(bundle, changed)
 
 
+@pytest.mark.parametrize(
+    ("version", "cutoff", "wrong_cutoff"),
+    [(interval.VERSION, "2026-09-30", "2026-11-06"), (interval.NOVEMBER_VERSION, "2026-11-06", "2026-09-30")],
+)
+def test_liquidity_versions_reject_a_different_published_window(version, cutoff, wrong_cutoff):
+    """历史和新批次各自绑定自己的截止日与冻结原件，不能交叉复用。"""
+    bundle = fixture_bundle()
+    raw = bundle[interval.PACKAGE]["inputs"]
+    raw.update(version=version, as_of_date=cutoff)
+    raw["base_compilation"]["as_of_date"] = cutoff
+    raw["base_compilation_sha256"] = digest(raw["base_compilation"])
+    bundle["as_of_date"] = cutoff
+    interval.check_binding(bundle, raw)
+    with pytest.raises(ValueError, match="IDENTITY_OR_PERIOD"):
+        interval.check_binding(bundle, {**raw, "as_of_date": wrong_cutoff})
+    with pytest.raises(ValueError, match="CURRENT_BINDING"):
+        interval.check_binding({**bundle, "as_of_date": wrong_cutoff}, raw)
+
+
 @pytest.mark.parametrize("field,value", [("share_class", "A"), ("holding_date", "2025-06-30"),
                                          ("family", "ACTIVE_EQUITY")])
 def test_foreign_share_period_or_family_binding_rejected(field, value):
@@ -137,7 +156,7 @@ def test_original_formula_keeps_unknown_payment_and_restriction_as_ranges(monkey
                   "available_bank_principal": None, "all_asset_restricted_amount": None},
     }
     monkeypatch.setattr(interval, "compile_observations", lambda *args, **kwargs: deepcopy(compiled))
-    result = interval.calculate({}, root=tmp_path)
+    result = interval.calculate(fixture_input(), root=tmp_path)
     assert result["candidate"] is result["complete_score"] is result["grade"] is None
     assert result["subscore_domains"]["known_payment"] == {"lower": "0", "upper": "75", "candidate": None}
     assert D(result["subscore_domains"]["restricted"]["upper"]) == 97

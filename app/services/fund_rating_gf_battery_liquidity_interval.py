@@ -26,6 +26,8 @@ from app.services.material_content import document_pdfium
 
 VERSION = "R5_GF_BATTERY_LIQUIDITY_SOURCE_BOUNDED_INTERVAL_20261030_1"
 FUND, ASOF, HOLDING = "013180", "2026-09-30", "2026-06-30"
+NOVEMBER_VERSION = "R5_GF_BATTERY_LIQUIDITY_SOURCE_BOUNDED_INTERVAL_20261109_1"
+VERSION_CUTOFFS = {VERSION: ASOF, NOVEMBER_VERSION: "2026-11-06"}
 LEGAL = "广发国证新能源车电池交易型开放式指数证券投资基金发起式联接基金"
 MANAGER = "广发基金管理有限公司"
 PRIMARY = "f7ad041c6c36a6beaec0fa9cc52189927277e43d6be50e456985010fdb0b8643"
@@ -39,6 +41,14 @@ PACKAGE = "gf_battery_liquidity_interval_calculation"
 def require(ok, code):
     if not ok:
         raise ValueError("R5_GF_INTERVAL_" + code)
+
+
+def interval_cutoff(inputs):
+    """每个已核版本只接收对应估值截止日；旧快照仍使用原版本和原市场窗口。"""
+    version = inputs.get("version")
+    cutoff = VERSION_CUTOFFS.get(version) if isinstance(version, str) else None
+    require(cutoff is not None and inputs.get("as_of_date") == cutoff, "IDENTITY_OR_PERIOD")
+    return cutoff
 
 
 def section(text, start, stop):
@@ -93,11 +103,10 @@ def pdf_text(source, sha):
 
 def original_scope(inputs, root):
     """每次均核源字节、份额/报告/研究日期和已冻结同类图；缓存不可免核。"""
+    cutoff = interval_cutoff(inputs)
     require(
-        inputs.get("version") == VERSION
-        and inputs.get("fund_code") == FUND
+        inputs.get("fund_code") == FUND
         and inputs.get("share_class") == "C"
-        and inputs.get("as_of_date") == ASOF
         and inputs.get("holding_date") == HOLDING
         and inputs.get("legal_name") == LEGAL
         and inputs.get("manager_name") == MANAGER
@@ -109,14 +118,14 @@ def original_scope(inputs, root):
         "RAW_INPUT_REQUIRED",
     )
     research = date.fromisoformat(inputs["research_on"])
-    require(date.fromisoformat(ASOF) <= research <= datetime.now(UTC).astimezone().date(), "RESEARCH_DATE")
+    require(date.fromisoformat(cutoff) <= research <= datetime.now(UTC).astimezone().date(), "RESEARCH_DATE")
     base = inputs["base_compilation"]
     require(
         digest(base) == inputs["base_compilation_sha256"]
         and base.get("component_scope") == "NON_LIQUIDITY_SEVEN_DIMENSIONS"
         and base["fund_code"] == FUND
         and base["share_class"] == "C"
-        and base["as_of_date"] == ASOF
+        and base["as_of_date"] == cutoff
         and base["holding_date"] == HOLDING
         and base["target_refs"]["half"] == PRIMARY,
         "FROZEN_SEVEN_INPUT_BINDING",
@@ -129,7 +138,7 @@ def original_scope(inputs, root):
     )
     for h in [OWN_PDF, ETF_PDF, LEGAL_PDF]:
         ref = inputs["sources"][h]
-        require(ref.get("published_on") and ref["published_on"] <= ASOF, "OFFICIAL_PUBLICATION_DATE")
+        require(ref.get("published_on") and ref["published_on"] <= cutoff, "OFFICIAL_PUBLICATION_DATE")
         require(datetime.fromisoformat(ref["acquired_at"]).date() <= research, "SOURCE_AFTER_RESEARCH")
     return Originals(inputs, Path(root))
 
@@ -177,7 +186,7 @@ def compile_observations(inputs, *, root):
     values = replay["audit"]["performance"]
     peers = base["cohort"]["peers"]
     require(peers == ["015874"] and set(values) == {FUND, *peers}, "FROZEN_PEER_SET")
-    require(len(base["market"]["dates"]) == 60 and base["market"]["dates"][-1] == ASOF, "CAPACITY_WINDOW")
+    require(len(base["market"]["dates"]) == 60 and base["market"]["dates"][-1] == inputs["as_of_date"], "CAPACITY_WINDOW")
     capacity_node = {
         "kind": "rank",
         "direction": "lower",
@@ -349,7 +358,7 @@ def calculate(inputs, *, root):
         lower = capacity * D(".40") + holder * D(".15")
         upper = lower + restricted_upper * D(".20") + D(75) * D(".25")
     return {
-        "version": VERSION,
+        "version": inputs["version"],
         "lower": str(lower),
         "upper": str(upper),
         "candidate": None,
@@ -378,11 +387,12 @@ def calculate(inputs, *, root):
 
 def check_binding(bundle, inputs):
     """绑定fresh current的本C、同报告/管理人、原七维冻结输入，拒绝借份额或换同类。"""
+    cutoff = interval_cutoff(inputs)
     require(
         bundle.get("family") == "INDEX"
         and bundle.get("fund_code") == FUND
         and bundle.get("share_class") == "C"
-        and str(bundle.get("as_of_date")) == ASOF
+        and str(bundle.get("as_of_date")) == cutoff
         and str(bundle.get("holding_date")) == HOLDING
         and bundle["identity"] == {"legal_name": LEGAL, "manager_name": MANAGER}
         and bundle["original_report_archive"]["sha256"] == PRIMARY,
@@ -415,8 +425,7 @@ def prepare(
 ):
     """准备可审阅清单，不写库；只替换流动性范围，七维和验证时刻/有效期不动。
 
-    shared snapshot尚未接线时可注入其仅新增本分支的隔离副本；默认仍用真实app。
-    未经接线的默认snapshot不会把新流动性包视为已核准，调用方必须先实质接入。
+    正常入口须调用正式快照的验源和复算，校验失败时不能形成待发布清单。
     """
     from app.services.fund_rating_pipeline import current_inputs
     from app.services.fund_rating_pipeline_prepare import archive_json, canonical_source
@@ -424,13 +433,14 @@ def prepare(
     from app.services.fund_rating_reviewed_snapshot import calculate as snapshot_calculate
 
     root = Path(root)
-    current = (current_reader or current_inputs)(session, [FUND]).get(FUND)
-    require(current and str(current["as_of_date"]) == ASOF, "LATEST_CURRENT")
-    bundle = deepcopy(next(m["bundle"] for m in current["input_snapshot"]["members"] if m["fund_code"] == FUND))
     raw = deepcopy(request["inputs"])
+    cutoff = interval_cutoff(raw)
+    current = (current_reader or current_inputs)(session, [FUND]).get(FUND)
+    require(current and str(current["as_of_date"]) == cutoff, "LATEST_CURRENT")
+    bundle = deepcopy(next(m["bundle"] for m in current["input_snapshot"]["members"] if m["fund_code"] == FUND))
     check_binding(bundle, raw)
     require(
-        request.get("fund_code") == FUND and request.get("as_of_date") == ASOF and bundle.get("basis") == BASIS,
+        request.get("fund_code") == FUND and request.get("as_of_date") == cutoff and bundle.get("basis") == BASIS,
         "REQUEST_SCOPE",
     )
     before = deepcopy(bundle["reviewed_document"]["dimensions"])

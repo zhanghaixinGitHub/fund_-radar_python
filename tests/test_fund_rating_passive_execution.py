@@ -8,12 +8,16 @@ from app.services.fund_rating_inputs import canonical
 from app.services.fund_rating_reviewed_quality import PASSIVE_BASIS
 
 
-@pytest.mark.parametrize('damage,error', [('own_mandate', 'OWN_PASSIVE_MANDATE'),
-                                         ('historical_target', 'HISTORICAL_TARGET')])
-def test_feeder_requires_own_mandate_and_same_historical_legal_target(monkeypatch, tmp_path, damage, error):
-    own = '2.2基金产品说明本基金为完全被动式指数基金2.2.1目标基金产品说明本基金为被动式指数基金'
-    if damage == 'own_mandate':
-        own = own.replace('本基金为完全被动式指数基金', '本基金主动选股')
+@pytest.mark.parametrize('mandate,error', [
+    ('本基金主动选股', 'OWN_PASSIVE_MANDATE'),
+    ('本基金为完全被动式指数基金', 'HISTORICAL_TARGET'),
+    ('本基金为ETF联接基金。本基金为指数型基金。'
+     '本基金通过主要投资于目标ETF，紧密跟踪业绩比较基准，追求跟踪偏离度和跟踪误差最小化。',
+     'HISTORICAL_TARGET'),
+    ('本基金为ETF联接基金。本基金为指数型基金。', 'OWN_PASSIVE_MANDATE'),
+])
+def test_feeder_requires_own_mandate_and_same_historical_legal_target(monkeypatch, tmp_path, mandate, error):
+    own = '2.2基金产品说明' + mandate + '2.2.1目标基金产品说明本基金为完全被动式指数基金'
 
     class Source:
         sources = {'half': {}, 'annual': {}}

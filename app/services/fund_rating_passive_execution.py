@@ -53,8 +53,18 @@ def _calculate_cached(serialized: str, root_name: str) -> dict:
         raise ValueError("R5_EXECUTION_DIRECT_PASSIVE_MANDATE_REQUIRED")
     if feeder:
         own = re.search(r"2\.2基金产品说明(.+?)2\.2\.1目标基金产品说明", plain)
-        if (inputs.get("route") != "FEEDER" or not inputs.get("target_etf") or not own
-                or "本基金为完全被动式指数基金" not in own[1]):
+        if inputs.get("route") != "FEEDER" or not inputs.get("target_etf") or not own:
+            raise ValueError("R5_EXECUTION_FEEDER_OWN_PASSIVE_MANDATE_REQUIRED")
+        # 定报可以用联接基金自身的类别和目标说明被动跟踪职责。只检查本基金小节，
+        # 历史目标ETF身份及同期合同基准仍由下面的原件检查逐年核准。
+        mandate = own[1]
+        if "本基金为完全被动式指数基金" not in mandate and not all(
+            term in mandate for term in (
+                "本基金为ETF联接基金",
+                "本基金为指数型基金",
+                "本基金通过主要投资于目标ETF,紧密跟踪业绩比较基准,追求跟踪偏离度和跟踪误差最小化",
+            )
+        ):
             raise ValueError("R5_EXECUTION_FEEDER_OWN_PASSIVE_MANDATE_REQUIRED")
     history = _history(source, inputs)
     if history["dates"][-1] != inputs["as_of_date"]:
