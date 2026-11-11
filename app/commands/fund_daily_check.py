@@ -10,7 +10,7 @@ from app.services.fund_exposure_common import now, read
 from app.services.fund_materials_store import versioned_save
 
 
-def assess(state, followthrough, scope, ratings_readback, checked_at, live_window=None):
+def assess(state, followthrough, scope, ratings_readback, checked_at, live_window=None, one_day_readback=None):
     issues = []
     if state.get("owner_user_id") != followthrough.get("owner_user_id"):
         issues.append("OWNER_MISMATCH")
@@ -42,6 +42,28 @@ def assess(state, followthrough, scope, ratings_readback, checked_at, live_windo
         issues.append("OUTCOME_RECEIPT_MISSING")
     elif any(summary[k] for k in ("pending", "failed", "remaining")):
         issues.append("OLD_PREDICTION_OUTCOMES_INCOMPLETE")
+    daily = state.get("one_day_outcomes") or {}
+    daily_summary = daily.get("summary") or {}
+    if not counts <= daily_summary.keys():
+        issues.append("ONE_DAY_OUTCOME_RECEIPT_MISSING")
+    elif (
+        daily.get("status") != "SUCCEEDED"
+        or daily.get("owner_user_id") != state.get("owner_user_id")
+        or set(daily.get("scope", [])) != set(scope)
+        or daily.get("dueBefore") != checked_at[:10]
+        or daily.get("checked_at", "")[:10] != checked_at[:10]
+        or any(daily_summary[k] for k in ("pending", "failed", "remaining"))
+        or daily_summary["total"] != daily_summary["completed"]
+    ):
+        issues.append("ONE_DAY_OUTCOMES_INCOMPLETE")
+    if one_day_readback is None:
+        issues.append("ONE_DAY_OUTCOME_READBACK_MISSING")
+    elif (
+        any(one_day_readback[k] for k in ("pending", "failed", "remaining"))
+        or one_day_readback["total"] != one_day_readback["completed"]
+        or one_day_readback["total"] != daily_summary.get("total")
+    ):
+        issues.append("ONE_DAY_OUTCOME_READBACK_INCOMPLETE")
     rating = state.get("ratings") or {}
     if rating.get("status") != "SUCCEEDED" or set(rating.get("scope", [])) != set(scope):
         issues.append("RATINGS_INCOMPLETE")
@@ -61,6 +83,8 @@ def assess(state, followthrough, scope, ratings_readback, checked_at, live_windo
         "predictions": followthrough,
         "ratings_readback": ratings_readback,
         "prediction_outcomes": outcome,
+        "one_day_outcomes": daily,
+        "one_day_outcome_readback": one_day_readback,
     }
 
 
@@ -80,7 +104,9 @@ def main():
             # 重新交叉核对两端原预测、当前资料摘要和本人归档，不只读昨天的成功标志。
             followthrough = backend.guard(directory / "check-followthrough.json", None)
             ratings = [backend.get(f"http://127.0.0.1:8000/internal/v1/funds/{c}/rating") for c in scope]
-            result = assess(read(path), followthrough, scope, ratings, at, live_window)
+            result = assess(
+                read(path), followthrough, scope, ratings, at, live_window, backend.one_day_outcome_status()
+            )
         except Exception as error:
             result = {
                 "status": "FAILED",

@@ -112,6 +112,19 @@ def read_history(
     return {"items": history(fund_code, limit=limit, before=before, before_id=beforeId)}
 
 
+@router.get("/funds/{fund_code}/history-days")
+def read_history_days(fund_code: FundCode, dates: Annotated[str, Query(max_length=549)]):
+    values = dates.split(",")
+    if not 1 <= len(values) <= 50 or len(values) != len(set(values)):
+        raise HTTPException(422, "HISTORY_DATES_INVALID")
+    try:
+        if any(date.fromisoformat(value).isoformat() != value for value in values):
+            raise ValueError("NON_CANONICAL_DATE")
+    except ValueError:
+        raise HTTPException(422, "HISTORY_DATES_INVALID") from None
+    return {"items": history(fund_code, limit=150, dates=values), "dates": values}
+
+
 @router.get("/funds/{fund_code}/analysis-reviews")
 def analysis_reviews(fund_code: FundCode, before: datetime | None = None, beforeId: UUID | None = None):
     """事后回看独立读取，不放入正式预测、当前结果或准确率查询。"""

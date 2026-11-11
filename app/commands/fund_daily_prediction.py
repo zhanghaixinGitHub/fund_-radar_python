@@ -95,6 +95,9 @@ def main():
                 "run_dir": str(directory.resolve()),
                 "work_items": str((directory / "work-items.json").resolve()),
                 "all_predictions_generated": result.get("all_predictions_generated", False),
+                "one_day_outcomes": {
+                    k: v for k, v in result.get("one_day_outcomes", {}).items() if k in {"status", "summary", "reason"}
+                },
             },
             ensure_ascii=False,
         )

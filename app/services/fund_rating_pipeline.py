@@ -12,7 +12,7 @@ from decimal import Decimal
 from pathlib import Path
 from time import monotonic
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
@@ -325,6 +325,26 @@ def update_new_rules(
                 item.update(_evaluate(previous, code, root, as_of))
             else:
                 item["blockers"].append({"state": "NO_INPUT", "reason": "尚无本份额已核准的新评分原始资料包"})
+            # 分数无需重发时也可补建评价；仅同一正式批次，已有文件直接复用。
+            if (
+                previous and previous.get("batch_id") and previous.get("input_snapshot")
+                and item["status"] in {"SCORED", "RATED", "PARTIAL"}
+            ):
+                from app.models.fund_rating import RatingResult
+                from app.services.fund_rating_narrative_store import prepare as prepare_narrative
+
+                try:
+                    with Session(engine) as narrative_session:
+                        narrative_session.execute(text("SET TRANSACTION READ ONLY"))
+                        narrative_result = narrative_session.scalar(select(RatingResult).where(
+                            RatingResult.batch_id == previous["batch_id"], RatingResult.fund_code == code
+                        ))
+                        item["narrative"] = prepare_narrative(
+                            narrative_result, previous["input_snapshot"], root=root
+                        )
+                except (ValueError, KeyError, FileNotFoundError):
+                    logger.exception("fund_rating.narrative >>> 评价未生成，评分保持原结果，fund_code=%s", code)
+                    item["narrative"] = {"state": "WAITING_FACTS"}
         except Exception as error:
             logger.exception(
                 "fund_rating_pipeline.update_new_rules   >>>   单基金更新失败，保留历史, fund_code=%s", code

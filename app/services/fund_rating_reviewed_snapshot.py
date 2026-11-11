@@ -1314,4 +1314,17 @@ def publish_reviewed(session: Session, dossier: dict, reason: str, *, root: Path
             )
             session.flush()
         publish(session, session.get(RatingBatch, row["batch"]))
+        # 评价为独立展示文件，不改正式分数、输入或有效期；页面GET不触发编译。
+        from app.core.logging import get_logger
+        from app.services.fund_rating_narrative_store import prepare as prepare_narrative
+
+        batch = session.get(RatingBatch, row["batch"])
+        result = session.scalar(select(RatingResult).where(
+            RatingResult.batch_id == row["batch"], RatingResult.fund_code == row["fundCode"]
+        ))
+        try:
+            prepare_narrative(result, batch.input_snapshot, root=root)
+        except (ValueError, KeyError, FileNotFoundError):
+            # 资料不足或尚未适配只影响文字，原评分仍照既有规则发布；I/O故障不吞掉。
+            get_logger(__name__).exception("fund_rating.narrative >>> 评价事实未编译，fund_code=%s", row["fundCode"])
     return {"methodology_id": method_id, "results": out, "independent_product_validation": False}

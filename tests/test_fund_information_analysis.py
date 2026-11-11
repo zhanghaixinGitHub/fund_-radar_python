@@ -343,13 +343,15 @@ def test_slow_material_parse_cannot_register_older_input_over_newer_snapshot(new
 
 
 @pytest.mark.parametrize("target_nav,expected", [("0.9", "DOWN"), ("1", "FLAT"), ("1.1", "UP")])
-def test_later_published_base_keeps_original_comparison_date(monkeypatch, target_nav, expected):
+@pytest.mark.parametrize("code", ["002112", "006038"])
+def test_later_published_base_keeps_original_comparison_date(monkeypatch, target_nav, expected, code):
     """预测时只有更早净值，公布后仍比较原定基准日；相等必须是持平，不参与训练。"""
     from app.services import fund_information_labels as service
     from app.services.direction_1d_protocol import ZONE
 
     now = datetime(2026, 10, 12, 21, tzinfo=ZONE)
     body = {
+        "fund_code": code,
         "target_nav_date": "2026-10-12",
         "base_nav_date": "2026-10-09",
         "input": {"source_id": "same-source", "values": [{"nav_date": "2026-10-08"}]},
@@ -366,7 +368,7 @@ def test_later_published_base_keeps_original_comparison_date(monkeypatch, target
     monkeypatch.setattr(service.repo, "source", lambda c: {"source_id": "same-source"})
 
     def navs(c, code, source, base, target):
-        assert code == "002112" and base == date(2026, 10, 9) and target == date(2026, 10, 12)
+        assert code == body["fund_code"] and base == date(2026, 10, 9) and target == date(2026, 10, 12)
         return [
             {"nav_date": base, "unit_nav": "1", "content_hash": "base"},
             {"nav_date": target, "unit_nav": target_nav, "content_hash": "target"},
@@ -380,6 +382,7 @@ def test_later_published_base_keeps_original_comparison_date(monkeypatch, target
     assert payload["base_initially_missing"] is True
     assert payload["base_revised"] is False
     assert payload["training_eligible"] is False
+    assert payload["fund_code"] == payload["base_source"]["fund_code"] == payload["target_source"]["fund_code"] == code
 
 
 def test_future_target_does_not_fetch_or_guess_answer(monkeypatch):

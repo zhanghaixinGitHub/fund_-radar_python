@@ -41,6 +41,10 @@ class Backend:
         assert batch["job_id"] == "original"
         return {"terminal": self.terminal, "prediction_outcomes": self.outcomes}
 
+    def one_day_outcomes(self):
+        assert self.terminal
+        return {"status": "SUCCEEDED"}
+
     def guard(self, path, blocked):
         funds = [{"fund_code": c, "actions": ["fix"] if c in self.actions else [], "horizons": []} for c in self.codes]
         pending = [

@@ -25,6 +25,14 @@ def completed():
             }
         },
         "ratings": {"status": "SUCCEEDED", "scope": codes},
+        "one_day_outcomes": {
+            "status": "SUCCEEDED",
+            "owner_user_id": "owner",
+            "scope": codes,
+            "checked_at": "2026-11-11T00:40:00+08:00",
+            "dueBefore": "2026-11-11",
+            "summary": dict(total=4, checked=4, completed=4, created=1, pending=0, failed=0, remaining=0),
+        },
     }
     guard = {"owner_user_id": "owner", "window": state["window"], "status": "CLOSED", "all_predictions_generated": True}
     return state, guard, codes
@@ -33,7 +41,11 @@ def completed():
 def test_complete_receipts_and_fresh_owner_readback():
     state, guard, codes = completed()
     ratings = [{"fundCode": c, "status": "SCORED", "score": "70"} for c in codes]
-    assert assess(state, guard, codes, ratings, "2026-11-11T09:00:00+08:00")["status"] == "SUCCEEDED"
+    live = dict(total=4, completed=4, pending=0, failed=0, remaining=0)
+    assert (
+        assess(state, guard, codes, ratings, "2026-11-11T09:00:00+08:00", one_day_readback=live)["status"]
+        == "SUCCEEDED"
+    )
 
 
 def test_changed_holdings_and_yesterdays_run_are_not_success():

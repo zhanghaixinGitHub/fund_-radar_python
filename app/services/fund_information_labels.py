@@ -14,16 +14,21 @@ def labels(body):
     target, base = date.fromisoformat(body["target_nav_date"]), date.fromisoformat(body["base_nav_date"])
     if target > now.astimezone(ZONE).date():
         return {"status": "PENDING_TARGET"}
+    code = body["fund_code"]
+    if len(code) != 6 or not code.isdigit():
+        raise ValueError("LABEL_FUND_INVALID")
     with get_engine().begin() as c:
         source = repo.source(c)
         if str(source["source_id"]) != body["input"]["source_id"]:
             raise ValueError("LABEL_SOURCE_CHANGED")
-        rows = repo.navs(c, "002112", source["source_id"], base, target)
+        rows = repo.navs(c, code, source["source_id"], base, target)
         by_day = {r["nav_date"]: r for r in rows}
         if base not in by_day or target not in by_day:
             return {"status": "PENDING_NAV"}
-        a, b = repo.observe(c, "002112", source, [by_day[base], by_day[target]], now)
-        key_hash = digest({"base": a["content_hash"], "target": b["content_hash"]})
+        a, b = repo.observe(c, code, source, [by_day[base], by_day[target]], now)
+        # 基金身份进入答案摘要；旧版误取002112的答案保留，但不能被同日期缓存复用。
+        a, b = {**a, "fund_code": code}, {**b, "fund_code": code}
+        key_hash = digest({"fund_code": code, "base": a["content_hash"], "target": b["content_hash"]})
         previous = (
             c.execute(
                 text(
@@ -45,6 +50,7 @@ def labels(body):
         frozen = next((v for v in body["input"]["values"] if v["nav_date"] == str(base)), None)
         payload = {
             **label(a["unit_nav"], b["unit_nav"]),
+            "fund_code": code,
             "task_key": body["task_key"],
             "input_snapshot_id": body["input_snapshot_id"],
             "target_nav_date": str(target),

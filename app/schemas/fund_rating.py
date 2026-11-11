@@ -24,17 +24,27 @@ class RatingMetric(PublicModel):
 
 class RatingScoreRange(PublicModel):
     """当前已发布的分数范围；不是概率或未来损失区间。"""
+
     lower: str
     upper: str
 
 
 class RatingCoverage(PublicModel):
     """原八维权重的点分、有效区间和未评分覆盖，均为百分数。"""
+
     pointWeight: str
     intervalWeight: str
     missingWeight: str
     pointDimensions: int
     intervalDimensions: int
+
+
+class RatingAssessment(PublicModel):
+    """同批次事实生成的业务评价，不包含计算或存储信息。"""
+
+    conclusion: str
+    paragraphs: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
 
 
 class RatingDimension(PublicModel):
@@ -48,6 +58,7 @@ class RatingDimension(PublicModel):
     explanation: str
     metrics: list[RatingMetric] = Field(default_factory=list)
     sources: list[RatingSource] = Field(default_factory=list)
+    assessment: RatingAssessment | None = None
 
 
 class RatingSummary(PublicModel):

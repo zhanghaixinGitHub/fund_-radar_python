@@ -36,6 +36,17 @@ class LocalDailyBackend:
         if hasattr(self, "collector"):
             self.collector.close()
 
+    def one_day_outcomes(self, *, all_archived=False):
+        from app.services.fund_daily_outcomes import reconcile
+
+        return reconcile(self, all_archived=all_archived)
+
+    def one_day_outcome_status(self):
+        return self.get(
+            self.settings.core_service_base_url
+            + f"/internal/v1/direction-1d/sync/users/{self.owner}/outcomes/status?dueBefore={now().date()}"
+        )
+
     def ratings(self, terminal):
         """资料终态后执行持仓月评；公告和持仓检查没有真实回执时保持待办。"""
         # 再取一次本人持仓，避免同步期间已清仓的基金仍被新发布。

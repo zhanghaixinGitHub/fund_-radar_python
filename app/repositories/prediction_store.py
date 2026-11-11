@@ -66,24 +66,33 @@ def save_prediction(connection, payload, period_key):
     return stored["payload"], inserted is not None
 
 
-def history(fund_code, *, limit=30, before=None, before_id=None):
+def history(fund_code, *, limit=30, before=None, before_id=None, dates=None):
+    # 指定可见日期一次读齐最新三个周期，不受按生成时刻翻页的边界影响。
+    selection = "DISTINCT ON (p.payload->>'startDate',p.horizon_id)" if dates is not None else ""
+    ordering = (
+        "p.payload->>'startDate',p.horizon_id,generated_at DESC,prediction_id DESC"
+        if dates is not None
+        else "generated_at DESC,prediction_id"
+    )
     with get_engine().connect() as connection:
         return rows(
             connection,
-            """
-          SELECT p.payload, (SELECT r.payload FROM prediction_target_resolution r
+            f"""
+          SELECT {selection} p.payload, (SELECT r.payload FROM prediction_target_resolution r
             WHERE r.prediction_id=p.prediction_id ORDER BY r.created_at DESC LIMIT 1) resolution,
             (SELECT jsonb_build_object('status',s.status,'details',s.payload,'lastAttemptAt',s.last_attempt_at)
              FROM prediction_check_state s WHERE s.prediction_id=p.prediction_id) "outcomeCheck",
             (SELECT jsonb_agg(o.payload ORDER BY o.checked_at)
             FROM prediction_outcome o WHERE o.prediction_id=p.prediction_id) outcomes
           FROM fund_prediction_record p WHERE fund_code=:code AND mode='LIVE' AND payload->>'role'='PRIMARY'
+          AND (CAST(:dates AS text[]) IS NULL OR p.payload->>'startDate'=ANY(CAST(:dates AS text[])))
           AND (CAST(:before AS timestamptz) IS NULL OR generated_at<:before
             OR (generated_at=:before AND prediction_id>CAST(:before_id AS uuid)))
-          ORDER BY generated_at DESC,prediction_id LIMIT :limit
+          ORDER BY {ordering} LIMIT :limit
         """,
             code=fund_code,
             before=before,
             before_id=before_id,
-            limit=min(100, limit),
+            dates=dates,
+            limit=min(150 if dates is not None else 100, limit),
         )

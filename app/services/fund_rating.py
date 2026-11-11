@@ -668,6 +668,10 @@ def read(codes: list[str], *, rating_ref: str | None = None, detail: bool = Fals
                     from app.services.fund_rating_presentation import enrich_published_detail
 
                     item = enrich_published_detail(item, result, batch.input_snapshot)
+                    from app.services.fund_rating_narrative_store import enrich as enrich_narrative
+                    from app.services.fund_rating_reviewed_snapshot import archive_root
+
+                    item = enrich_narrative(item, result, batch.input_snapshot, root=archive_root())
             else:
                 item = {"fundCode": code, "status": "NOT_RATED", "message": "暂未评级"}
                 if detail:

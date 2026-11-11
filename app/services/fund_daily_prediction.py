@@ -96,6 +96,12 @@ class DailyPredictionRun:
             state["status"] = "WAITING_MATERIALS"
             versioned_save(self.path, state)
             return state
+        # 净值同步终态后先补核一日历史；独立保存回执，不让新预测缺资料阻塞旧答案。
+        try:
+            state["one_day_outcomes"] = b.one_day_outcomes()
+        except Exception as error:
+            state["one_day_outcomes"] = {"status": "FAILED", "reason": type(error).__name__ + ":" + str(error)[:300]}
+        versioned_save(self.path, state)
         if not initial_guard:
             # 原作业及全部子任务终态后重新检查，绝不复用等待期间的旧资料就绪状态。
             b.guard(root / "followthrough.json", blocked_file)
@@ -182,6 +188,8 @@ class DailyPredictionRun:
         )
         if state["prediction_outcomes"] is None and state["status"] == "CLOSED":
             state["status"] = "OUTCOME_STEP_MISSING"
+        if state["one_day_outcomes"].get("status") != "SUCCEEDED" and state["status"] == "CLOSED":
+            state["status"] = "ONE_DAY_OUTCOMES_PENDING"
         if state.get("ratings", {}).get("status") != "SUCCEEDED" and "ratings" in state and state["status"] == "CLOSED":
             state["status"] = "RATINGS_PENDING"
         versioned_save(self.path, state)
