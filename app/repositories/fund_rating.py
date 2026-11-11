@@ -293,6 +293,12 @@ def publish(session: Session, batch: RatingBatch, *, rollback_reason: str | None
             next_v1 = any(m.get("bundle", {}).get("evidence_v1_calculation") for m in batch.input_snapshot["members"])
             if previous_v1 and not next_v1:
                 raise RatingConflict("RATING_EVIDENCE_V1_DOWNGRADE")
+            from app.services.fund_rating_typed_disclosure import protect_current_snapshot
+
+            try:
+                protect_current_snapshot(old.input_snapshot, batch.input_snapshot)
+            except ValueError as error:
+                raise RatingConflict(str(error)) from error
     if rollback_reason and any(r.status in {"RATED", "SCORED", "PARTIAL"} and r.valid_until <= now for r in results):
         raise ValueError("RATING_ROLLBACK_EXPIRED")
     if not current:

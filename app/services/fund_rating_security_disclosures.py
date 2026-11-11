@@ -46,7 +46,7 @@ def verified_securities(source, inputs: dict) -> dict:
             raise ValueError("R5_SECURITY_FINE_INDUSTRY_REQUIRED")
         # 原文表格的同一行绑定旧新代码及法律全名；分散检索命中不能证明关系。
         ref = source.sources[transfer]
-        html = source.raw[transfer].decode(ref.get("encoding", "utf-8"))
+        html = source.load(transfer).decode(ref.get("encoding", "utf-8"))
         rows = [
             [normalized_text(cell.get_text()) for cell in row.find_all(["td", "th"])]
             for row in BeautifulSoup(html, "html.parser").find_all("tr")

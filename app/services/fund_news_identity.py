@@ -27,6 +27,7 @@ SCOPES = {
     "EXPLICIT_PRODUCT_NAME",
     "MANAGER_CONDITIONAL_VALUATION",
     "MANAGER_CONDITIONAL_CONVERSION",
+    "MANAGER_ADVISORY_SERVICE",
 }
 
 
@@ -139,14 +140,48 @@ def _report_conditional_valuation(code, product, proof, document, body, title, m
         and re.search(r"(?<!\d)" + code + r"(?!\d)", (proof or {}).get("quote", ""))
         and manager in _compact(document["body"])
         and re.fullmatch(
-            re.escape(manager)
-            + r"关于旗下基金(?:调整长期停牌股票估值方法的提示性公告|持有停牌股票估值调整的公告)",
+            re.escape(manager) + r"关于旗下基金(?:调整长期停牌股票估值方法的提示性公告|持有停牌股票估值调整的公告)",
             _compact(title),
         )
         and any(term in text for term in ("对本公司旗下基金所持有的", "对本公司旗下基金(ETF除外)所持有的"))
         and all(term in text for term in ("基金托管人协商一致", "指数收益法", "当日收盘价"))
         and any(term in text for term in ("复牌", "待该股票的交易体现活跃市场交易特征后"))
         and re.search(r"(?:股票|证券)代码[:：]\d{6}", text)
+    )
+
+
+def _november_valuation_background(code, product, proof, document, body, title, manager):
+    """兼容已逐篇核过的本期停牌估值格式，仅证明条件式管理人背景。
+
+    不据此确认本基金当前持股，也不把估值公告当作公司经营或方向证据。
+    独立份额报告、管理人、明确股票、方法、生效日和恢复条件仍逐项验证。
+    """
+    titles = {
+        "华夏基金管理有限公司": "华夏基金管理有限公司关于旗下证券投资基金估值调整情况的公告",
+        "天弘基金管理有限公司": "天弘基金管理有限公司关于旗下基金持有停牌股票估值调整情况的公告",
+        "大成基金管理有限公司": "大成基金管理有限公司关于旗下部分基金估值调整情况的公告",
+        "南方基金管理股份有限公司": "关于南方基金管理股份有限公司旗下基金调整停牌股票估值方法的提示性公告",
+        "广发基金管理有限公司": "广发基金管理有限公司关于公司旗下部分基金估值调整情况的公告",
+        "国泰基金管理有限公司": "国泰基金管理有限公司调整长期停牌股票估值方法的公告",
+        "招商基金管理有限公司": "招商基金管理有限公司关于旗下基金估值变更的公告",
+    }
+    text, quote = _compact(body), (proof or {}).get("quote", "")
+    return bool(
+        document
+        and document.get("kind") == "REPORT"
+        and len(product) >= 8
+        and _compact(product) in _compact(quote)
+        and re.search(r"(?<!\d)" + code + r"(?!\d)", quote)
+        and manager in _compact(document["body"])
+        and _compact(title) == titles.get(manager)
+        and not (re.search(r"ETF|交易型开放式", product, re.I) and "联接" not in product)
+        and any(day in text for day in ("2026年11月5日", "2026年11月05日"))
+        and "指数收益法" in text
+        and "旗下" in text
+        and "ETF" in text
+        and ("002129" in text or "000831" in text)
+        and ("复牌" in text or "活跃市场" in text)
+        and ("收盘" in text or "市价" in text or "市场价格" in text)
     )
 
 
@@ -234,7 +269,13 @@ def _trade_state_table_matches(code, product, proof, document, body, title, mana
         classes == ["A", "C"]
         and _compact("".join(names)) == _compact(short)
         and "".join(pieces["A"]) == master
-        and "".join(pieces["C"]) == code
+        and (
+            "".join(pieces["C"]) == code
+            # 仅用于产品身份：转载文本明确保留C类标签但遗漏代码时，不能冒称
+            # 表内出现本代码，也不能据此确认C类交易状态；份额关系仍由独立报告证明。
+            or not pieces["C"]
+            and table.get("class_code_missing_in_text") is True
+        )
     )
 
 
@@ -273,14 +314,21 @@ def _benchmark_product_table_matches(product, proof, document, body, title, mana
     if (
         (document or {}).get("kind") != "REPORT"
         or re.fullmatch(
-            re.escape(manager) + r"关于旗下部分基金调整业绩比较基准并修订基金合同(?:等法律文件)?的公告",
+            re.escape(manager)
+            + r"关于旗下部分基金(?:调整业绩比较基准|规范业绩比较基准表述)并修订基金合同(?:等法律文件)?的公告",
             _compact(title),
-        ) is None
+        )
+        is None
         or not all(term in _compact(body) for term in ("序号", "基金全称", "业绩比较基准"))
-        or not row or len(row) > 1400 or body.count(row) != 1
-        or type(begin) is not int or type(end) is not int
-        or not 0 <= begin < end <= 40 or end - begin < 12
-        or not isinstance(ordinal, str) or not re.fullmatch(r"[1-9]\d{0,2}", ordinal)
+        or not row
+        or len(row) > 1400
+        or body.count(row) != 1
+        or type(begin) is not int
+        or type(end) is not int
+        or not 0 <= begin < end <= 40
+        or end - begin < 12
+        or not isinstance(ordinal, str)
+        or not re.fullmatch(r"[1-9]\d{0,2}", ordinal)
     ):
         return False
     names, ordinals = [], []
@@ -397,25 +445,30 @@ def _validate(root, code, entry, source, value):
         # 两条路径均只证明条件式背景，不确认本基金当前组合或具体估值。
         product = value.get("product_name", "")
         uri = urlparse(document.get("url", "")) if document else None
-        report_proven = _report_conditional_valuation(
-            code, product, proof, document, body, entry["title"], manager
-        ) and any("指数收益法" in _compact(q) and "旗下基金" in _compact(q) for q in value["quotes"])
-        if value.get("does_not_confirm_current_portfolio_application") is not True or not report_proven and (
-            not document
-            or document.get("kind") != "FUND_PROFILE"
-            or uri.scheme != "https"
-            or uri.hostname != "e.gtfund.com"
-            or uri.path != "/etrade/Jijin/view/id/" + code
-            or len(product) < 12
-            or re.search(r"ETF|交易型开放式", product, re.I)
-            or _compact(product) not in _compact(proof["quote"])
-            or not re.search(r"(?<!\d)" + code + r"(?!\d)", document["body"])
-            or manager not in _compact(document["body"])
-            or not re.fullmatch(re.escape(manager) + r"调整长期停牌股票估值方法的公告", _compact(entry["title"]))
-            or "本公司旗下基金(ETF基金除外)持有的" not in _compact(body)
-            or not re.search(r"证券代码[:：]\d{6}", _compact(body))
-            or not any("本公司旗下基金(ETF基金除外)持有的" in _compact(q) for q in value["quotes"])
-            or value.get("does_not_confirm_current_portfolio_application") is not True
+        report_proven = (
+            _report_conditional_valuation(code, product, proof, document, body, entry["title"], manager)
+            or _november_valuation_background(code, product, proof, document, body, entry["title"], manager)
+        ) and any("指数收益法" in _compact(q) and "旗下" in _compact(q) for q in value["quotes"])
+        if (
+            value.get("does_not_confirm_current_portfolio_application") is not True
+            or not report_proven
+            and (
+                not document
+                or document.get("kind") != "FUND_PROFILE"
+                or uri.scheme != "https"
+                or uri.hostname != "e.gtfund.com"
+                or uri.path != "/etrade/Jijin/view/id/" + code
+                or len(product) < 12
+                or re.search(r"ETF|交易型开放式", product, re.I)
+                or _compact(product) not in _compact(proof["quote"])
+                or not re.search(r"(?<!\d)" + code + r"(?!\d)", document["body"])
+                or manager not in _compact(document["body"])
+                or not re.fullmatch(re.escape(manager) + r"调整长期停牌股票估值方法的公告", _compact(entry["title"]))
+                or "本公司旗下基金(ETF基金除外)持有的" not in _compact(body)
+                or not re.search(r"证券代码[:：]\d{6}", _compact(body))
+                or not any("本公司旗下基金(ETF基金除外)持有的" in _compact(q) for q in value["quotes"])
+                or value.get("does_not_confirm_current_portfolio_application") is not True
+            )
         ):
             raise ValueError("MARKET_NEWS_CONDITIONAL_VALUATION_UNPROVEN")
     if value["scope"] == "MANAGER_CONDITIONAL_CONVERSION":
@@ -443,6 +496,22 @@ def _validate(root, code, entry, source, value):
             or value.get("does_not_confirm_current_portfolio_application") is not True
         ):
             raise ValueError("MARKET_NEWS_CONDITIONAL_CONVERSION_UNPROVEN")
+    if value["scope"] == "MANAGER_ADVISORY_SERVICE":
+        # 本轮两份投顾业务通知涉及管理人服务组合，不等同于单只基金合同或风险等级变化。
+        titles = {
+            manager + "关于更新公开募集证券投资基金投资顾问服务业务规则的通知",
+            manager + "关于更新部分基金投资组合策略风险等级及调整部分基金投资组合策略的公告",
+        }
+        if (
+            manager != "广发基金管理有限公司"
+            or _compact(entry["title"]) not in titles
+            or not document
+            or document.get("kind") != "REPORT"
+            or not re.search(r"(?<!\d)" + code + r"(?!\d)", proof["quote"])
+            or manager not in _compact(document["body"])
+            or not any(term in _compact(body) for term in ("基金投资顾问服务业务规则", "基金投顾组合策略"))
+        ):
+            raise ValueError("MARKET_NEWS_ADVISORY_SERVICE_UNPROVEN")
     if value["scope"] in {"MANAGER_SERVICE", "MANAGER_GOVERNANCE"}:
         # 仅服务和机构治理类别允许管理人层级；部分基金清单、投资及估值事项不能借此放行。
         title = _compact(entry["title"])
@@ -457,6 +526,7 @@ def _validate(root, code, entry, source, value):
             r"|谨防金融诈骗|防范金融诈骗|客服.*人工服务|官网.*(?:升级|维护)"
             r"|直销平台.*(?:完善|更新).*身份资料"
             r"|提醒客户进一步完善身份信息"
+            r"|终止.*办理.*旗下基金.*销售业务|终止.*代理销售本公司旗下所有基金产品"
             if value["scope"] == "MANAGER_SERVICE"
             else r"设立.*分公司|高级管理人员|高管|参与上市公司治理.*(?:指引|规则)"
         )
@@ -478,9 +548,8 @@ def _validate(root, code, entry, source, value):
         # 经理、合同、费率或估值变化。目录、原文摘要和人工逐字引用仍先通过上方校验。
         impersonation_warning = (
             value["scope"] == "MANAGER_SERVICE"
-            and re.fullmatch(
-                r"关于警惕不法分子假冒" + re.escape(manager) + r"进行非法证券活动的重要提示", title
-            ) is not None
+            and re.fullmatch(r"关于警惕不法分子假冒" + re.escape(manager) + r"进行非法证券活动的重要提示", title)
+            is not None
             and all(term in _compact(body) for term in ("官方信息", "官方渠道", "谨防诈骗", "不会承诺"))
             and not re.search(r"基金经理|基金合同|调整.{0,8}费率|本基金.{0,8}估值", _compact(body))
         )

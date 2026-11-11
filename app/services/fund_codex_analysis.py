@@ -137,7 +137,7 @@ def reviewed_events(data: dict, review: dict) -> tuple[list[dict], list[dict]]:
 def catalog(data: dict, review: dict) -> tuple[dict, list[dict], list[dict]]:
     """合并程序事实与已核对事件；引用编号由原身份确定，不用摘要相似度替换原文。"""
     events, coverage = reviewed_events(data, review)
-    facts = dict(data["facts"])
+    facts = deepcopy(data["facts"])
     # 只由冻结净值计算最近收盘变化；明确是历史观察，不用旧收益推定本期必涨。
     if len(data.get("nav", [])) >= 2:
         previous, latest = data["nav"][-2:]
@@ -150,6 +150,16 @@ def catalog(data: dict, review: dict) -> tuple[dict, list[dict], list[dict]]:
             "source": None,
         }
     facts.update(event_facts(group_events(events), data["companies"]))
+    # 多只证券的独立行情响应可能来自同一接口、同一日期，展示归因也相同。
+    # 原文ID、逐证券引用与冻结输入全部保留；只合并完全相同的展示来源，
+    # 避免Java把重复归因误当作非法来源而拒绝已完成的真实判断。
+    for fact in facts.values():
+        if isinstance(fact.get("sources"), list):
+            unique = []
+            for source in fact["sources"]:
+                if source not in unique:
+                    unique.append(source)
+            fact["sources"] = unique
     return reference_catalog(facts), events, coverage
 
 

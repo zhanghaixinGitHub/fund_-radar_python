@@ -165,6 +165,7 @@ def list_fund_summaries(
     page_size: int,
     cursor: str | None,
     page: int | None,
+    fund_codes: tuple[str, ...] | None = None,
 ) -> FundSummaryPage:
     """读取已落库目录、最新净值日期与展示涨跌率。
 
@@ -181,6 +182,8 @@ def list_fund_summaries(
         )
     if fund_type:
         conditions += (FundShareClass.fund_type == fund_type,)
+    if fund_codes is not None:
+        conditions += (FundShareClass.fund_code.in_(fund_codes),)
 
     total_count = session.scalar(
         select(func.count()).select_from(FundShareClass).where(*conditions)
@@ -204,6 +207,7 @@ def list_fund_summaries(
 
 def iter_fund_code_batches(
     session: Session, keyword: str | None, fund_type: str | None, *, page_mode: bool,
+    fund_codes: tuple[str, ...] | None = None,
 ) -> Iterator[Sequence[str]]:
     """按列表顺序流式读取候选代码，每批至多 100 只，不预加载全目录净值。"""
     statement = select(FundShareClass.fund_code)
@@ -214,6 +218,8 @@ def iter_fund_code_batches(
         )
     if fund_type:
         statement = statement.where(FundShareClass.fund_type == fund_type)
+    if fund_codes is not None:
+        statement = statement.where(FundShareClass.fund_code.in_(fund_codes))
     ordering = (_fund_type_order(), FundShareClass.fund_code) if page_mode else (FundShareClass.fund_code,)
     yield from session.scalars(statement.order_by(*ordering).execution_options(yield_per=100)).partitions(100)
 

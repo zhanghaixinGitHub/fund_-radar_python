@@ -64,6 +64,8 @@ def input_gaps(packet: dict) -> list[str]:
                 gaps.append("本次公告原文或检索回执仍待核验")
     if not packet["time_context"]["baseline_complete"]:
         gaps.append("本基金实际基准日净值或所列行情仍未齐备")
+    if packet.get("source_manifest", {}).get("current_notice_check", {}).get("publication_time_required"):
+        gaps.append("本次同日公告的公开时间证据仍待核验")
     return gaps
 
 

@@ -122,6 +122,10 @@ def validate_sources(bundle: dict, frozen: datetime, *, root: Path | None = None
         or re.sub(r"\s+", "", bundle["identity"]["legal_name"]) not in re.sub(r"\s+", "", identity["title"])
     ):
         raise ValueError("RATING_SNAPSHOT_LEGAL_IDENTITY_MISMATCH")
+    if bundle.get("typed_disclosure_calculation"):
+        from app.services.fund_rating_typed_disclosure import validate_input_archive as validate_typed_archive
+
+        validate_typed_archive(bundle, root=root, archive_reader=_read)
     if bundle.get("evidence_v1_calculation"):
         from app.services.fund_rating_evidence_preview import REVISION
 
@@ -180,6 +184,7 @@ def validate_sources(bundle: dict, frozen: datetime, *, root: Path | None = None
         "japan_return_calculation",
         "huaan_qdii_relative_calculation",
         "huaan_qdii_benchmark_calculation",
+        "huaan_qdii_disclosure_calculation",
         "fund_013853_execution_calculation",
         "money_aggregate_components_calculation",
         "efunds_complete_holdings_calculation",
@@ -448,6 +453,10 @@ def calculate(bundle: dict, *, root: Path | None = None) -> dict:
             from app.services.fund_rating_huaan_qdii_benchmark import replay_snapshot as replay_huaan_benchmark
 
             replay_huaan_benchmark(bundle, dimensions, root=root or archive_root())
+        if bundle.get("huaan_qdii_disclosure_calculation"):
+            from app.services.fund_rating_huaan_qdii_disclosure import replay_snapshot as replay_huaan_disclosure
+
+            replay_huaan_disclosure(bundle, dimensions, root=root or archive_root())
         if bundle.get("japan_active_execution_calculation"):
             from app.services.fund_rating_japan_active_execution import replay_snapshot as replay_japan_execution
 
@@ -801,15 +810,33 @@ def calculate(bundle: dict, *, root: Path | None = None) -> dict:
         full = None
         if bundle.get("evidence_v1_calculation"):
             from app.services.fund_rating_evidence_preview import preview
-            from app.services.fund_rating_reviewed_quality import PASSIVE_BASIS, policy
+            from app.services.fund_rating_reviewed_quality import ACTIVE_BASIS, PASSIVE_BASIS, policy
 
             full = preview(bundle, root or archive_root(), review_required=False)
-            expected_weights = policy(PASSIVE_BASIS)["weights"]
-            if full["status"] != "CANDIDATE" or any(
-                _number(weights[k]) != expected_weights[v]
-                or dimensions[k]["candidate"] != full["dimensions"][v] for k, v in KEYS.items()
+            expected_weights = policy(PASSIVE_BASIS if bundle["family"] == "INDEX" else ACTIVE_BASIS)["weights"]
+            partial_only = bundle["evidence_v1_calculation"].get("partial_release_only") is True
+            allowed = full["status"] in {"CANDIDATE", "PARTIAL"} if partial_only else full["status"] == "CANDIDATE"
+            if not allowed or any(
+                _number(weights[k]) != expected_weights[v] or dimensions[k]["candidate"] != full["dimensions"][v]
+                for k, v in KEYS.items()
             ):
                 raise ValueError("RATING_EVIDENCE_V1_REPLAY_MISMATCH")
+            if partial_only:
+                if not any(value is not None for value in full["dimensions"].values()):
+                    raise ValueError("RATING_EVIDENCE_V1_PARTIAL_NO_KNOWN_DIMENSION")
+                for key, internal in KEYS.items():
+                    expected, actual = full["dimensions"][internal], dimensions[key]
+                    if expected is None:
+                        if (
+                            actual["candidate"] is not None
+                            or _number(actual["lower"]) != 0
+                            or _number(actual["upper"]) != 100
+                        ):
+                            raise ValueError("RATING_EVIDENCE_V1_PARTIAL_UNKNOWN_RANGE")
+                    elif any(_number(actual[bound]) != _number(expected) for bound in ("lower", "upper", "candidate")):
+                        raise ValueError("RATING_EVIDENCE_V1_PARTIAL_POINT_MISMATCH")
+                # 部分展示包不自动升级；完整总分必须用新的原件审阅包发布。
+                full = None
         if bundle.get("r5_calculation"):
             from app.services.fund_rating_r5 import calculate as calculate_r5
 
@@ -842,6 +869,14 @@ def calculate(bundle: dict, *, root: Path | None = None) -> dict:
             if _read(raw["input_archive"], root or archive_root()) != raw["inputs"]:
                 raise ValueError("R5_YYHR_INPUT_ARCHIVE")
             replay_snapshot_points(bundle, dimensions, root=root or archive_root())
+        if bundle.get("huaan_qdii_disclosure_calculation"):
+            from app.services.fund_rating_huaan_qdii_disclosure import completed_total
+
+            full = completed_total(bundle, dimensions, weights, root=root or archive_root())
+        if bundle.get("typed_disclosure_calculation"):
+            from app.services.fund_rating_typed_disclosure import replay_snapshot as replay_typed_disclosure
+
+            full = replay_typed_disclosure(bundle, dimensions, weights, root=root or archive_root())
         points = [k for k, v in dimensions.items() if v["candidate"] is not None]
         ranges = [
             k
@@ -1019,6 +1054,21 @@ def publish_reviewed(session: Session, dossier: dict, reason: str, *, root: Path
         if len(v1_entries) != len(codes) or any(rating_review_required(code) for code in codes):
             raise ValueError("RATING_EVIDENCE_V1_PUBLICATION_SCOPE")
         revision = REVISION
+    disclosure_entries = [entry for entry in dossier["entries"] if entry.get("huaan_qdii_disclosure_calculation")]
+    if disclosure_entries:
+        from app.services.fund_market_review import rating_review_required
+
+        # 当前事项限制新发布；历史冻结输入重放不依赖后来发生的事项。
+        if any(rating_review_required(entry["fund_code"]) for entry in disclosure_entries):
+            raise ValueError("QDII_COMPLETION_EVENT_REVIEW_REQUIRED")
+        revision = "huaan-qdii-disclosure-completion-20261111-v1"
+    typed_entries = [entry for entry in dossier["entries"] if entry.get("typed_disclosure_calculation")]
+    if typed_entries:
+        from app.services.fund_rating_typed_disclosure import REVISION as TYPED_REVISION
+        from app.services.fund_rating_typed_disclosure import publication_check as typed_publication_check
+
+        typed_publication_check(typed_entries, root=root)
+        revision = TYPED_REVISION
     config = {
         "basis": BASIS,
         "revision": revision,

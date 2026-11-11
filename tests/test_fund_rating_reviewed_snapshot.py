@@ -97,6 +97,65 @@ def bundle_from(dossier):
     return {**deepcopy(data["entries"][0]), "basis": BASIS, "reviewed_document": deepcopy(doc)}
 
 
+@pytest.fixture
+def one_year_partial(dossier, monkeypatch):
+    from app.services import fund_rating_evidence_preview as evidence
+    from app.services.fund_rating_reviewed_quality import PASSIVE_BASIS, policy
+
+    bundle = bundle_from(dossier)
+    bundle["family"] = "INDEX"
+    bundle["reviewed_document"]["outer_weights_percent"] = {
+        key: str(policy(PASSIVE_BASIS)["weights"][internal]) for key, internal in KEYS.items()
+    }
+    bundle["evidence_v1_calculation"] = {"partial_release_only": True}
+    result = {
+        "status": "PARTIAL",
+        "dimensions": {internal: bundle["reviewed_document"]["dimensions"][key] for key, internal in KEYS.items()},
+    }
+    monkeypatch.setattr(evidence, "preview", lambda *a, **kw: result)
+    return bundle, result
+
+
+def test_explicit_one_year_partial_keeps_unknown_and_no_total(one_year_partial):
+    bundle, _ = one_year_partial
+    result = calculate(bundle)
+    assert result["status"] == "PARTIAL" and result["score"] is None
+    assert result["point_dimensions"] == 7 and result["missing_weight"] == "25"
+
+
+def test_one_year_partial_without_explicit_flag_is_rejected(one_year_partial):
+    bundle, _ = one_year_partial
+    bundle["evidence_v1_calculation"] = {}
+    # 空包本来不进入回放；非空且未声明部分展示才检验完整路径。
+    bundle["evidence_v1_calculation"] = {"revision": "isolated"}
+    with pytest.raises(ValueError, match="REPLAY_MISMATCH"):
+        calculate(bundle)
+
+
+@pytest.mark.parametrize("bounds", [("10", "90"), ("0", "90")])
+def test_one_year_partial_unknown_range_cannot_be_silently_narrowed(one_year_partial, bounds):
+    bundle, _ = one_year_partial
+    bundle["reviewed_document"]["dimensions"]["execution"] = {
+        "lower": bounds[0],
+        "upper": bounds[1],
+        "candidate": None,
+    }
+    with pytest.raises(ValueError, match="PARTIAL_UNKNOWN_RANGE"):
+        calculate(bundle)
+
+
+def test_one_year_partial_cannot_upgrade_to_full_or_ignore_material_review(one_year_partial):
+    bundle, replay = one_year_partial
+    bundle["reviewed_document"]["dimensions"]["execution"] = "75"
+    replay["dimensions"]["efficiency"] = "75"
+    replay["status"] = "CANDIDATE"
+    assert calculate(bundle)["status"] == "PARTIAL"
+    assert calculate(bundle)["score"] is None
+    replay["status"] = "EVENT_REVIEW"
+    with pytest.raises(ValueError, match="REPLAY_MISMATCH"):
+        calculate(bundle)
+
+
 def test_missing_dimension_preserved_no_full_score(dossier):
     computed = calculate(bundle_from(dossier))
     assert computed["status"] == "PARTIAL" and computed["point_weight"] == "90"
@@ -109,10 +168,12 @@ def test_list_verification_reuses_published_result_without_replaying_originals(d
     bundle = bundle_from(dossier)
     computed = calculate(bundle)
     code = bundle["fund_code"]
-    batch = SimpleNamespace(input_snapshot={
-        "method": {"approved_artifacts": {code: bundle["research_archive"]["sha256"]}},
-        "members": [{"fund_code": code, "bundle": bundle, "evidence_hash": digest(bundle)}],
-    })
+    batch = SimpleNamespace(
+        input_snapshot={
+            "method": {"approved_artifacts": {code: bundle["research_archive"]["sha256"]}},
+            "members": [{"fund_code": code, "bundle": bundle, "evidence_hash": digest(bundle)}],
+        }
+    )
     result = SimpleNamespace(
         fund_code=code,
         status=computed["status"],
@@ -161,8 +222,17 @@ def test_list_input_validation_does_not_replay_public_sources(dossier, monkeypat
     assert inputs_valid(None, batch, context=context, replay_sources=False)
 
 
-@pytest.mark.parametrize("field", ["active_execution_calculation", "stability_calculation", "passive_performance_calculation",
-                                  "gold_components_calculation", "active_broad_components_calculation"])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "active_execution_calculation",
+        "stability_calculation",
+        "passive_performance_calculation",
+        "gold_components_calculation",
+        "active_broad_components_calculation",
+        "huaan_qdii_disclosure_calculation",
+    ],
+)
 @pytest.mark.parametrize("damage", [None, "inline_changed", "archive_changed"])
 def test_new_component_original_input_archive_must_match_embedded_inputs(dossier, field, damage):
     """批次内嵌原始输入与不可变归档必须一致，不能只检查研究分数表。"""
@@ -184,21 +254,30 @@ def test_new_component_original_input_archive_must_match_embedded_inputs(dossier
         validate_sources(value, datetime.now(UTC))
 
 
-@pytest.mark.parametrize("field,kind,changed_ref,limit", [
-    ("active_broad_components_calculation", "DERIVED_MANDATE_REVIEW", False, 50_000_000),
-    ("active_broad_components_calculation", "DERIVED_MANDATE_REVIEW", True, 25_000_000),
-    ("active_broad_components_calculation", "pdf", False, 25_000_000),
-    ("mixed_performance_calculation", "pdf", False, "MIXED_REGISTERED_ORIGINAL_VERIFIER"),
-])
-def test_typed_large_source_limit_keeps_exact_binding_and_ordinary_25mb(dossier, monkeypatch, field, kind, changed_ref, limit):
+@pytest.mark.parametrize(
+    "field,kind,changed_ref,limit",
+    [
+        ("active_broad_components_calculation", "DERIVED_MANDATE_REVIEW", False, 50_000_000),
+        ("active_broad_components_calculation", "DERIVED_MANDATE_REVIEW", True, 25_000_000),
+        ("active_broad_components_calculation", "pdf", False, 25_000_000),
+        ("mixed_performance_calculation", "pdf", False, "MIXED_REGISTERED_ORIGINAL_VERIFIER"),
+    ],
+)
+def test_typed_large_source_limit_keeps_exact_binding_and_ordinary_25mb(
+    dossier, monkeypatch, field, kind, changed_ref, limit
+):
     """仅验证大小边界分派；读回、SHA和路径本身由其余真实隔离文件反例覆盖。"""
     from app.services import fund_rating_reviewed_snapshot as implementation
     from app.services.fund_rating_pipeline import archive_json
 
     _, root, _ = dossier
     value = bundle_from(dossier)
-    reference = {"sha256": "typed-large-fixture", "file": "sources/large-fixture", "kind": kind,
-                 "archive_kind": "RESEARCH" if kind.startswith("DERIVED") else "ORIGINAL"}
+    reference = {
+        "sha256": "typed-large-fixture",
+        "file": "sources/large-fixture",
+        "kind": kind,
+        "archive_kind": "RESEARCH" if kind.startswith("DERIVED") else "ORIGINAL",
+    }
     raw = {"sources": {reference["sha256"]: reference}}
     value[field] = {"inputs": raw, "input_archive": archive_json(root, raw)}
     value["extra_archives"] = [{**reference, **({"role": "different-metadata"} if changed_ref else {})}]
@@ -225,21 +304,25 @@ def test_execution_originals_replayed_and_all_points_still_require_full_r5_packa
     from app.services import fund_rating_passive_execution
 
     bundle = bundle_from(dossier)
-    bundle['family'] = 'INDEX'
-    bundle['reviewed_document']['dimensions']['execution'] = '75'
-    raw = {'fund_code': bundle['fund_code'], 'as_of_date': bundle['as_of_date'],
-           'holding_date': bundle['holding_date'], 'legal_name': bundle['identity']['legal_name'],
-           'primary_ref': bundle['original_report_archive']['sha256']}
-    bundle['passive_execution_calculation'] = {'inputs': raw}
-    monkeypatch.setattr(fund_rating_passive_execution, 'calculate', lambda *a, **k: {'score': '75'})
+    bundle["family"] = "INDEX"
+    bundle["reviewed_document"]["dimensions"]["execution"] = "75"
+    raw = {
+        "fund_code": bundle["fund_code"],
+        "as_of_date": bundle["as_of_date"],
+        "holding_date": bundle["holding_date"],
+        "legal_name": bundle["identity"]["legal_name"],
+        "primary_ref": bundle["original_report_archive"]["sha256"],
+    }
+    bundle["passive_execution_calculation"] = {"inputs": raw}
+    monkeypatch.setattr(fund_rating_passive_execution, "calculate", lambda *a, **k: {"score": "75"})
     result = calculate(bundle)
-    assert result['point_dimensions'] == 8 and result['status'] == 'PARTIAL' and result['score'] is None
-    raw['fund_code'] = '999999'
-    with pytest.raises(ValueError, match='EXECUTION_INPUT_SCOPE'):
+    assert result["point_dimensions"] == 8 and result["status"] == "PARTIAL" and result["score"] is None
+    raw["fund_code"] = "999999"
+    with pytest.raises(ValueError, match="EXECUTION_INPUT_SCOPE"):
         calculate(bundle)
-    raw['fund_code'] = bundle['fund_code']
-    monkeypatch.setattr(fund_rating_passive_execution, 'calculate', lambda *a, **k: {'score': '76'})
-    with pytest.raises(ValueError, match='EXECUTION_DIMENSION_RECALCULATION'):
+    raw["fund_code"] = bundle["fund_code"]
+    monkeypatch.setattr(fund_rating_passive_execution, "calculate", lambda *a, **k: {"score": "76"})
+    with pytest.raises(ValueError, match="EXECUTION_DIMENSION_RECALCULATION"):
         calculate(bundle)
 
 
@@ -247,19 +330,23 @@ def test_fee_supplement_rejects_wrong_share_and_changed_point(dossier, monkeypat
     from app.services import fund_rating_fee_inputs
 
     bundle = bundle_from(dossier)
-    raw = {'fund_code': bundle['fund_code'], 'as_of_date': bundle['as_of_date'],
-           'share_class': bundle['share_class'], 'legal_name': bundle['identity']['legal_name'],
-           'primary_ref': bundle['original_report_archive']['sha256']}
-    bundle['fee_calculation'] = {'inputs': raw}
-    monkeypatch.setattr(fund_rating_fee_inputs, 'calculate', lambda *a, **k: {'score': '75'})
+    raw = {
+        "fund_code": bundle["fund_code"],
+        "as_of_date": bundle["as_of_date"],
+        "share_class": bundle["share_class"],
+        "legal_name": bundle["identity"]["legal_name"],
+        "primary_ref": bundle["original_report_archive"]["sha256"],
+    }
+    bundle["fee_calculation"] = {"inputs": raw}
+    monkeypatch.setattr(fund_rating_fee_inputs, "calculate", lambda *a, **k: {"score": "75"})
     result = calculate(bundle)
-    assert result['status'] == 'PARTIAL' and result['score'] is None
-    raw['share_class'] = 'C'
-    with pytest.raises(ValueError, match='FEE_INPUT_SCOPE'):
+    assert result["status"] == "PARTIAL" and result["score"] is None
+    raw["share_class"] = "C"
+    with pytest.raises(ValueError, match="FEE_INPUT_SCOPE"):
         calculate(bundle)
-    raw['share_class'] = bundle['share_class']
-    monkeypatch.setattr(fund_rating_fee_inputs, 'calculate', lambda *a, **k: {'score': '76'})
-    with pytest.raises(ValueError, match='FEE_DIMENSION_RECALCULATION'):
+    raw["share_class"] = bundle["share_class"]
+    monkeypatch.setattr(fund_rating_fee_inputs, "calculate", lambda *a, **k: {"score": "76"})
+    with pytest.raises(ValueError, match="FEE_DIMENSION_RECALCULATION"):
         calculate(bundle)
 
 
@@ -268,9 +355,13 @@ def test_passive_holdings_supplement_replays_originals_and_cannot_create_full_sc
 
     bundle = bundle_from(dossier)
     bundle["family"] = "INDEX"
-    raw = {"fund_code": bundle["fund_code"], "as_of_date": bundle["as_of_date"],
-           "holding_date": bundle["holding_date"], "legal_name": bundle["identity"]["legal_name"],
-           "primary_ref": bundle["original_report_archive"]["sha256"]}
+    raw = {
+        "fund_code": bundle["fund_code"],
+        "as_of_date": bundle["as_of_date"],
+        "holding_date": bundle["holding_date"],
+        "legal_name": bundle["identity"]["legal_name"],
+        "primary_ref": bundle["original_report_archive"]["sha256"],
+    }
     bundle["passive_holdings_calculation"] = {"inputs": raw}
     monkeypatch.setattr(fund_rating_passive_holdings, "calculate", lambda *a, **k: {"score": "75"})
     value = calculate(bundle)
@@ -474,13 +565,21 @@ def test_real_postgres_explicit_catalog_binding_preserves_existing_identity(db, 
     with Session(db) as session, session.begin():
         publish_reviewed(session, data, "隔离测试已有产品", root=root)
     with db.connect() as con:
-        original = dict(con.execute(text(
-            "SELECT s.fund_master_id,m.fund_name FROM fund_share_class s "
-            "JOIN fund_master m USING(fund_master_id) WHERE s.fund_code='000009'"
-        )).mappings().one())
+        original = dict(
+            con.execute(
+                text(
+                    "SELECT s.fund_master_id,m.fund_name FROM fund_share_class s "
+                    "JOIN fund_master m USING(fund_master_id) WHERE s.fund_code='000009'"
+                )
+            )
+            .mappings()
+            .one()
+        )
     entry = data["entries"][0]
     entry["existing_catalog_binding"] = {
-        "fund_master_id": str(original["fund_master_id"]), "catalog_legal_name": original["fund_name"]}
+        "fund_master_id": str(original["fund_master_id"]),
+        "catalog_legal_name": original["fund_name"],
+    }
     with Session(db) as session, session.begin():
         publish_reviewed(session, data, "隔离测试保留已有目录身份", root=root)
     with db.connect() as con:
@@ -495,18 +594,44 @@ def test_real_postgres_method_switch_reuses_live_classification_without_revoking
     entry = data["entries"][0]
     master_id = uuid4()
     with Session(db) as session, session.begin():
-        session.add(FundMaster(fund_master_id=master_id, fund_name="旧目录简称",
-                               manager_name="隔离测试管理人", fund_type="MONEY", status="ACTIVE"))
+        session.add(
+            FundMaster(
+                fund_master_id=master_id,
+                fund_name="旧目录简称",
+                manager_name="隔离测试管理人",
+                fund_type="MONEY",
+                status="ACTIVE",
+            )
+        )
         session.flush()
-        session.add(FundShareClass(fund_code="000009", fund_master_id=master_id, share_class="A",
-                                  fund_name="旧目录简称A", fund_type="MONEY", status="ACTIVE",
-                                  source_code="PUBLIC_DISCLOSURE", source_fund_code="000009"))
-        session.add(RatingClassification(classification_id="legacy-classification", fund_code="000009",
-                                        product_id=str(master_id), category_code="legacy-category", family="MONEY",
-                                        currency="CNY", eligibility="PUBLIC_LOCAL_ANALYSIS",
-                                        effective_from=date(2020, 1, 1), effective_to=None,
-                                        source_refs=[entry["original_report_archive"]["sha256"]],
-                                        verified_at=datetime.now(UTC), revoked=False))
+        session.add(
+            FundShareClass(
+                fund_code="000009",
+                fund_master_id=master_id,
+                share_class="A",
+                fund_name="旧目录简称A",
+                fund_type="MONEY",
+                status="ACTIVE",
+                source_code="PUBLIC_DISCLOSURE",
+                source_fund_code="000009",
+            )
+        )
+        session.add(
+            RatingClassification(
+                classification_id="legacy-classification",
+                fund_code="000009",
+                product_id=str(master_id),
+                category_code="legacy-category",
+                family="MONEY",
+                currency="CNY",
+                eligibility="PUBLIC_LOCAL_ANALYSIS",
+                effective_from=date(2020, 1, 1),
+                effective_to=None,
+                source_refs=[entry["original_report_archive"]["sha256"]],
+                verified_at=datetime.now(UTC),
+                revoked=False,
+            )
+        )
     entry["existing_catalog_binding"] = {"fund_master_id": str(master_id), "catalog_legal_name": "旧目录简称"}
     with Session(db) as session, session.begin():
         publish_reviewed(session, data, "隔离测试旧分类切换新评分方法", root=root)
@@ -526,17 +651,49 @@ def test_current_read_ignores_superseded_archive_but_never_falls_back_after_with
         receipt = publish_reviewed(session, data, "隔离测试当前有效结果", root=root)
     old_time = datetime.now(UTC) - timedelta(days=1)
     with Session(db) as session, session.begin():
-        session.add(RatingBatch(batch_id="superseded-archive", category_code="old-category",
-                               methodology_id=None, as_of_date=date(2026, 9, 30), frozen_at=old_time,
-                               input_hash="broken-archive-hash", sample_hash="old", input_path="inputs/old.json",
-                               input_snapshot={"method": None}, member_count=1, product_count=1,
-                               status="PUBLISHED", completed_at=old_time, withdrawn=False))
+        session.add(
+            RatingBatch(
+                batch_id="superseded-archive",
+                category_code="old-category",
+                methodology_id=None,
+                as_of_date=date(2026, 9, 30),
+                frozen_at=old_time,
+                input_hash="broken-archive-hash",
+                sample_hash="old",
+                input_path="inputs/old.json",
+                input_snapshot={"method": None},
+                member_count=1,
+                product_count=1,
+                status="PUBLISHED",
+                completed_at=old_time,
+                withdrawn=False,
+            )
+        )
         session.flush()
         session.add(RatingCurrent(category_code="old-category", batch_id="superseded-archive", updated_at=old_time))
-        session.add(RatingMember(batch_id="superseded-archive", fund_code="000009", product_id=None,
-                                 representative=True, admitted=False, reasons=[], evidence_hash=None))
-        session.add(RatingResult(batch_id="superseded-archive", fund_code="000009", status="NOT_RATED",
-                                 score=None, grade=None, dimension_values=None, public_evidence={}, valid_until=None))
+        session.add(
+            RatingMember(
+                batch_id="superseded-archive",
+                fund_code="000009",
+                product_id=None,
+                representative=True,
+                admitted=False,
+                reasons=[],
+                evidence_hash=None,
+            )
+        )
+        session.add(
+            RatingResult(
+                batch_id="superseded-archive",
+                fund_code="000009",
+                status="NOT_RATED",
+                score=None,
+                grade=None,
+                dimension_values=None,
+                public_evidence={},
+                valid_until=None,
+            )
+        )
     assert read(["000009"], detail=True, engine=db)["status"] == "PARTIAL"
     with pytest.raises(ValueError, match="HASH_MISMATCH"):
         read(["000009"], rating_ref="superseded-archive", detail=True, engine=db)

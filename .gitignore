@@ -17,3 +17,5 @@ data/fund-insights/
 # 经理公共原件、快照维护与跨进程请求预算属于本地资料，不进入源码仓库。
 data/fund-managers/
 data/source-budgets/
+# 本机原件清理暂停标记属于运行状态，随原件保留，不进入源码仓库。
+data/material-original-cleanup-hold.json

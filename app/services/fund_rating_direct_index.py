@@ -7,6 +7,7 @@ R5的股票内部口径；全资产余额用于支付、受限范围，不能把
 
 import json
 import re
+import unicodedata
 from copy import deepcopy
 from datetime import date, timedelta
 from decimal import Decimal, localcontext
@@ -249,6 +250,22 @@ def th_own_nav_check(rows: list[dict], observations: dict, adjusted: dict, units
     }
 
 
+def th_publisher_adjusted_nav(observations: dict, adjusted: dict, units: dict, common: list[str]) -> tuple[dict, dict]:
+    """官网与供应商复权口径不同时，只以单位净值同值确认份额后采用官网复权值。"""
+    values = dict(adjusted)
+    for day in common:
+        row = observations[day]
+        if row["unit_nav"] != units[day] or row["publisher_nav"] <= 0:
+            raise ValueError("R5_DIRECT_INDEX_TH_OWN_NAV_CONFLICT")
+        values[day] = row["publisher_nav"]
+    return values, {
+        "mode": "ISSUER_PUBLISHED_ADJUSTED_NAV",
+        "own_share_observations_checked": len(common),
+        "provider_unit_nav_rows_checked": len(common),
+        "provider_adjusted_nav_not_substituted_for_issuer_series": True,
+    }
+
+
 def _history(source: Originals, inputs: dict) -> dict:
     refs = inputs["target_refs"]
     provider = source.json(refs["provider"])
@@ -300,9 +317,23 @@ def _history(source: Originals, inputs: dict) -> dict:
         common = sorted(set(history["dates"]) & observations.keys())
         adjusted = dict(zip(history["dates"], map(number, history["adjusted_nav"]), strict=True))
         units = {r["nav_date"]: number(r["unit_nav"]) for r in history["rows"]}
-        own_check = th_own_nav_check(
-            raw["payload"]["fundHistoryRecord"]["fundDayRecordList"], observations, adjusted, units, common
-        )
+        if inputs.get("use_publisher_adjusted_nav"):
+            adjusted, own_check = th_publisher_adjusted_nav(observations, adjusted, units, common)
+            history["adjusted_nav"] = [str(adjusted[day]) for day in history["dates"]]
+        else:
+            own_check = th_own_nav_check(
+                raw["payload"]["fundHistoryRecord"]["fundDayRecordList"], observations, adjusted, units, common
+            )
+        if inputs.get("use_official_benchmark_levels"):
+            history["benchmark_index"] = [
+                str(observations[day]["benchmark_level"]) if day in observations else None for day in history["dates"]
+            ]
+            history["publisher_cross_check"] = {
+                **own_check,
+                "mode": "COMPLETE_ISSUER_PUBLISHED_BENCHMARK_LEVELS",
+                "missing_publisher_dates": sorted(set(history["dates"]) - observations.keys()),
+            }
+            return history
         bridge = inputs["benchmark_reconstruction"]
         frozen = source.json(bridge["protocol_hash"])
         rate = bridge["annual_cash_rate"]
@@ -334,21 +365,31 @@ def _history(source: Originals, inputs: dict) -> dict:
     if any(r["productCode"] != inputs["fund_code"] for r in rows):
         raise ValueError("R5_DIRECT_INDEX_ISSUER_BENCHMARK_SHARE")
     by = {r["navDate"]: r for r in rows}
-    if not set(history["dates"]) <= by.keys():
+    missing = sorted(set(history["dates"]) - by.keys())
+    allowed_missing = inputs.get("allow_missing_benchmark_before")
+    if missing and (not allowed_missing or any(day >= allowed_missing for day in missing)):
         raise ValueError("R5_DIRECT_INDEX_BENCHMARK_MISSING_DATE")
+    available = [day for day in history["dates"] if day in by]
     with localcontext() as context:
         context.prec = 70
-        benchmark = [1 + number(by[d]["benchmarkRate"]) / 100 for d in history["dates"]]
-        publisher = [1 + number(by[d]["syNavRate"]) / 100 for d in history["dates"]]
+        benchmark = [1 + number(by[d]["benchmarkRate"]) / 100 if d in by else None for d in history["dates"]]
+        publisher = [1 + number(by[d]["syNavRate"]) / 100 for d in available]
         own = [number(v) for v in history["adjusted_nav"]]
-        if min(benchmark + publisher + own) <= 0:
+        if min([v for v in benchmark if v is not None] + publisher + own) <= 0:
             raise ValueError("R5_DIRECT_INDEX_NONPOSITIVE_HISTORY")
         bound = Decimal(".0001") / min(own) + Decimal(".000001") / min(publisher)
-        difference = max(abs(v / own[0] - p / publisher[0]) for v, p in zip(own, publisher, strict=True))
+        difference = max(
+            abs(own[history["dates"].index(day)] / own[0] - (1 + number(by[day]["syNavRate"]) / 100) / publisher[0])
+            for day in available
+        )
         if difference > bound:
             raise ValueError("R5_DIRECT_INDEX_ISSUER_NAV_CONFLICT")
-    history["benchmark_index"] = list(map(str, benchmark))
-    history["publisher_cross_check"] = {"maximum_difference": str(difference), "rounding_bound": str(bound)}
+    history["benchmark_index"] = [str(value) if value is not None else None for value in benchmark]
+    history["publisher_cross_check"] = {
+        "maximum_difference": str(difference),
+        "rounding_bound": str(bound),
+        "missing_publisher_dates": missing,
+    }
     return history
 
 
@@ -396,10 +437,95 @@ def _liabilities(pages: list[str], total: str) -> dict:
     return {**proof, "original_cells": original}
 
 
-def _flows(pages: list[str]) -> tuple[list[dict], list[dict]]:
-    text = normalized_text("\n".join(pages))
+def _flows(
+    pages: list[str],
+    *,
+    allow_reversed: bool = False,
+    allow_interleaved: bool = False,
+    additional_shares: tuple[str, ...] = (),
+    allow_period_variant: bool = False,
+) -> tuple[list[dict], list[dict]]:
+    additional_shares = tuple(additional_shares)
+    raw_lines = "\n".join(pages).splitlines()
+    if not additional_shares:
+        # 个别原表A标签独占下一行，而C仍在第一行第二列。先用保留的
+        # 水平位置把A接回第一列，不能把消空白后的prefixprefixCA误认成C/A反序。
+        starts = [i for i, line in enumerate(raw_lines) if "开放式基金份额变动" in normalized_text(line)]
+        if starts:
+            for index in range(starts[-1] + 1, min(starts[-1] + 25, len(raw_lines) - 1)):
+                line, following = raw_lines[index].expandtabs(), raw_lines[index + 1].expandtabs()
+                header = re.fullmatch(r"\s*项目\s+(?P<prefix>\S(?:.*?\S)?)\s{2,}(?P=prefix)\s+C\s*", line)
+                detached = re.fullmatch(r"(?P<indent> *)A *", following)
+                if not header or not detached:
+                    continue
+                second_start = line.find(header["prefix"], header.end("prefix"))
+
+                # 中文字宽与英文/空格不同。PDF保留的是显示列位置，不能拿
+                # Python字符下标比较，否则正确居中的A会被判到第二列。
+                def display_width(text):
+                    return sum(2 if unicodedata.east_asian_width(ch) in {"W", "F"} else 1 for ch in text)
+
+                first_column = display_width(line[: header.start("prefix")])
+                second_column = display_width(line[:second_start])
+                if not first_column <= len(detached["indent"]) < second_column:
+                    raise ValueError("R5_DIRECT_INDEX_SHARE_FLOW_WRAPPED_CLASS_ALIGNMENT")
+                raw_lines[index] = line[: header.end("prefix")] + "A" + line[header.end("prefix") :]
+                raw_lines[index + 1] = ""
+    if additional_shares:
+        # 个别PDF把多列金额的最后一位小数放到下一行；只在完整份额行和
+        # 纯数字续行之间按原顺序接回，后续仍须通过各份额的份额守恒。
+        labels = (
+            "本报告期期初基金份额总额",
+            "本报告期基金总申购份额",
+            "减:本报告期基金总赎回份额",
+            "减：本报告期基金总赎回份额",
+            "本报告期期末基金份额总额",
+        )
+        wrapped_labels = (
+            ("本报告期期初", "基金份额总额"),
+            ("本报告期基金", "总申购份额"),
+            ("减:本报告期基", "金总赎回份额"),
+            ("减：本报告期基", "金总赎回份额"),
+            ("本报告期期末", "基金份额总额"),
+        )
+        for index, line in enumerate(raw_lines[:-1]):
+            continuation = raw_lines[index + 1]
+            standard = any(re.match(r"^\s*" + label + r"\s+", line) for label in labels)
+            wrapped_suffix = next(
+                (
+                    suffix
+                    for prefix, suffix in wrapped_labels
+                    if re.match(r"^\s*" + re.escape(prefix) + r"\s+", line) and suffix in continuation
+                ),
+                None,
+            )
+            if not standard and wrapped_suffix is None:
+                continue
+            cells = re.split(r"\s{2,}", line.strip())
+            digits = re.findall(r"(?<!\S)\d(?!\S)", continuation)
+            missing = [
+                column
+                for column, value in enumerate(cells[1:], 1)
+                if re.fullmatch(r"(?:\d+|\d{1,3}(?:,\d{3})+)\.\d", value)
+            ]
+            expected_cells = 3 + len(additional_shares)
+            if (
+                len(cells) == expected_cells
+                and len(missing) == len(digits)
+                and all(re.fullmatch(r"\d", x) for x in digits)
+            ):
+                for column, digit in zip(missing, digits, strict=True):
+                    cells[column] += digit
+                if wrapped_suffix is not None:
+                    cells[0] += wrapped_suffix
+                raw_lines[index] = "  ".join(cells)
+                raw_lines[index + 1] = ""
+    text = normalized_text("\n".join(raw_lines))
     start = text.rfind("开放式基金份额变动")
     end = text.find("重大事件揭示", start)
+    if end < 0:
+        alternatives = [text.find(term, start) for term in ["基金管理人运用固有资金", "备查文件目录"]]
+        end = min((position for position in alternatives if position >= 0), default=-1)
     if start < 0 or end < 0:
         raise ValueError("R5_DIRECT_INDEX_SHARE_FLOW_BODY")
     section = text[start:end]
@@ -410,25 +536,114 @@ def _flows(pages: list[str]) -> tuple[list[dict], list[dict]]:
         "split": "本报告期基金拆分变动份额",
         "closing": "本报告期期末基金份额总额",
     }
-    parsed = {share: {"share": share} for share in ["A", "C"]}
+    period_names = {
+        "opening": "报告期期初基金份额总额",
+        "subscribed": "报告期期间基金总申购份额",
+        "redeemed": "减:报告期期间基金总赎回份额",
+        "split": "报告期期间基金拆分变动份额",
+        "closing": "报告期期末基金份额总额",
+    }
     # 原表可能使用“天弘中证光伏A/C”等正式简称，不必带“指数”两字。
     # 必须先核同一简称的A、C列及次序，不能只按第二个金额猜C类。
-    heading = section.split("基金合同生效日", 1)[0]
-    heading = re.sub(r"^开放式基金份额变动单位[:：]份(?:项目)?", "", heading)
-    columns = re.fullmatch(r"(.+?)A(.+?)C", heading)
-    if not columns or columns[1] != columns[2]:
-        # 广发原表把两列同名基金的前半行并排输出，后半行才分别带A/C：
-        # “...ETF发 ...ETF发 / 项目 / 起联接A 起联接C”。仅认前缀两次
-        # 完全相同、后缀两次完全相同且次序为A后C的完整表头，不依金额猜列。
-        wrapped = re.fullmatch(r"(?P<prefix>.+?)(?P=prefix)(?:项目)?(?P<suffix>.+?)A(?P=suffix)C", heading)
-        if not wrapped:
+    heading = (
+        section.split("基金合同生效日", 1)[0]
+        if "基金合同生效日" in section
+        else section.split("报告期期初基金份额总额", 1)[0]
+    )
+    heading = re.sub(r"^开放式基金份额变动.*?单位[:：]份(?:项目)?", "", heading)
+    if additional_shares:
+        order = ["A", "C", *additional_shares]
+        columns = None
+        if additional_shares == ("E",):
+            columns = re.fullmatch(r"(?P<prefix>.+?)A(?P=prefix)C(?P=prefix)E", heading)
+        elif additional_shares == ("D",):
+            # 三年持有产品的A/C/D原表：同名、列序和逐列份额对账都必须成立。
+            columns = re.fullmatch(r"(?P<prefix>.+?)A(?P=prefix)C(?P=prefix)D", heading)
+        elif additional_shares == ("I",):
+            # 南方A/C/I原表同名前缀、后缀和列序逐项核准，仍逐列核申赎守恒。
+            columns = re.fullmatch(r"(?P<prefix>.+?)A(?P=prefix)C(?P=prefix)I", heading) or re.fullmatch(
+                r"(?P<prefix>.+?)(?P=prefix)(?P=prefix)(?P<suffix>.+?)A(?P=suffix)C(?P=suffix)I", heading
+            )
+        elif additional_shares == ("Y",):
+            columns = re.fullmatch(r"(?P<prefix>.+?)A(?P=prefix)C(?P=prefix)Y", heading) or re.fullmatch(
+                r"(?P<prefix>.+?)(?P=prefix)(?P=prefix)(?P<suffix>.*?)A(?P=suffix)C(?P=suffix)Y", heading
+            )
+            if not columns:
+                split = re.fullmatch(
+                    r"(?P<prefix>.+?)(?P=prefix)(?P<other>.+?)(?P<suffix>.*?)A(?P=suffix)C(?P<other_suffix>.*?)Y",
+                    heading,
+                )
+                if split and split["prefix"] + split["suffix"] == split["other"] + split["other_suffix"]:
+                    columns = split
+        elif additional_shares == ("Y", "I"):
+            columns = re.fullmatch(r"(?P<prefix>.+?)A(?P=prefix)C(?P=prefix)Y(?P=prefix)I", heading)
+            if not columns:
+                split = re.fullmatch(
+                    r"(?P<prefix>.+?)(?P=prefix)(?P=prefix)(?P=prefix)(?:项目)?"
+                    r"(?P<suffix>.+?)(?P=suffix)(?P=suffix)(?P=suffix)Y"
+                    r"(?P<lof>\(LOF\)|（LOF）)A(?P=lof)C(?P=lof)I",
+                    heading,
+                )
+                if split:
+                    columns = split
+        if not columns:
             raise ValueError("R5_DIRECT_INDEX_SHARE_FLOW_COLUMNS")
+    else:
+        order = ["A", "C"]
+        columns = re.fullmatch(r"(.+?)A(.+?)C", heading)
+        if not columns or columns[1] != columns[2]:
+            # 广发原表把两列同名基金的前半行并排输出，后半行才分别带A/C：
+            # “...ETF发 ...ETF发 / 项目 / 起联接A 起联接C”。仅认前缀两次
+            # 完全相同、后缀两次完全相同且次序为A后C的完整表头，不依金额猜列。
+            wrapped = re.fullmatch(r"(?P<prefix>.+?)(?P=prefix)(?:项目)?(?P<suffix>.+?)A(?P=suffix)C", heading)
+            if not wrapped:
+                reversed_columns = allow_reversed and re.fullmatch(r"(.+?)C(.*?)A", heading)
+                adjacent_reversed = allow_reversed and re.fullmatch(r"(?P<prefix>.+?)(?P=prefix)CA", heading)
+                if not adjacent_reversed and (not reversed_columns or reversed_columns[1] != reversed_columns[2]):
+                    raise ValueError("R5_DIRECT_INDEX_SHARE_FLOW_COLUMNS")
+                order = ["C", "A"]
+    parsed = {share: {"share": share} for share in ["A", "C", *additional_shares]}
     slot = r"(?:\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2}|[-－—])"
+    interleaved = {
+        "opening": [
+            ("本报告期期初基金", "份额总额"),
+            ("本报告期期初基金份", "额总额"),
+            ("本报告期期初", "基金份额总额"),
+        ],
+        "subscribed": [("本报告期基金总申", "购份额"), ("本报告期基金总申购", "份额"), ("本报告期基金", "总申购份额")],
+        "redeemed": [
+            ("减:本报告期基金", "总赎回份额"),
+            ("减:本报告期基金总", "赎回份额"),
+            ("减:本报告期基", "金总赎回份额"),
+        ],
+        "split": [("本报告期基金拆分", "变动份额"), ("本报告期基金拆分变", "动份额"), ("本报告期基金", "拆分变动份额")],
+        "closing": [
+            ("本报告期期末基金", "份额总额"),
+            ("本报告期期末基金份", "额总额"),
+            ("本报告期期末", "基金份额总额"),
+        ],
+    }
+    value_pattern = rf"({slot})" * len(order)
     for field, label in names.items():
-        match = re.search(label + rf"({slot})({slot})", section)
+        labels = [label, period_names[field]] if allow_period_variant else [label]
+        match = None
+        for candidate in labels:
+            if allow_period_variant and field == "split":
+                match = re.search(candidate + r"\(份额" + value_pattern + "减少以", section)
+                if not match:
+                    match = re.search(candidate + r"\(份额减少以.{0,12}填列\)" + value_pattern, section)
+            if not match:
+                match = re.search(candidate + value_pattern, section)
+            if match:
+                break
+        if not match and allow_interleaved:
+            for prefix, suffix in interleaved[field]:
+                match = re.search(re.escape(prefix) + value_pattern + re.escape(suffix), section)
+                if match:
+                    break
         if not match:
             raise ValueError("R5_DIRECT_INDEX_SHARE_FLOW_ROW:" + field)
-        for share, value in zip(["A", "C"], match.groups(), strict=True):
+        for share, value in zip(order, match.groups(), strict=True):
             parsed[share][field] = None if value in "-－—" else value.replace(",", "")
     rows = list(parsed.values())
     return rows, share_flow(rows)
@@ -517,7 +732,22 @@ def holder_execution_evidence(source: Originals, review: dict, primary_hash: str
         if not all(x in execution for x in ["报告期", "监督", "复核"]):
             raise ValueError("R5_DIRECT_INDEX_ACTUAL_HOLDER_EXECUTION_REQUIRED")
         return
-    if profile != "TRUSTEE_NAV_REVIEW_AND_ACTUAL_REDEMPTION_OPERATION":
+    if profile == "TRUSTEE_SUPERVISION_AND_RECONCILIATION":
+        if review["execution"]["source_hash"] != primary_hash or not all(
+            term in execution for term in ["报告期", "监督", "对账"]
+        ):
+            raise ValueError("R5_DIRECT_INDEX_ACTUAL_HOLDER_EXECUTION_REQUIRED")
+        return
+    if profile == "TRUSTEE_QUARTER_REPORT_REVIEW":
+        if review["execution"]["source_hash"] != primary_hash or not all(
+            term in execution for term in ["复核", "投资组合报告", "保证复核内容不存在虚假记载"]
+        ):
+            raise ValueError("R5_DIRECT_INDEX_ACTUAL_HOLDER_EXECUTION_REQUIRED")
+        return
+    if profile not in {
+        "TRUSTEE_NAV_REVIEW_AND_ACTUAL_REDEMPTION_OPERATION",
+        "TRUSTEE_REDEMPTION_PRICING_AND_REPORT_REVIEW",
+    }:
         raise ValueError("R5_HOLDER_EXECUTION_PROFILE_UNSUPPORTED")
     operation = review.get("actual_operation")
     if (
@@ -529,22 +759,42 @@ def holder_execution_evidence(source: Originals, review: dict, primary_hash: str
     source.claim(operation)
     operation_text = normalized_text(operation["quote"])
     required_trustee = [
-        "5.1报告期内本基金托管人遵规守信情况声明",
-        "5.2托管人对报告期内本基金投资运作",
-        "基金份额申购赎回价格计算",
-        "托管人未发现损害基金份额持有人利益的行为",
-        "5.3托管人对本中期报告",
-        "进行了核查",
-        "以上内容真实、准确和完整",
+        ("5.1报告期内本基金托管人遵规守信情况声明",),
+        ("5.2托管人对报告期内本基金投资运作",),
+        ("托管人未发现损害基金份额持有人利益的行为", "托管人未发现损害基金持有人利益的行为"),
+        ("5.3托管人对本中期报告", "5.3托管人对中期报告"),
+        ("进行了核查",),
+        ("以上内容真实、准确和完整",),
     ]
-    required_operation = [
-        "报告期内",
-        "本基金严格遵守合同要求",
-        "认真对待投资者日常申购",
-        "赎回及成份股调整",
-        "未发生任何风险事件",
-    ]
-    if not all(x in execution for x in required_trustee) or not all(x in operation_text for x in required_operation):
+    pricing_reviewed = "基金份额申购赎回价格计算" in execution or "基金份额申购赎回价格的计算" in execution
+    if profile == "TRUSTEE_NAV_REVIEW_AND_ACTUAL_REDEMPTION_OPERATION":
+        operation_valid = all(
+            term in operation_text
+            for term in [
+                "报告期内",
+                "本基金严格遵守合同要求",
+                "认真对待投资者日常申购",
+                "赎回及成份股调整",
+                "未发生任何风险事件",
+            ]
+        )
+    else:
+        no_damage_terms = (
+            "没有损害基金持有人利益的行为",
+            "无损害基金持有人利益的行为",
+            "无损害基金份额持有人利益的行为",
+            "无重大违法、违规行为",
+        )
+        operation_valid = (
+            "4.2管理人对报告期内本基金运作遵规守信情况的说明" in operation_text
+            and re.search(r"(?:严格)?遵守.{0,100}基金合同", operation_text) is not None
+            and any(term in operation_text for term in no_damage_terms)
+        )
+    if (
+        not pricing_reviewed
+        or not all(any(term in execution for term in alternatives) for alternatives in required_trustee)
+        or not operation_valid
+    ):
         raise ValueError("R5_HOLDER_EXECUTION_SUBSTANTIVE_EVIDENCE_REQUIRED")
 
 

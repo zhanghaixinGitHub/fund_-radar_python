@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 from app.api.dependencies import require_service_token
 from app.api.routes import funds
-from app.models.fund import FundShareClass
+from app.models.fund import FundShareClass, NavDaily
 from app.services import fund_catalog_read as service
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -19,6 +19,7 @@ from sqlalchemy.pool import StaticPool
 def catalog(monkeypatch):
     engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
     FundShareClass.__table__.create(engine)
+    NavDaily.__table__.create(engine)
     with Session(engine) as session:
         session.add_all([
             FundShareClass(fund_code=f"{i:06d}", fund_master_id=uuid4(), share_class="A",
@@ -46,6 +47,15 @@ def catalog(monkeypatch):
     monkeypatch.setattr(service, "list_fund_summaries_by_codes", summaries)
     yield reads
     engine.dispose()
+
+
+def test_fund_code_scope_filters_before_count_and_pagination(catalog):
+    result = service.list_funds(None, None, 2, None, 2, fund_codes=("000002", "000004", "000006"))
+    assert result.total_count == 3 and result.total_pages == 2
+    assert [item.fund_code for item in result.items] == ["000006"]
+    result = service.list_funds(None, None, 10, None, 1, "GOOD", ("000001", "000002"))
+    assert result.total_count == 2
+    assert list(result.ratings) == ["000001", "000002"]
 
 
 def test_rating_pagination_covers_all_batches_and_retains_catalog_order(catalog):
@@ -102,6 +112,9 @@ def test_http_filter_validation_authorization_and_failure(catalog, monkeypatch):
     app.dependency_overrides[require_service_token] = lambda: None
     assert client.get("/funds?rating=INVALID").status_code == 422
     assert client.get("/funds?rating=GOOD&page=1&cursor=000001").status_code == 422
+    assert client.get("/funds?fundCode=invalid").status_code == 422
+    response = client.get("/funds?fundCode=000002&fundCode=000004&page=1&pageSize=10")
+    assert response.status_code == 200 and response.json()["total_count"] == 2
     response = client.get("/funds?rating=GOOD&page=2&pageSize=10&fundType=MIXED")
     assert response.status_code == 200
     assert response.json()["total_count"] == 122

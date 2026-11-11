@@ -238,6 +238,14 @@ def refresh_material_news_link(code: str, *, root=None) -> dict:
         raise ValueError("MARKET_NEWS_LINK_INCOMPLETE")
     manifest = {}
     for article, item in state["items"].items():
+        # items保留全部历史原文；本轮30日覆盖只绑定本轮窗口。不能让窗口外
+        # 旧机构资料的凭据过期阻断新公告，也不删除这些旧原文或未结事项。
+        published = item.get("entry", {}).get("published", "")
+        coverage = state.get("coverage", {})
+        if coverage.get("start") and published < coverage["start"]:
+            continue
+        if coverage.get("end") and published > coverage["end"]:
+            raise ValueError("MARKET_NEWS_LINK_FUTURE_ITEM")
         raw = json.loads(read_source(news_root, item["source"]))
         data = raw.get("data") or {}
         if raw.get("success") != 1 or data.get("art_code") != article or data.get("notice_content") != item["body"]:

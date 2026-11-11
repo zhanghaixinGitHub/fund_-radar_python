@@ -12,7 +12,7 @@ from app.services.fund_exposure_common import now, read
 from app.services.fund_materials import snapshot
 from app.services.fund_materials_store import versioned_save
 from app.services.fund_workflow_materials import receipt_path, workflow_root
-from app.services.material_content import content_digest, source_bytes
+from app.services.material_content import content_digest, source_bytes, source_exists
 
 
 def normalized_materials(material):
@@ -233,7 +233,7 @@ def recover(code, output, window, *, collector=None):
     handoff = receipt_path(code)
     prior = read(handoff) if handoff.exists() else {}
     path = Path(prior["materials_path"]) if prior.get("materials_path") else None
-    if not path or not path.is_file():
+    if not path or not source_exists(path):
         # 缺通用包不等于缺原件；给出已收录报告和证券原文的具体整理入口。
         value = {
             "status": "ASSEMBLE_OWN_MATERIALS",
@@ -250,8 +250,25 @@ def recover(code, output, window, *, collector=None):
 
     target_reports = recover_target_reports(material, output)
     candidate = normalized_materials(material)
+    from app.services.fund_prediction_market_recovery import refresh as refresh_market
+
+    market_receipts = refresh_market(candidate, window["base_nav_date"])
+    from app.services.fund_prediction_bond_recovery import refresh as refresh_bonds
+
+    bond_receipts = refresh_bonds(candidate, window["base_nav_date"], output.parents[1] / "public")
+    from app.services.fund_prediction_news_recovery import refresh as refresh_news
+
+    notice_receipt = refresh_news(candidate, root=root, checked_at=now())
+    if candidate.get("calendar_evidence"):
+        # 重新绑定本次窗口；正式校验仍逐项核对本基金条款、官方日历与实际行情。
+        candidate["calendar_evidence"].update(
+            base_date=window["base_nav_date"], target_date=window["target_nav_date"]
+        )
     reports = [r for r in (snapshot(code) or {}).get("reports", []) if r["publishedDate"] <= str(now().date())]
     latest = max(reports, key=lambda r: (r["endDate"], r["publishedDate"])) if reports else {}
+    from app.services.fund_prediction_report_recovery import bind_latest_partial
+
+    bind_latest_partial(candidate, latest)
     companies = {c["code"]: c for c in candidate.get("companies", [])}
     required = {h["stockCode"] for h in latest.get("holdings", [])} | set(companies)
     required |= {h["stockCode"] for r in target_reports for h in r.get("report", {}).get("holdings", [])}
@@ -337,6 +354,17 @@ def recover(code, output, window, *, collector=None):
         if own_collector:
             collector.close()
     candidate = normalized_materials(candidate)
+    from app.services.fund_prediction_hk_recovery import refresh as refresh_hk
+
+    hk_receipts = refresh_hk(candidate, window["base_nav_date"], output.parents[1] / "public")
+    from app.services.fund_prediction_overseas_recovery import refresh as refresh_overseas
+
+    overseas_receipts = refresh_overseas(candidate, window["base_nav_date"], output.parents[1] / "public")
+    from app.services.fund_prediction_corporate_recovery import refresh as refresh_corporate
+
+    corporate_receipts = refresh_corporate(candidate, window)
+    # 股票更新完成后重建当前事实及覆盖状态；此时已取得的对照报价不会重复请求。
+    refresh_market(candidate, window["base_nav_date"])
     if candidate != material:
         path = output / "materials-normalized.json"
         versioned_save(path, candidate)
@@ -347,6 +375,12 @@ def recover(code, output, window, *, collector=None):
         "latest_report": latest,
         "securities": sorted(required),
         "company_attempts": receipts,
+        "market_attempts": market_receipts,
+        "bond_attempts": bond_receipts,
+        "hk_attempts": hk_receipts,
+        "overseas_attempts": overseas_receipts,
+        "corporate_action_checks": corporate_receipts,
+        "notice_attempt": notice_receipt,
         "report_replay": replay,
         "target_reports": target_reports,
         "canonical_path": str(root / "materials" / (code + ".json")),

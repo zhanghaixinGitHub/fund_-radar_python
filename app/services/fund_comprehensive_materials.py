@@ -29,6 +29,8 @@ def checked_documents(now: datetime, code: str, material: dict) -> list[dict]:
     if len(by_id) != len(documents):
         raise ValueError("COMPREHENSIVE_DUPLICATE_SOURCE")
     for document in documents:
+        from app.services.fund_notice_observed_proof import validate as observed_public_notice
+
         uri = urlparse(document["url"])
         available = datetime.fromisoformat(document["available_at"])
         published_at = datetime.fromisoformat(document["published_at"]) if document.get("published_at") else None
@@ -45,11 +47,15 @@ def checked_documents(now: datetime, code: str, material: dict) -> list[dict]:
                 published_at is not None
                 and (published_at.tzinfo is None or published_at > available or published_at > now)
             )
-            or (published_at is None and document["published_date"] == str(now.date()))
+            or (
+                published_at is None and document["published_date"] == str(now.date())
+                and not observed_public_notice(document, code, now)
+            )
             or digest(document["body"]) != document["body_hash"]
         ):
             raise ValueError("COMPREHENSIVE_SOURCE_INVALID")
-        # 同日资料只有日期不能证明截止前已公开；保留缺口，不能默认按零点处理。
+        # 同日资料只有日期且没有真实首次公开响应时仍拒绝；取得回执只证明
+        # 截止前可见，不被写成准确发布时间，也不默认按零点处理。
         document.setdefault("date", document["published_date"])
         document.setdefault("source_hash", document["body_hash"])
         document.setdefault("body_truncated", document.get("body_scope") != "FULL_TEXT")

@@ -22,8 +22,34 @@ def cells(lines: list[str], *, verified_name: str | None = None) -> tuple[str, l
     # 名称或其他缺失金额猜进来；后续仍必须通过全部证券与独立金额对账。
     if len(lines) == 2 and re.fullmatch(r"\d", lines[1].strip()):
         wrapped = re.fullmatch(
-            r"([\u4e00-\u9fffA-Za-zＡ-Ｚ*－—-]+)\s+(" + _INTEGER + r")\s+("
-            + _INTEGER + r"\.\d)\s+(\d+(?:\.\d+)?%?)\s*",
+            r"([\u4e00-\u9fffA-Za-zＡ-Ｚ*－—-]+)\s+(\d{1,3}(?:,\d{3})*,\d{1,2})\s+("
+            + _INTEGER
+            + r"\.\d{2})\s+(\d+(?:\.\d+)?%?)\s*",
+            lines[0].strip(),
+        )
+        if wrapped:
+            quantity = wrapped[2] + lines[1].strip()
+            if re.fullmatch(_INTEGER, quantity):
+                return wrapped[1], [quantity, wrapped[3], wrapped[4]]
+    if len(lines) == 2 and re.fullmatch(r"\d\s+\d", lines[1].strip()):
+        quantity_digit, money_digit = lines[1].strip().split()
+        wrapped = re.fullmatch(
+            r"([\u4e00-\u9fffA-Za-zＡ-Ｚ*－—-]+)\s+(\d{1,3}(?:,\d{3})*,\d{1,2})\s+("
+            + _INTEGER
+            + r"\.\d)\s+(\d+(?:\.\d+)?%?)\s*",
+            lines[0].strip(),
+        )
+        if wrapped:
+            quantity = wrapped[2] + quantity_digit
+            if re.fullmatch(_INTEGER, quantity):
+                return wrapped[1], [quantity, wrapped[3] + money_digit, wrapped[4]]
+    if len(lines) == 2 and re.fullmatch(r"\d", lines[1].strip()):
+        wrapped = re.fullmatch(
+            r"([\u4e00-\u9fffA-Za-zＡ-Ｚ*－—-]+(?:\s+[\u4e00-\u9fffA-Za-zＡ-Ｚ*－—-]+)*)\s+("
+            + _INTEGER
+            + r")\s+("
+            + _INTEGER
+            + r"\.\d)\s+(\d+(?:\.\d+)?%?)\s*",
             lines[0].strip(),
         )
         if wrapped:
@@ -35,7 +61,7 @@ def cells(lines: list[str], *, verified_name: str | None = None) -> tuple[str, l
         prefix = re.match(r"^\s*" + r"\s*".join(map(re.escape, verified_name)) + r"\s+", content)
         if not prefix:
             raise ValueError("RATING_STOCK_VERIFIED_NAME_CONFLICT")
-        content = content[prefix.end():]
+        content = content[prefix.end() :]
     tokens = content.split()
     words, numbers = [], []
     for token in tokens:
@@ -54,22 +80,33 @@ def cells(lines: list[str], *, verified_name: str | None = None) -> tuple[str, l
             and re.fullmatch(r"(?:\d+(?:\.\d+)?%?|[-－—])", values[2])
         ):
             choices.append(values)
-    if (not verified_name and len(numbers) == 4 and re.fullmatch(r"[135]", numbers[0])
-            and re.fullmatch(r"\d{1,3}(?:,\d{3})+", numbers[1])):
+    if (
+        not verified_name
+        and len(numbers) == 4
+        and re.fullmatch(r"[135]", numbers[0])
+        and re.fullmatch(r"\d{1,3}(?:,\d{3})+", numbers[1])
+    ):
         raise ValueError("RATING_STOCK_NUMERIC_NAME_PROOF_REQUIRED")
     if len(choices) != 1 or (not words and not verified_name) or (verified_name and words):
         raise ValueError("RATING_STOCK_CELLS_INCOMPLETE_OR_AMBIGUOUS")
     return verified_name or "".join(words), choices[0]
 
 
-def parse(pages: list[str], stock_amount: str, net_assets: str, *, require_industry: bool = True,
-          verified_securities: dict | None = None) -> dict:
+def parse(
+    pages: list[str],
+    stock_amount: str,
+    net_assets: str,
+    *,
+    require_industry: bool = True,
+    verified_securities: dict | None = None,
+) -> dict:
     """解析全部股票并合并同一代码的指数/非指数分表，拒绝未统一的跨市场行业分类。"""
     from app.services.fund_rating_public_market import section, stock_pages
 
     text = "\n".join(stock_pages(numbered_pages(pages)))
-    body = section(text, r"(?m)^7\.3\s+[^\n]*股票\s*投\s*资\s*明\s*细", r"(?m)^7\.4\s")
-    industry = section(text, r"(?m)^7\.2\s+[^\n]*按行业分类", r"(?m)^7\.3\s")
+    body = section(text, r"(?m)^7\.3(?![.\d])\s*[^\n]*股票\s*投\s*资\s*明\s*细", r"(?m)^7\.4\s*")
+    # 取主节，不能让末次匹配落到只有“港股通：无”的7.2.2/7.2.3子节。
+    industry = section(text, r"(?m)^7\.2(?![.\d])\s*[^\n]*按行业分类", r"(?m)^7\.3\s*")
     # 港股表与境内行业表不能直接拼成不同桶，形成虚假的行业分散。
     if require_industry and "港股通" in industry:
         hk = industry.split("港股通", 1)[-1]
@@ -97,7 +134,7 @@ def parse(pages: list[str], stock_amount: str, net_assets: str, *, require_indus
                 continue
             rest.append(line)
         identity = (verified_securities or {}).get(code, {})
-        name, values = cells([first, *rest], verified_name=identity.get('name'))
+        name, values = cells([first, *rest], verified_name=identity.get("name"))
         quantity, amount, weight = values
         if require_industry and len(code) == 5:
             raise ValueError("RATING_MARKET_MIXED_INDUSTRY_TAXONOMY")
@@ -115,9 +152,9 @@ def parse(pages: list[str], stock_amount: str, net_assets: str, *, require_indus
         if exchange is None:
             raise ValueError("RATING_STOCK_EXCHANGE_UNKNOWN")
         if identity:
-            if identity.get('market') != '.NQ' or not re.fullmatch(r'400\d{3}', code):
-                raise ValueError('RATING_STOCK_VERIFIED_MARKET_CONFLICT')
-            exchange = identity['market']
+            if identity.get("market") != ".NQ" or not re.fullmatch(r"400\d{3}", code):
+                raise ValueError("RATING_STOCK_VERIFIED_MARKET_CONFLICT")
+            exchange = identity["market"]
         security = code + exchange
         row = positions.setdefault(
             security,
@@ -170,8 +207,9 @@ def parse(pages: list[str], stock_amount: str, net_assets: str, *, require_indus
     }
 
 
-def parse_disclosed(pages: list[str], stock_amount: str, net_assets: str, *,
-                    verified_securities: dict | None = None) -> dict:
+def parse_disclosed(
+    pages: list[str], stock_amount: str, net_assets: str, *, verified_securities: dict | None = None
+) -> dict:
     """持仓用途核对全部股票与独立行业表，单列有原文证明的替代款增值。
 
     股票资产账面金额有时含可退替代款估值增值，证券明细却不含该非证券项目。
@@ -195,7 +233,8 @@ def parse_disclosed(pages: list[str], stock_amount: str, net_assets: str, *,
     included = re.search(r"(?:股票|权益投资项)[^。]{0,50}含可退替代款[^。]{0,10}估值增值", note)
     difference_note = re.search(
         r"投资组合报表中股票投资市值与按行业分类股票投资组合报表中股票总市值之间的"
-        r"差异是由于可退替代款估值增值引起的", note
+        r"差异是由于可退替代款估值增值引起的",
+        note,
     )
     # 平安原件明确说明两张表差异的唯一原因；同样继续要求账面股票项、
     # 独立行业合计和逐证券合计三方守恒，不因没有使用“含”字拒收实据。

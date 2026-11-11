@@ -3,7 +3,6 @@
 import json
 import os
 import subprocess
-import time
 from pathlib import Path
 
 import httpx
@@ -57,81 +56,48 @@ def owned_process(port, project):
 
 
 def ensure_services(directory):
-    """隐藏窗口启动现有环境，有界健康等待；实际身份及数据库还由后续 context 核验。"""
+    """统一通过根dev.ps1恢复本项目服务；不再另起Maven或绕过D盘环境。"""
     if os.name != "nt":
         raise ValueError("LOCAL_WINDOWS_PROJECT_REQUIRED")
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=True)
+    services = (("python", 8000, PYTHON), ("java", 8080, JAVA))
+    before = {name: owned_process(port, project) for name, port, project in services}
+    if not all(before.values()):
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-File", str(PYTHON.parent / "dev.ps1"), "Start"],
+            cwd=PYTHON.parent,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=200,
+        )
+        if result.returncode:
+            raise RuntimeError("WORKSPACE_DEV_START_FAILED")
     cfg = get_settings()
     records = []
-    for name, port, project, health in (
-        ("python", 8000, PYTHON, "http://127.0.0.1:8000/internal/v1/health"),
-        ("java", 8080, JAVA, cfg.core_service_base_url + "/actuator/health"),
-    ):
-        process = owned_process(port, project)
-        started = False
-        if not process:
-            # 尚未监听但已有本项目启动进程时等待，避免重复启动 Maven/uvicorn。
-            pending = powershell(
-                "Get-CimInstance Win32_Process | Where-Object { "
-                "$_.Name -match '^(pythonw?|java|cmd)\\.exe$' -and $_.CommandLine -and "
-                f"$_.CommandLine -like '*{project}*' -and "
-                "($_.CommandLine -match 'uvicorn app.main:app|spring-boot:run|FundCoreApplication') } | "
-                "Select-Object ProcessId | ConvertTo-Json -Compress"
+    with httpx.Client(
+        timeout=5,
+        trust_env=False,
+        headers={
+            "X-Service-Token": cfg.ai_service_token.get_secret_value(),
+        },
+    ) as client:
+        for name, port, project in services:
+            process = owned_process(port, project)
+            url = (
+                "http://127.0.0.1:8000/internal/v1/health"
+                if name == "python"
+                else cfg.core_service_base_url + "/actuator/health"
             )
-            if not pending:
-                if owned_process(port, project):
-                    continue
-                if name == "python":
-                    executable = project / ".venv/Scripts/python.exe"
-                    arguments = "-m uvicorn app.main:app --host 127.0.0.1 --port 8000"
-                    setup = ""
-                else:
-                    jdks = list((project / ".tools/jdk17").glob("*/bin/java.exe"))
-                    if len(jdks) != 1:
-                        raise ValueError("PROJECT_CONFIGURED_JDK17_NOT_UNIQUE")
-                    executable = Path(os.environ["COMSPEC"])
-                    arguments = "/c mvn spring-boot:run"
-                    setup = f"$env:JAVA_HOME='{jdks[0].parents[1]}'; $env:Path=\"$env:JAVA_HOME\\bin;$env:Path\"; "
-                if not executable.is_file():
-                    raise ValueError("PROJECT_EXISTING_RUNTIME_MISSING")
-                powershell(
-                    setup + f"Start-Process -WindowStyle Hidden -FilePath '{executable}' "
-                    f"-ArgumentList '{arguments}' -WorkingDirectory '{project}' "
-                    f"-RedirectStandardOutput '{directory / (name + '-stdout.log')}' "
-                    f"-RedirectStandardError '{directory / (name + '-stderr.log')}' -PassThru | "
-                    "Select-Object Id | ConvertTo-Json -Compress",
-                    capture=False,
-                )
-                started = True
-        ready = False
-        with httpx.Client(
-            timeout=3, trust_env=False, headers={"X-Service-Token": cfg.ai_service_token.get_secret_value()}
-        ) as client:
-            for _ in range(15):
-                try:
-                    process = owned_process(port, project)
-                    response = client.get(health) if process else None
-                    if (
-                        response is not None
-                        and response.status_code == 200
-                        and response.json().get("status", "").upper() in {"UP", "OK"}
-                    ):
-                        ready = True
-                        break
-                except httpx.HTTPError:
-                    pass
-                time.sleep(2)
-        records.append(
-            {
-                "service": name,
-                "port": port,
-                "started": started,
-                "ready": ready,
-                "process_id": process["ProcessId"] if process else None,
-            }
-        )
-        versioned_save(directory / "service-preflight.json", records)
-        if not ready:
-            raise RuntimeError("PROJECT_SERVICE_NOT_READY:" + name)
+            response = client.get(url) if process else None
+            ready = (
+                response is not None
+                and response.status_code == 200
+                and response.json().get("status", "").upper() in {"UP", "OK"}
+            )
+            records.append({"service": name, "port": port, "started": not bool(before[name]), "ready": ready})
+            versioned_save(directory / "service-preflight.json", records)
+            if not ready:
+                raise RuntimeError("PROJECT_SERVICE_NOT_READY:" + name)
     return records

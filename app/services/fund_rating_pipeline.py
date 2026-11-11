@@ -6,7 +6,8 @@
 
 # 原始响应统一归档外接盘；历史路径只作为数据库别名，不生成C盘源文件。
 import json
-from datetime import UTC, date, datetime
+import re
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from time import monotonic
@@ -240,23 +241,28 @@ def update_new_rules(
     for index, code in enumerate(codes, 1):
         item = {"fundCode": code, "status": "WAITING_DATA", "published": False, "blockers": []}
         try:
-            if monotonic() - started > 180:
+            # 本人30只的真实原件核验在现场超过三分钟，旧上限会让排序靠后
+            # 的基金每轮都没有执行机会。保留十分钟界限，不跳过原件重算。
+            if monotonic() - started > 600:
                 item["blockers"].append({"state": "TASK_LIMIT", "reason": "本次处理达到时限，下次继续核验"})
                 items.append(item)
                 continue
             previous = existing.get(code)
             pointer = root / "pipeline" / "updates" / f"{code}.json"
             dossier = None
-            if source_exists(pointer):
+            if (not previous or previous["as_of_date"] <= as_of) and source_exists(pointer):
                 if source_size(pointer) > 4096:
                     raise ValueError("RATING_PIPELINE_POINTER_SIZE")
                 ref = json.loads(source_text(pointer, encoding="utf-8"))
                 if ref.get("fund_code") != code:
                     raise ValueError("RATING_PIPELINE_POINTER_IDENTITY")
-                if ref.get("as_of_date") == str(as_of):
-                    dossier = _load(root, ref["dossier"])
-                    if len(dossier["entries"]) != 1 or dossier["entries"][0]["fund_code"] != code:
+                observed = date.fromisoformat(ref["as_of_date"])
+                if observed >= as_of or (observed.year, observed.month) == (as_of.year, as_of.month):
+                    candidate_dossier = _load(root, ref["dossier"])
+                    if len(candidate_dossier["entries"]) != 1 or candidate_dossier["entries"][0]["fund_code"] != code:
                         raise ValueError("RATING_PIPELINE_DOSSIER_IDENTITY")
+                    if _period_covered(candidate_dossier["entries"][0], observed, as_of):
+                        dossier = candidate_dossier
             if rating_review_required(code):
                 item.update(
                     status="STALE",
@@ -268,10 +274,17 @@ def update_new_rules(
                 item["blockers"].append(
                     {"state": "CURRENT_MATERIAL_CHECK", "reason": "本次公告或持仓披露检查未完成，暂不追加评分"}
                 )
+            elif previous and previous["as_of_date"] > as_of:
+                # 月度任务不拿旧月份的队列清单重做已发布的更新考察期。
+                item.update(_evaluate(previous, code, root, as_of))
+            elif (
+                dossier is not None
+                and previous
+                and previous["as_of_date"] > date.fromisoformat(dossier["entries"][0]["as_of_date"])
+            ):
+                item.update(_evaluate(previous, code, root, as_of))
             elif dossier is not None:
                 entry = dossier["entries"][0]
-                if previous and previous["as_of_date"] > as_of:
-                    raise ValueError("RATING_PIPELINE_OLDER_PERIOD")
                 # 比较实际冻结输入；相同资料不改核验日期、不制造新批次。
                 previous_member = (
                     next((m for m in previous["input_snapshot"]["members"] if m["fund_code"] == code), None)
@@ -347,6 +360,30 @@ def update_new_rules(
     return report
 
 
+def _period_covered(bundle: dict, observed: date, requested: date) -> bool:
+    """自然月末休市时接受已核实的最后境内估值日；较新结果也不倒退。
+
+    原评价日期、原输入和分数均不变。其他日期差异、境外估值政策和缺失年度
+    仍须补齐，不能把任意同月旧数据当作月末资料。
+    """
+    if observed >= requested:
+        return True
+    if (
+        (requested + timedelta(days=1)).day != 1
+        or observed.month != requested.month
+        or observed.year != requested.year
+        or bundle.get("family") not in {"INDEX", "ACTIVE_EQUITY"}
+        or re.search(r"QDII|海外|日本|越南|纳斯达克|原油", bundle.get("identity", {}).get("legal_name", ""), re.I)
+    ):
+        return False
+    from app.services.direction_1d_protocol import calendar
+
+    sessions, _ = calendar()
+    if requested.year > sessions[-1].year:
+        return False
+    return max((day for day in sessions if day <= requested), default=None) == observed
+
+
 def _evaluate(previous: dict | None, code: str, root: Path, as_of: date) -> dict:
     if previous is None:
         raise ValueError("RATING_PIPELINE_PUBLICATION_NOT_READ_BACK")
@@ -360,7 +397,8 @@ def _evaluate(previous: dict | None, code: str, root: Path, as_of: date) -> dict
     validate_sources(bundle, datetime.now(UTC), root=root)
     result = calculate(bundle, root=root)
     gaps = blockers(bundle, result)
-    if previous["as_of_date"] != as_of:
+    covered = _period_covered(bundle, previous["as_of_date"], as_of)
+    if not covered:
         gaps.insert(
             0,
             {
@@ -369,7 +407,13 @@ def _evaluate(previous: dict | None, code: str, root: Path, as_of: date) -> dict
             },
         )
     return {
-        "status": result["status"] if previous["as_of_date"] == as_of else "WAITING_DATA",
+        "status": result["status"] if covered else "WAITING_DATA",
+        "requestedAsOfDate": str(as_of),
+        "periodStatus": "NEWER_INPUT_ALREADY_PUBLISHED"
+        if previous["as_of_date"] > as_of
+        else "VALUATION_END_VERIFIED"
+        if covered
+        else "PERIOD_INPUT_MISSING",
         "ratingRef": previous["batch_id"],
         "asOfDate": str(previous["as_of_date"]),
         "score": result["score"],

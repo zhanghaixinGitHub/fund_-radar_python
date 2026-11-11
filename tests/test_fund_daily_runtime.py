@@ -100,6 +100,7 @@ def test_new_holding_uses_own_report_and_actual_quote_without_fake_financials(tm
     material = {
         "fund_code": code,
         "documents": [],
+        "source_manifest": {},
         "companies": [
             {
                 "code": existing,
@@ -114,7 +115,10 @@ def test_new_holding_uses_own_report_and_actual_quote_without_fake_financials(tm
     receipt = tmp_path / "handoff.json"
     versioned_save(receipt, {"materials_path": str(source)})
     versioned_save(
-        tmp_path / "news/funds" / (code + ".json"), {"status": "SUCCEEDED", "coverage": {"end": "2026-10-29"}}
+        tmp_path / "news/funds" / (code + ".json"), {
+            "status": "SUCCEEDED", "catalog_complete": True, "items": {},
+            "coverage": {"start": "2026-09-29", "end": "2026-10-29"},
+        }
     )
     monkeypatch.setattr(recovery, "now", lambda: at)
     monkeypatch.setattr(recovery, "workflow_root", lambda: tmp_path)
@@ -273,15 +277,12 @@ def test_missing_services_start_hidden_and_running_services_are_reused(tmp_path,
     active, launches = set(), []
     monkeypatch.setattr(services, "owned_process", lambda port, _: {"ProcessId": port} if port in active else None)
 
-    def powershell(script, *, capture=True):
-        if "Start-Process" in script:
-            assert "-WindowStyle Hidden" in script and "-RedirectStandardOutput" in script
-            assert capture is False
-            launches.append(script)
-            active.add(8080 if f"-WorkingDirectory '{java}'" in script else 8000)
-            return {"Id": 1}
-        assert "Get-CimInstance Win32_Process" in script and "$_.Name -match" in script
-        return None
+    def start(command, **kwargs):
+        assert command[-1] == "Start" and command[-2].endswith("dev.ps1")
+        assert kwargs["cwd"] == python.parent
+        launches.append(command)
+        active.update({8000, 8080})
+        return SimpleNamespace(returncode=0)
 
     class Client:
         def __init__(self, *args, **kwargs):
@@ -296,12 +297,12 @@ def test_missing_services_start_hidden_and_running_services_are_reused(tmp_path,
         def get(self, _):
             return SimpleNamespace(status_code=200, json=lambda: {"status": "UP"})
 
-    monkeypatch.setattr(services, "powershell", powershell)
+    monkeypatch.setattr(services.subprocess, "run", start)
     monkeypatch.setattr(services.httpx, "Client", Client)
     first = services.ensure_services(tmp_path / "run")
-    assert len(launches) == 2 and all(r["started"] and r["ready"] for r in first)
+    assert len(launches) == 1 and all(r["started"] and r["ready"] for r in first)
     second = services.ensure_services(tmp_path / "run")
-    assert len(launches) == 2 and all(not r["started"] and r["ready"] for r in second)
+    assert len(launches) == 1 and all(not r["started"] and r["ready"] for r in second)
 
 
 def test_missing_port_is_a_successful_empty_probe_and_foreign_owner_still_rejected(monkeypatch):

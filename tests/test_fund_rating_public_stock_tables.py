@@ -38,11 +38,41 @@ def test_truncated_amount_is_not_filled_from_weight():
 
 
 def test_last_money_decimal_wrapped_below_percentage_keeps_printed_digit():
-    assert cells(["格力电器 435,000 16,312,500.0 0.11", "0"]) == (
-        "格力电器", ["435,000", "16,312,500.00", "0.11"]
-    )
+    assert cells(["格力电器 435,000 16,312,500.0 0.11", "0"]) == ("格力电器", ["435,000", "16,312,500.00", "0.11"])
+    assert cells(["深天马 A 1,373,700 13,613,367.0 0.31", "0"]) == ("深天马 A", ["1,373,700", "13,613,367.00", "0.31"])
     with pytest.raises(ValueError, match="INCOMPLETE_OR_AMBIGUOUS"):
         cells(["格力电器 435,000 16,312,500.0 0.11"])
+
+
+def test_quantity_and_money_final_digits_can_share_a_wrapped_line():
+    assert cells(["建元信托 10,480,56 25,572,566.4 0.58", "0 0"]) == (
+        "建元信托",
+        ["10,480,560", "25,572,566.40", "0.58"],
+    )
+    with pytest.raises(ValueError, match="INCOMPLETE_OR_AMBIGUOUS"):
+        cells(["建元信托 10,480,56 25,572,566.4 0.58", "0"])
+
+
+def test_quantity_final_digit_wrap_does_not_change_complete_money():
+    assert cells(["石药集团 13,078,00 79,171,511.39 4.69", "0"]) == (
+        "石药集团",
+        ["13,078,000", "79,171,511.39", "4.69"],
+    )
+
+
+def test_section_number_without_trailing_space_keeps_stock_rows():
+    pages = [
+        """7.2报告期末按行业分类的股票投资组合
+J 金融业 1,000.00 10.00
+合计 1,000.00 10.00
+7.3期末所有股票投资明细
+1 600000 浦发银行 100 1,000.00 10.00
+7.4 报告期股票变动
+"""
+    ]
+    result = parse(pages, "1000.00", "10000")
+
+    assert result["holdings"][0]["market_value_cny"] == "1000.00"
 
 
 def test_index_and_active_sleeves_merge_same_security_with_amount_conservation():
@@ -65,6 +95,30 @@ J 金融业 1,500.00 15.00
     assert len(result["holdings"][0]["reported_rows"]) == 2
     with pytest.raises(ValueError, match="FULL_AMOUNT_MISMATCH"):
         parse(pages, "1600.00", "10000")
+
+
+def test_full_section_titles_in_subsections_do_not_hide_index_sleeve_or_industries():
+    # 真实报告的子标题也含“股票投资明细”“按行业分类”。必须保留两张表，
+    # 再与独立行业金额核对；只取最后的积极投资表会把已发布评分误报重算失败。
+    pages = ["""7.2 报告期末按行业分类的股票投资组合
+7.2.1 报告期末指数投资按行业分类的境内股票投资组合
+J 金融业 1,000.00 10.00
+合计 1,000.00 10.00
+7.2.2 报告期末积极投资按行业分类的境内股票投资组合
+J 金融业 500.00 5.00
+合计 500.00 5.00
+7.2.3 报告期末按行业分类的港股通投资股票投资组合
+无。
+7.3 期末按公允价值占基金资产净值比例大小排序的所有股票投资明细
+7.3.1 期末指数投资按公允价值占基金资产净值比例大小排序的所有股票投资明细
+1 600000 浦发银行 100 1,000.00 10.00
+7.3.2 期末积极投资按公允价值占基金资产净值比例大小排序的所有股票投资明细
+1 600000 浦发银行 50 500.00 5.00
+7.4 报告期股票变动
+"""]
+    result = parse(pages, "1500.00", "10000")
+    assert result["holdings"][0]["market_value_cny"] == "1500.00"
+    assert len(result["reported_industries"]) == 2
 
 
 def test_mixed_industry_taxonomies_cannot_be_admitted_as_diversification():
@@ -124,8 +178,10 @@ J 金融业 1,500.00 15.00
 7.4 报告期股票变动
 """
     if asset_label == "两表差异":
-        body = body.replace("两表差异的公允价值包含可退替代款的估值增值。",
-            "投资组合报表中股票投资市值与按行业分类股票投资组合报表中股票总市值之间的差异是由于可退替代款估值增值引起的。")
+        body = body.replace(
+            "两表差异的公允价值包含可退替代款的估值增值。",
+            "投资组合报表中股票投资市值与按行业分类股票投资组合报表中股票总市值之间的差异是由于可退替代款估值增值引起的。",
+        )
     result = parse_disclosed([body], amount, "10000")
     assert result["substitution_increment_cny"] == increment
     assert result["stock_value_cny"] == "1500.00"
@@ -140,7 +196,8 @@ J 金融业 1,500.00 15.00
 
 
 def test_numberless_body_headings_retain_all_rows_and_ignore_catalog():
-    pages = ["""报告期末按行业分类的股票投资组合......47
+    pages = [
+        """报告期末按行业分类的股票投资组合......47
 期末按公允价值占基金资产净值比例大小排序的股票投资明细......48
 报告期末按行业分类的股票投资组合
 C 制造业 1,000.00 10.00
@@ -149,7 +206,8 @@ C 制造业 1,000.00 10.00
 期末按公允价值占基金资产净值比例大小排序的所有股票投资明细
 1 688981 中芯国际 100 1,000.00 10.00
 报告期内股票投资组合的重大变动
-"""]
+"""
+    ]
     result = parse_disclosed(pages, "1000.00", "10000")
     assert result["holdings"][0]["stock_code"] == "688981.SH"
     assert "7.3" not in pages[0]

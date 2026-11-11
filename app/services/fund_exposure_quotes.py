@@ -66,7 +66,10 @@ class Provider:
         self.limit = initialize()["maximum_provider_requests_per_command"]
 
     def query(self, api, params, fields):
-        if api not in {"daily", "daily_basic", "index_daily"} or api not in self.source["authorized_api_names"]:
+        if (
+            api not in {"daily", "daily_basic", "index_daily", "fund_daily"}
+            or api not in self.source["authorized_api_names"]
+        ):
             raise ValueError("EXPOSURE_API_NOT_AUTHORIZED")
         request = {"api": api, "params": params, "fields": fields}
         key = digest(request)

@@ -206,6 +206,7 @@ def update_ratings(
     ready_codes: set[str] | None = None,
     new_rule_ready_codes: set[str] | None = None,
     event_review: bool = False,
+    scope_codes: set[str] | None = None,
 ) -> dict:
     """有界市场目录任务；单份额仅选所属完整类别，任何 GET 都不会调用此函数。"""
     engine = engine or get_engine()
@@ -232,6 +233,14 @@ def update_ratings(
             with Session(engine.execution_options(isolation_level="REPEATABLE READ")) as session, session.begin():
                 session.execute(text("SET LOCAL statement_timeout='15s'"))
                 rows = catalog(session)
+                # 定时任务只发布本人当前持仓，空持仓不能退回全市场。
+                if scope_codes is not None:
+                    if fund_code and fund_code not in scope_codes:
+                        raise ValueError("RATING_FUND_OUTSIDE_HOLDINGS")
+                    found = {r["fund_code"] for r in rows}
+                    if not scope_codes <= found:
+                        raise ValueError("RATING_HOLDING_NOT_IN_ACTIVE_CATALOG")
+                    rows = [r for r in rows if r["fund_code"] in scope_codes]
                 from app.repositories.fund_rating import reviewed_current_bases
                 from app.services.fund_rating_reviewed_snapshot import BASIS as SNAPSHOT_BASIS
 

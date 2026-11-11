@@ -48,13 +48,14 @@ def review_calendar(data: dict, code: str, at: datetime):
         return read_fund_data(code, at)["calendar"]
     from app.services.comprehensive_calendar import verified_domestic_window
     from app.services.prediction_contract import ValuationCalendar
-    from app.services.trading_calendar import load_calendar, load_current_calendar
+    from app.services.trading_calendar import load_live_calendars
 
     with get_engine().connect() as connection:
         profiles = repo.profiles(connection, [code])
     documents = {document["id"]: document for document in data["documents"]}
-    past, current = load_calendar(), load_current_calendar()
-    calendar_hash = digest([past.content_hash, current.content_hash])
+    calendars = load_live_calendars()
+    past, current = calendars[0], calendars[-1]
+    calendar_hash = digest([item.content_hash for item in calendars])
     from app.services.qdii_valuation_contract import verified_qdii_window
 
     verified = (
@@ -70,7 +71,11 @@ def review_calendar(data: dict, code: str, at: datetime):
         or not verified(profiles[0], data, documents, data["window"])
     ):
         raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "本基金实际投向或估值条款仍待核验")
-    sessions, end, source_hash = past.sessions + current.sessions, current.definition.coverage_end, calendar_hash
+    sessions, end, source_hash = (
+        tuple(day for item in calendars for day in item.sessions),
+        current.definition.coverage_end,
+        calendar_hash,
+    )
     if mode != "CN_NAV_DISCLOSED_DOMESTIC_ASSETS_V1":
         sessions, end, source_hash = _matched_future_sessions(data, documents, sessions, end, calendar_hash)
     return ValuationCalendar(

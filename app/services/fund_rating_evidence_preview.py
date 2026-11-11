@@ -66,6 +66,14 @@ def performance(history: dict) -> tuple[dict, dict]:
 
 
 def management(inputs: dict, root: Path, report_hash: str):
+    if not inputs.get("management_inputs"):
+        reviewed = inputs.get("reviewed_management")
+        if reviewed and reviewed.get("source_hash") == report_hash:
+            return number(reviewed["score"])
+        raise ValueError("EVIDENCE_PREVIEW_MANAGEMENT_INPUTS_REQUIRED")
+    from app.services.fund_rating_management_anchor import verify_management_anchor
+
+    verify_management_anchor(inputs, root, report_hash)
     value = management_calculate(
         inputs["management_inputs"],
         root=root,
@@ -73,7 +81,7 @@ def management(inputs: dict, root: Path, report_hash: str):
         as_of=inputs["as_of_date"],
         fund_code=inputs["fund_code"],
         legal_name=inputs["legal_name"],
-        primary_report_hash=report_hash,
+        primary_report_hash=inputs.get("management_primary_report_hash", report_hash),
     )["score"]
     return number(value) if value is not None else None
 
@@ -115,7 +123,15 @@ def passive(inputs: dict, root: Path) -> tuple[dict, dict]:
         facts["benchmark"] = inputs["index"]["name"]
 
     with evidence_stage(errors, "holdings"):
-        own = portfolio(report_pages(), holding_date=holding_date)
+        if not inputs.get("index", {}).get("weights"):
+            # 此字段为同日成员表的来源摘要，不要求实际使用完整精确权重。
+            raise ValueError("EVIDENCE_PREVIEW_INDEX_CONSTITUENTS_REQUIRED")
+        verified = None
+        if inputs.get("security_disclosures"):
+            from app.services.fund_rating_security_disclosures import verified_securities
+
+            verified = verified_securities(source, inputs)
+        own = portfolio(report_pages(), holding_date=holding_date, verified_securities=verified)
         book = own
         if inputs["version"] == FEEDER_VERSION:
             target = inputs["etf_refs"][inputs["fund_code"]]
@@ -123,7 +139,7 @@ def passive(inputs: dict, root: Path) -> tuple[dict, dict]:
             target_pages = _identity(source, target["source_hash"], target["fund_code"], target["legal_name"])
             if str(report_period("\n".join(target_pages))[1]) != holding_date:
                 raise ValueError("EVIDENCE_PREVIEW_TARGET_REPORT_PERIOD")
-            book = portfolio(target_pages, holding_date=holding_date)
+            book = portfolio(target_pages, holding_date=holding_date, verified_securities=verified)
             facts["target_etf"] = target["fund_code"]
             facts["target_etf_nav_fraction"] = str(
                 number(relation["amount_cny"]) / number(own["balance"]["net_assets"])
@@ -165,7 +181,12 @@ def passive(inputs: dict, root: Path) -> tuple[dict, dict]:
             source.claim(review["mechanism"])
             mechanism = normalized_text(review["mechanism"]["quote"])
             holder_execution_evidence(source, review, refs["half"])
-            flows, _ = _flows(report_pages())
+            flows, _ = _flows(
+                report_pages(),
+                allow_reversed=True,
+                allow_interleaved=True,
+                additional_shares=inputs.get("additional_shares", ()),
+            )
             eligible = (
                 all(term in mechanism for term in ("赎回", "巨额"))
                 and review["actual_effect_review_complete"]
@@ -177,16 +198,31 @@ def passive(inputs: dict, root: Path) -> tuple[dict, dict]:
         scores["liquidity"] = Decimal(75) if eligible and not facts["reported_redemption_alert"] else None
 
     with evidence_stage(errors, "cost"):
-        fees = fee_profile(
-            "\n".join(source.pages(refs["summary"])),
-            code=inputs["fund_code"],
-            share_class=inputs["share_class"],
-            legal_name=inputs["legal_name"],
-            supporting_text="\n".join(source.pages(refs["prospectus"])),
-            published_on=source.sources[refs["summary"]]["published_on"],
-        )
-        cost = annual_fee_score(fees["fees"])
-        scores["cost"], facts["annual_cost_per_10000"] = number(cost["score"]), cost["cost_cny"]
+        reviewed = inputs.get("reviewed_cost")
+        if reviewed:
+            if reviewed.get("source_hash") != refs["summary"]:
+                raise ValueError("EVIDENCE_PREVIEW_REVIEWED_COST_SOURCE")
+            if reviewed.get("scenario"):
+                from app.services.fund_rating_locked_holding_cost import replay as replay_locked_cost
+
+                actual_cost = replay_locked_cost(inputs, source)
+                scores["cost"] = number(actual_cost["score"])
+                facts["annual_cost_per_10000"] = actual_cost["annual_cost_per_10000"]
+                facts["cost_scenario"] = actual_cost
+            else:
+                scores["cost"] = number(reviewed["score"])
+                facts["annual_cost_per_10000"] = reviewed["annual_cost_per_10000"]
+        else:
+            fees = fee_profile(
+                "\n".join(source.pages(refs["summary"])),
+                code=inputs["fund_code"],
+                share_class=inputs["share_class"],
+                legal_name=inputs["legal_name"],
+                supporting_text="\n".join(source.pages(refs["prospectus"])),
+                published_on=source.sources[refs["summary"]]["published_on"],
+            )
+            cost = annual_fee_score(fees["fees"])
+            scores["cost"], facts["annual_cost_per_10000"] = number(cost["score"]), cost["cost_cny"]
 
     facts["source_sha256"] = sorted(set(source.raw) | inputs.get("management_inputs", {}).get("sources", {}).keys())
     if errors:
@@ -235,6 +271,125 @@ def active_partial(bundle: dict, root: Path) -> tuple[dict, dict]:
     }
 
 
+def active(inputs: dict, root: Path) -> tuple[dict, dict]:
+    refs = inputs["target_refs"]
+    source = Originals(inputs, root, lazy=True)
+    scores, facts, errors = {}, {}, {}
+
+    with evidence_stage(errors, "performance"):
+        scores, facts = performance(inputs["history"])
+        execution = inputs["execution"]
+        stock_total = number(execution["stock_amount"]) / number(execution["total_assets"])
+        stock_nav = number(execution["stock_amount"]) / number(execution["net_assets"])
+        cash_nav = number(execution["cash_amount"]) / number(execution["net_assets"])
+        source.claim(execution["strategy"])
+        scores["efficiency"] = (
+            Decimal(75)
+            if number(execution["stock_min"]) <= stock_total <= number(execution["stock_max"])
+            and number(execution["stock_min"]) <= stock_nav <= number(execution["stock_max"])
+            and cash_nav >= number(execution["cash_min"])
+            and execution["actual_review_complete"]
+            else None
+        )
+        if inputs.get("execution_public_observations"):
+            scores["efficiency"] = None
+            from app.services.fund_rating_public_execution_core import calculate as public_execution_calculate
+
+            execution_review = public_execution_calculate(inputs, source)
+            scores["efficiency"] = number(execution_review["score"])
+            facts["execution_public_review"] = execution_review
+        facts.update(
+            stock_total_ratio=str(stock_total),
+            stock_nav_ratio=str(stock_nav),
+            cash_nav_ratio=str(cash_nav),
+        )
+
+    with evidence_stage(errors, "holdings"):
+        top = top_positions(inputs["positions"])
+        ratio = sum(number(row["market_value_cny"]) for row in top) / number(inputs["net_assets"])
+        if not 0 <= ratio <= 1:
+            raise ValueError("EVIDENCE_PREVIEW_ACTIVE_HOLDINGS_RANGE")
+        scores["holdings"] = 100 * (1 - ratio)
+        facts["major_holdings_nav_fraction"] = str(ratio)
+        facts["major_holdings_count"] = len(top)
+
+    with evidence_stage(errors, "management"):
+        scores["management"] = management(inputs, root, refs["half"])
+
+    with evidence_stage(errors, "liquidity"):
+        review = inputs["holder_review"]
+        facts["reported_redemption_alert"] = bool(review["confirmed_pressure_effects"])
+        source.claim(review["mechanism"])
+        mechanism = normalized_text(review["mechanism"]["quote"])
+        holder_execution_evidence(source, review, refs["half"])
+        flows, _ = _flows(
+            source.pages(refs["half"]),
+            allow_reversed=True,
+            allow_interleaved=True,
+            additional_shares=inputs.get("additional_shares", ()),
+            allow_period_variant=True,
+        )
+        facts["reported_redemption_shares"] = next(
+            row["redeemed"] for row in flows if row["share"] == inputs["share_class"]
+        )
+        execution_text = normalized_text(review["execution"]["quote"])
+        execution_normal = (
+            "未发现" in execution_text
+            or (
+                review.get("execution_profile") == "TRUSTEE_QUARTER_REPORT_REVIEW"
+                and "保证复核内容不存在虚假记载" in execution_text
+            )
+            or (
+                review.get("execution_profile") == "TRUSTEE_SUPERVISION_AND_RECONCILIATION"
+                and all(term in execution_text for term in ("报告期", "监督", "对账"))
+            )
+        )
+        scores["liquidity"] = (
+            Decimal(75)
+            if all(term in mechanism for term in ("赎回", "巨额"))
+            and review["actual_effect_review_complete"]
+            and execution_normal
+            and not facts["reported_redemption_alert"]
+            else None
+        )
+
+    with evidence_stage(errors, "cost"):
+        reviewed = inputs.get("reviewed_cost")
+        if reviewed:
+            if reviewed.get("source_hash") != refs["summary"]:
+                raise ValueError("EVIDENCE_PREVIEW_REVIEWED_COST_SOURCE")
+            if reviewed.get("scenario"):
+                from app.services.fund_rating_locked_holding_cost import replay as replay_locked_cost
+
+                actual_cost = replay_locked_cost(inputs, source)
+                scores["cost"] = number(actual_cost["score"])
+                facts["annual_cost_per_10000"] = actual_cost["annual_cost_per_10000"]
+                facts["cost_scenario"] = actual_cost
+            else:
+                scores["cost"] = number(reviewed["score"])
+                facts["annual_cost_per_10000"] = reviewed["annual_cost_per_10000"]
+        else:
+            fees = fee_profile(
+                "\n".join(source.pages(refs["summary"])),
+                code=inputs["fund_code"],
+                share_class=inputs["share_class"],
+                legal_name=inputs["legal_name"],
+                supporting_text="\n".join(source.pages(refs["prospectus"])),
+                published_on=source.sources[refs["summary"]]["published_on"],
+            )
+            cost = annual_fee_score(fees["fees"])
+            scores["cost"], facts["annual_cost_per_10000"] = number(cost["score"]), cost["cost_cny"]
+
+    facts["source_sha256"] = sorted(
+        set(source.raw)
+        | set(inputs.get("performance_source_hashes", []))
+        | inputs.get("management_inputs", {}).get("sources", {}).keys()
+    )
+    if errors:
+        facts["evidence_errors"] = errors
+    return scores, facts
+
+
 @material_read_cache
 def preview(bundle: dict, root: Path, *, review_required: bool) -> dict:
     family = bundle["family"]
@@ -273,7 +428,20 @@ def preview(bundle: dict, root: Path, *, review_required: bool) -> dict:
                     raise ValueError("EVIDENCE_PREVIEW_FUND_SCOPE")
                 scores, facts = passive(inputs, root)
         elif not blocked:
-            scores, facts = active_partial(bundle, root)
+            if frozen:
+                inputs = frozen["inputs"]
+                if inputs.get("version") != "ACTIVE_EQUITY_ONE_YEAR_V1":
+                    raise ValueError("EVIDENCE_PREVIEW_ACTIVE_VERSION")
+                if (
+                    any(inputs[k] != bundle[k] for k in ("fund_code", "as_of_date", "holding_date", "share_class"))
+                    or inputs["legal_name"] != bundle["identity"]["legal_name"]
+                    or inputs["manager_name"] != bundle["identity"]["manager_name"]
+                    or inputs["target_refs"]["half"] != bundle["original_report_archive"]["sha256"]
+                ):
+                    raise ValueError("EVIDENCE_PREVIEW_FUND_SCOPE")
+                scores, facts = active(inputs, root)
+            else:
+                scores, facts = active_partial(bundle, root)
         blocked = blocked or facts.get("reported_redemption_alert", False)
         missing = [key for key in weights if scores.get(key) is None]
         total = None if blocked or missing else sum(scores[key] * weight / 100 for key, weight in weights.items())

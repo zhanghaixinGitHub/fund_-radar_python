@@ -241,9 +241,16 @@ def summary(root: Path, reservation: dict, at: datetime) -> dict:
     }
 
 
-def status(*, root: Path = ROOT, contract_root: Path = CONTRACT_ROOT, clock=original.now) -> dict:
+def active_contract(root: Path) -> Path:
+    """新代码只能使用显式重建并核验的独立契约，旧契约与旧观测原样保留。"""
+    candidate = root / "contracts" / digest(original.code_files())
+    return candidate if (candidate / "contract-receipt.json").is_file() else CONTRACT_ROOT
+
+
+def status(*, root: Path = ROOT, contract_root: Path | None = None, clock=original.now) -> dict:
     """只读状态；浏览器打开、刷新和服务重启均不会请求Tushare或重新执行采集。"""
     at = clock().astimezone(ZONE)
+    contract_root = contract_root or active_contract(root)
     value = {
         "mode": "MANUAL",
         "serverTime": at.isoformat(),
@@ -313,12 +320,13 @@ def status(*, root: Path = ROOT, contract_root: Path = CONTRACT_ROOT, clock=orig
 def synchronize(
     *,
     root: Path = ROOT,
-    contract_root: Path = CONTRACT_ROOT,
+    contract_root: Path | None = None,
     clock=original.now,
     query=original.fetch_spx,
     source_reader=original.source_status,
 ) -> dict:
     """用户单击只尝试一次有界请求；无每日次数额度，保留60秒间隔和跨入口互斥，不自动重试。"""
+    contract_root = contract_root or active_contract(root)
     with operation_lock(root) as acquired:
         value = status(root=root, contract_root=contract_root, clock=clock)
         if not acquired:

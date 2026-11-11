@@ -20,7 +20,7 @@ from app.services.fund_materials import snapshot
 from app.services.fund_materials_store import versioned_save
 from app.services.fund_prediction_followthrough import HORIZONS, recovery_actions, verify_outputs
 from app.services.fund_workflow_materials import receipt_path, registered_materials, workflow_root
-from app.services.material_content import material_read_cache
+from app.services.material_content import material_read_cache, source_exists
 
 
 def owner_scope(settings, owner):
@@ -33,7 +33,7 @@ def owner_scope(settings, owner):
     ) as client:
         for _ in range(100):
             response = client.get(
-                settings.core_service_base_url + f"/internal/v1/direction-1d/sync/users/{owner}/fund-codes",
+                settings.core_service_base_url + f"/internal/v1/direction-1d/sync/users/{owner}/held-fund-codes",
                 params={"after": after},
             )
             response.raise_for_status()
@@ -155,10 +155,17 @@ def saved_records(owner, codes, target, core_env):
             if ids:
                 # 表名仅来自固定二选一；基金、账号和UUID始终绑定参数，空集合不发UUID查询。
                 query = text(
-                    f"SELECT snapshot_id::text AS id,content_hash,payload FROM {table} WHERE snapshot_id IN :ids"
+                    f"SELECT snapshot_id::text AS id,content_hash,payload FROM {table} WHERE snapshot_id IN :ids "
+                    "ORDER BY COALESCE(payload->>'fund_code',payload->'data'->>'fund_code'),snapshot_id"
                 ).bindparams(bindparam("ids", expanding=True))
                 # 原件可能较大，流式验证后只保留身份/资料摘要，不把全部全文副本堆在内存。
-                for source_row in c.execution_options(stream_results=True).execute(query, {"ids": ids}).mappings():
+                # 每份快照含完整原文。默认动态缓冲会把多只基金的大正文同时
+                # 拉入内存；一行一验保留全部哈希检查，降低分页和磁盘争用。
+                for source_row in (
+                    c.execution_options(stream_results=True, yield_per=1, max_row_buffer=1)
+                    .execute(query, {"ids": ids})
+                    .mappings()
+                ):
                     payload = source_row["payload"]
                     from app.services.fund_prediction_snapshot_compat import checked_snapshot, materials_input_identity
 
@@ -309,17 +316,28 @@ def main():
         # 旧交接可供识别新增证券，不能被当作本期已批准。
         old_path = receipt_path(code)
         old = read(old_path) if old_path.exists() else {}
-        if old.get("materials_path") and Path(old["materials_path"]).exists():
+        if old.get("materials_path") and source_exists(Path(old["materials_path"])):
             material = read(Path(old["materials_path"]))
             if material.get("fund_code") != code:
                 raise ValueError("RECOVERY_MATERIAL_FUND_MISMATCH")
         reports = [r for r in (snapshot(code) or {}).get("reports", []) if r["publishedDate"] <= str(at.date())]
         report = max(reports, key=lambda r: (r["endDate"], r["publishedDate"])) if reports else None
         actions = recovery_actions(
-            code, report, material, news, handoff, current_window["base_nav_date"], str(at.date()),
-            target_reports={target: max((snapshot(target) or {}).get("reports", []),
-                key=lambda r: (r["endDate"], r["publishedDate"]), default=None)
-                for target in (material or {}).get("exposure_chain", [code])[1:]},
+            code,
+            report,
+            material,
+            news,
+            handoff,
+            current_window["base_nav_date"],
+            str(at.date()),
+            target_reports={
+                target: max(
+                    (snapshot(target) or {}).get("reports", []),
+                    key=lambda r: (r["endDate"], r["publishedDate"]),
+                    default=None,
+                )
+                for target in (material or {}).get("exposure_chain", [code])[1:]
+            },
         )
         if handoff and handoff.get("reviewed") and not handoff.get("gaps"):
             try:

@@ -8,7 +8,7 @@ from datetime import date, datetime, time
 from decimal import ROUND_HALF_UP, Decimal
 from zoneinfo import ZoneInfo
 
-from app.services.trading_calendar import load_calendar, load_current_calendar
+from app.services.trading_calendar import load_live_calendars
 
 ZONE = ZoneInfo("Asia/Shanghai")
 PROTOCOL = "DIRECTION_1D_V1"
@@ -37,8 +37,8 @@ def digest(value) -> str:
 
 def calendar() -> tuple[tuple[date, ...], str]:
     """仅在新协议中拼接两个已验哈希日历，支持2025/2026年界，不改旧日历。"""
-    a, b = load_calendar(), load_current_calendar()
-    return a.sessions + b.sessions, digest([a.content_hash, b.content_hash])
+    calendars = load_live_calendars()
+    return tuple(day for item in calendars for day in item.sessions), digest([item.content_hash for item in calendars])
 
 
 def window(now: datetime) -> dict:
@@ -46,7 +46,7 @@ def window(now: datetime) -> dict:
         raise ValueError("TIMEZONE_REQUIRED")
     now = now.astimezone(ZONE)
     days, version = calendar()
-    if not date(2021, 1, 1) <= now.date() <= date(2026, 12, 31):
+    if not days[0] <= now.date() <= days[-1]:
         raise ValueError("CALENDAR_UNAVAILABLE")
     i = bisect_right(days, now.date()) - 1
     if days[i] == now.date() and now.time() < time(15):

@@ -22,6 +22,7 @@ class LocalDailyBackend:
 
     def __init__(self, directory, core=Path(r"D:\Project-FullStack\workSpace01\02-java")):
         self.directory, self.core = Path(directory), core
+        self.active_block_file = None
         self.settings = get_settings()
         self.client = httpx.Client(
             timeout=httpx.Timeout(25, connect=5),
@@ -34,6 +35,54 @@ class LocalDailyBackend:
         self.client.close()
         if hasattr(self, "collector"):
             self.collector.close()
+
+    def ratings(self, terminal):
+        """资料终态后执行持仓月评；公告和持仓检查没有真实回执时保持待办。"""
+        # 再取一次本人持仓，避免同步期间已清仓的基金仍被新发布。
+        from app.commands.fund_prediction_followthrough import owner_scope
+        from app.services.fund_market_preparation import market_scope
+        from app.services.fund_market_workflow import MarketSyncWorkflow
+
+        codes = set(owner_scope(self.settings, self.owner))
+        catalog = market_scope()
+        if not codes <= {row["fund_code"] for row in catalog}:
+            raise ValueError("RATING_HOLDING_NOT_IN_ACTIVE_CATALOG")
+        if not codes:
+            return {"status": "SUCCEEDED", "scope": [], "reason": "EMPTY_HOLDINGS", "readback": []}
+        workflow = MarketSyncWorkflow(scope_provider=lambda: [r for r in catalog if r["fund_code"] in codes])
+        try:
+            for child in terminal["children"]:
+                items = (child.get("result_summary") or {}).get("items", [])
+                if child["job_type"] == "FUND_NEWS":
+                    workflow.news_results = {r["fund_code"]: r for r in items if r["fund_code"] in codes}
+                elif child["job_type"] == "FUND_MATERIALS":
+                    workflow.material_results = {r["fund_code"]: r for r in items if r["fund_code"] in codes}
+            from app.services.fund_market_review import pending_events
+
+            # 同步中心的精简摘要不含事项正文；必须读取原公告台账，不能把字段缺失当作无事项。
+            for code in codes:
+                path = workflow_root() / "news/funds" / (code + ".json")
+                news = read(path) if path.exists() else {}
+                item = workflow.news_results.setdefault(code, {"status": "FAILED"})
+                # 原子任务失败后可能已由本轮逐篇核验补办成功；以今日真实台账为准，
+                # 旧子任务的失败回执保留，但不能继续遮蔽已完成的补办。
+                item["status"] = (
+                    "SUCCEEDED"
+                    if news.get("status") == "SUCCEEDED"
+                    and news.get("catalog_complete")
+                    and news.get("coverage", {}).get("end", "") >= str(now().date())
+                    else "FAILED"
+                )
+                item["candidate_events"] = pending_events(news.get("candidate_events", []))
+            result = workflow.ratings(lambda *args: None)
+            # 正式查询独立读回；不得把更新器返回值当作列表已显示。
+            result["scope"] = sorted(codes)
+            result["readback"] = [
+                self.get(f"http://127.0.0.1:8000/internal/v1/funds/{code}/rating") for code in sorted(codes)
+            ]
+            return result
+        finally:
+            workflow.close()
 
     def get(self, url):
         response = self.client.get(url)
@@ -300,8 +349,7 @@ class LocalDailyBackend:
             # 这里只核本基金本轮原文摘要，不自动批准、不替用户形成方向。
             folder = self.directory / "funds" / code / "companies"
             discoveries = [read(p) for p in folder.glob("*.JP/jp-financials/latest.json")]
-            required = {r["raw_sha256"] for r in discoveries
-                        if r.get("status") == "ORIGINAL_PARSED_READING_REQUIRED"}
+            required = {r["raw_sha256"] for r in discoveries if r.get("status") == "ORIGINAL_PARSED_READING_REQUIRED"}
             if required:
                 selected = read(Path(review["materials_path"]))
                 available = {d.get("raw_sha256") for d in selected.get("documents", [])}

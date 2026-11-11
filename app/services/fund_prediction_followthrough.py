@@ -35,6 +35,11 @@ def recovery_actions(code, report, material, news, handoff, base_date, coverage_
         if quote.get("date") == base_date:
             return True
         data = material or {}
+        if company["code"] in data.get("market_quote_exceptions", {}):
+            from app.services.fund_prediction_corporate_recovery import verified_codes
+
+            if company["code"] in verified_codes(data, base_date):
+                return True
         evidence = data.get("calendar_evidence", {})
         return bool(
             verified_jp_holiday_reference(

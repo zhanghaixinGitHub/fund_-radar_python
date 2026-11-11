@@ -48,6 +48,7 @@ def list_funds(
     cursor: str | None,
     page: int | None,
     rating: str | None = None,
+    fund_codes: tuple[str, ...] | None = None,
 ) -> InternalFundPage:
     """分页读取真实目录样本，并返回与当前筛选一致的总记录数。
 
@@ -55,9 +56,9 @@ def list_funds(
     语义。两种模式均只查询已落库数据，不调用外部数据源或触发同步。
     """
     if rating is not None:
-        return _list_funds_by_rating(keyword, fund_type, page_size, cursor, page, rating)
+        return _list_funds_by_rating(keyword, fund_type, page_size, cursor, page, rating, fund_codes)
     with Session(get_engine()) as session:
-        result = list_fund_summaries(session, keyword, fund_type, page_size, cursor, page)
+        result = list_fund_summaries(session, keyword, fund_type, page_size, cursor, page, fund_codes)
     page_rows = result.rows if page is not None else result.rows[:page_size]
     total_pages = (result.total_count + page_size - 1) // page_size
     return InternalFundPage(
@@ -77,6 +78,7 @@ def _list_funds_by_rating(
     cursor: str | None,
     page: int | None,
     rating: str,
+    fund_codes: tuple[str, ...] | None = None,
 ) -> InternalFundPage:
     """先核验当前评级再分页，缺失、撤回和过期结果不得计入有效等级。
 
@@ -92,7 +94,9 @@ def _list_funds_by_rating(
     selected: dict[str, RatingSummary] = {}
     has_more = False
     with Session(get_engine()) as session:
-        for codes in iter_fund_code_batches(session, keyword, fund_type, page_mode=page is not None):
+        for codes in iter_fund_code_batches(
+            session, keyword, fund_type, page_mode=page is not None, fund_codes=fund_codes
+        ):
             summaries = {item["fundCode"]: RatingSummary.model_validate(item) for item in read_ratings(codes)["items"]}
             if set(summaries) != set(codes):
                 raise ValueError("RATING_FILTER_INCOMPLETE")

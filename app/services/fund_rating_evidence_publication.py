@@ -21,7 +21,7 @@ PUBLIC_EXPLANATIONS = {
 }
 
 
-def prepare_entry(bundle: dict, root: Path) -> dict:
+def prepare_entry(bundle: dict, root: Path, *, allow_partial: bool = False) -> dict:
     """复用身份与考察期，独立封存本规则使用的资料。"""
     code = bundle["fund_code"]
     if bundle["family"] != "INDEX" or rating_review_required(code):
@@ -41,8 +41,15 @@ def prepare_entry(bundle: dict, root: Path) -> dict:
         "events": raw["anchors"].get("material_events", {}).get(code, []),
     }
     result = preview({**bundle, "evidence_v1_calculation": frozen}, root, review_required=False)
-    if result["status"] != "CANDIDATE" or result["score"] is None:
+    partial = (
+        allow_partial is True
+        and result["status"] == "PARTIAL"
+        and any(value is not None for value in result["dimensions"].values())
+    )
+    if not partial and (result["status"] != "CANDIDATE" or result["score"] is None):
         raise ValueError("RATING_EVIDENCE_V1_INCOMPLETE:" + ",".join(result.get("missing", [])))
+    if partial:
+        frozen["partial_release_only"] = True
     retained = set(result["facts"]["source_sha256"])
     frozen["inputs"]["sources"] = {k: v for k, v in inputs["sources"].items() if k in retained}
     for name in ("cohort", "market", "peers"):

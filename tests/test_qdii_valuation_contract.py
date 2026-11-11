@@ -66,6 +66,23 @@ def test_completed_us_baseline_is_available_before_chinese_target_day():
     assert verified_qdii_window(*sample())
 
 
+def test_hk_calendar_uses_requested_year_instead_of_fixed_2026():
+    # 仅内存中的隔离样例；不是已公布日历，也不写入线上年度清单。
+    p, m, d, w = json.loads(json.dumps(sample()).replace("2026", "2027"))
+    m["companies"][0]["code"] = "00005.HK"
+    q = m["companies"][0]["quote"]
+    q.update(valuation_market="HK", currency="HKD", closed_at="2027-10-14T16:10:00+08:00")
+    d["fx"]["body"] = json.dumps({"rates": [{"currency": "HKD", "date": "2027-10-14", "cny_per_unit": ".86"}]})
+    d["calendar"].update(
+        url="https://www.hkex.com.hk/calendar",
+        body="Holiday Schedule for Year 2027\nSaturdays, Sundays\n"
+        + "\n".join(f"{day} January 2027" for day in range(1, 16)),
+    )
+    d["hours"] = {"kind": "EXCHANGE_TRADING_HOURS", "url": "https://www.hkex.com.hk/hours", "body": "16:08 16:10"}
+    m["calendar_evidence"].update(calendar_refs={"HK": "calendar"}, market_hours_ref="hours")
+    assert verified_qdii_window(p, m, d, w)
+
+
 def test_listed_fof_requires_actual_fund_valuation_and_issuer_lookthrough():
     p, m, d, w = deepcopy(sample())
     p["fund_name"] = "原油基金(QDII-FOF)-C"
@@ -115,9 +132,7 @@ def test_hong_kong_normal_session_uses_verified_auction_completion():
     p, m, d, w = deepcopy(sample())
     q = m["companies"][0]["quote"]
     q.update(valuation_market="HK", currency="HKD", closed_at="2026-10-14T16:10:00+08:00")
-    d["fx"]["body"] = json.dumps(
-        {"rates": [{"currency": "HKD", "date": "2026-10-14", "cny_per_unit": "0.86"}]}
-    )
+    d["fx"]["body"] = json.dumps({"rates": [{"currency": "HKD", "date": "2026-10-14", "cny_per_unit": "0.86"}]})
     from app.services.fund_valuation_sessions import hk_closed_dates
 
     dates = [f"{day} January 2026" for day in range(1, 16)]

@@ -54,8 +54,8 @@ def compile_history(source, inputs: dict, history: dict) -> dict:
         raise ValueError("R5_GT_PUBLISHER_REQUEST_SCOPE")
     page_ref = source.sources[refs["benchmark-page"]]
     script_ref = source.sources[refs["benchmark-script"]]
-    page = source.raw[refs["benchmark-page"]].decode("utf-8")
-    script = source.raw[refs["benchmark-script"]].decode("utf-8")
+    page = source.load(refs["benchmark-page"]).decode("utf-8")
+    script = source.load(refs["benchmark-script"]).decode("utf-8")
     script_url = urlsplit(script_ref["url"])
     if (
         page_ref["url"] != "https://e.gtfund.com/etrade/Jijin/view/id/" + code
@@ -87,7 +87,7 @@ def compile_history(source, inputs: dict, history: dict) -> dict:
     )
     if expression not in page_text:
         raise ValueError("R5_GT_PUBLISHER_CONTRACT_EXPRESSION")
-    raw = json.loads(source.raw[refs["benchmark"]], parse_float=Decimal)
+    raw = json.loads(source.load(refs["benchmark"]), parse_float=Decimal)
     if not isinstance(raw, list) or not raw or any(not isinstance(row, list) or len(row) != 3 for row in raw):
         raise ValueError("R5_GT_PUBLISHER_RESPONSE")
     observed = {}

@@ -29,7 +29,7 @@ def _request(source, digest: str, endpoint: str, params: dict) -> dict:
         or ref.get("params") != params
     ):
         raise ValueError("R5_SOUTHERN_REQUEST_SCOPE")
-    raw = json.loads(source.raw[digest], parse_float=Decimal)
+    raw = json.loads(source.load(digest), parse_float=Decimal)
     if raw.get("code") != "ETS-5BP00000" or not isinstance(raw.get("data"), dict):
         raise ValueError("R5_SOUTHERN_PUBLISHER_RESPONSE")
     return raw["data"]
@@ -84,7 +84,7 @@ def compile_history(source, inputs: dict, history: dict) -> dict:
         or proof.get("method") != "COMPLETE_ISSUER_PUBLISHED_CURVE_NO_RECONSTRUCTION"
     ):
         raise ValueError("R5_SOUTHERN_FROZEN_PROTOCOL_SCOPE")
-    page = source.raw[refs["benchmark-page"]].decode("utf-8")
+    page = source.load(refs["benchmark-page"]).decode("utf-8")
     scripts = []
     if source.sources[refs["benchmark-page"]]["url"] != (
         "https://www.southernfund.com/new/personal-financing/detail.html?fundCode=" + code
@@ -101,7 +101,7 @@ def compile_history(source, inputs: dict, history: dict) -> dict:
             or ref.get("archive_kind") == "DERIVED"
         ):
             raise ValueError("R5_SOUTHERN_PAGE_SCRIPT_IDENTITY")
-        scripts.append(re.sub(r"\s+", "", source.raw[refs[key]].decode("utf-8")))
+        scripts.append(re.sub(r"\s+", "", source.load(refs[key]).decode("utf-8")))
     detail, main = scripts
     if any(
         token not in detail
@@ -324,7 +324,7 @@ def _published_total_return(
     """
     days, refs = history["dates"], inputs["target_refs"]
     rows = {row["nav_date"]: row for row in history["rows"]}
-    scripts = source.raw[refs["benchmark-script"]].decode("utf-8")
+    scripts = source.load(refs["benchmark-script"]).decode("utf-8")
     if "复权净值为单位净值加分红再投资复权计算的净值" not in scripts:
         raise ValueError("R5_SOUTHERN_TOTAL_RETURN_SEMANTICS")
     report_checks, conflicts = [], []

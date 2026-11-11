@@ -1,14 +1,9 @@
-"""多周期本人归档的稳定本机入口；调用Java正式方法，凭据仅经子进程标准输入。"""
+"""多周期本人归档；通过既有服务令牌调用Java正式入口，不传递数据库凭据。"""
 
 import ctypes
 import json
-import subprocess
 from ctypes import wintypes
 from pathlib import Path
-
-from dotenv import dotenv_values
-
-from app.services.fund_daily_services import owned_process
 
 
 def windows_argv(command):
@@ -55,54 +50,22 @@ def runtime_classpath(args, core):
 
 
 def archive_multi(core, settings, owner, code, prediction_id, target):
-    process = owned_process(8080, core)
-    if not process:
-        raise ValueError("OFFICIAL_OWNER_SERVICE_NOT_RUNNING")
-    args = windows_argv(process["CommandLine"])
-    for arg in list(args):
-        if arg.startswith("@"):
-            args += windows_argv("java " + Path(arg[1:]).read_text(encoding="utf-8").replace("\n", " "))[1:]
-    if not any("com.fundradar.core.FundCoreApplication" in arg for arg in args):
-        raise ValueError("JAVA_RUNTIME_MAIN_CLASS_MISMATCH")
-    cp = runtime_classpath(args, core)
-    env = dotenv_values(core / ".env")
-    request = {
-        "owner": owner,
-        "code": code,
-        "predictionId": prediction_id,
-        "targetDate": target,
-        "jdbcUrl": "jdbc:postgresql://"
-        + env.get("FUND_CORE_DB_HOST", "localhost")
-        + ":"
-        + env.get("FUND_CORE_DB_PORT", "54329")
-        + "/"
-        + env.get("FUND_CORE_DB_NAME", "fund_core"),
-        "dbUser": env["FUND_CORE_DB_USERNAME"],
-        "dbPassword": env["FUND_CORE_DB_PASSWORD"],
-        "serviceToken": settings.ai_service_token.get_secret_value(),
-        "baseUrl": "http://127.0.0.1:8000",
-    }
-    result = subprocess.run(
-        [
-            process["ExecutablePath"],
-            "-Dfile.encoding=UTF-8",
-            "--class-path",
-            cp,
-            str(core / "scripts/OwnerPredictionArchive.java"),
-        ],
-        input=json.dumps(request),
-        cwd=core,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
+    """使用已运行的正式服务归档，兼容统一入口的JAR，不读取或传输数据库密码。"""
+    import httpx
+
+    with httpx.Client(
         timeout=90,
-    )
-    request = env = None
-    if result.returncode:
-        # 不记录完整子进程输出，避免异常携带连接串或凭据。
-        raise RuntimeError("OFFICIAL_JAVA_OWNER_ARCHIVE_FAILED:EXIT_" + str(result.returncode))
-    line = next(v for v in result.stdout.splitlines() if v.startswith("OWNER_ARCHIVE_RESULT:"))
-    value = json.loads(line.partition(":")[2])
+        trust_env=False,
+        headers={
+            "X-Service-Token": settings.ai_service_token.get_secret_value(),
+        },
+    ) as client:
+        response = client.post(
+            settings.core_service_base_url + f"/internal/v1/predictions/sync/users/{owner}/{code}/archive",
+            json={"predictionId": prediction_id, "targetDate": target},
+        )
+        response.raise_for_status()
+        value = response.json()
     if (
         value.get("owner") != owner
         or value.get("code") != code

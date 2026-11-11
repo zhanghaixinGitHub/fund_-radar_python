@@ -18,7 +18,7 @@ from app.services.prediction_contract import (
     nav_anchored,
     reinvested_series,
 )
-from app.services.trading_calendar import load_calendar, load_current_calendar
+from app.services.trading_calendar import load_live_calendars
 
 ZONE = ZoneInfo("Asia/Shanghai")
 
@@ -37,13 +37,13 @@ def public_calendar(fund, *, legacy=False):
             details={"fundCode": fund["fund_code"], "fundName": fund["fund_name"]},
             next_action="补充该基金公布的估值及开放日政策后重试；不使用境内日历猜测",
         )
-    past, current = load_calendar(), load_current_calendar()
+    calendars = load_live_calendars()
     return ValuationCalendar(
         "CN_FUND_SSE_ASSUMPTION_V1",
-        past.sessions + current.sessions,
-        past.definition.coverage_start,
-        current.definition.coverage_end,
-        fingerprint([past.content_hash, current.content_hash]),
+        tuple(day for item in calendars for day in item.sessions),
+        calendars[0].definition.coverage_start,
+        calendars[-1].definition.coverage_end,
+        fingerprint([item.content_hash for item in calendars]),
     )
 
 

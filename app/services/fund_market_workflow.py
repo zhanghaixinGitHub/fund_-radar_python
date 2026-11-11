@@ -148,6 +148,7 @@ class MarketSyncWorkflow:
             None,
             as_of=month_end,
             due_only=True,
+            scope_codes={row["fund_code"] for row in self.scope()},
             ready_codes=ready,
             progress_reporter=progress,
             new_rule_ready_codes={

@@ -76,6 +76,7 @@ def list_internal_funds(
     cursor: Annotated[str | None, Query(pattern=r"^\d+$")] = None,
     page: Annotated[int | None, Query(ge=1, le=10_000)] = None,
     rating: Annotated[str | None, Query(pattern=r"^(EXCELLENT|GOOD|AVERAGE|WEAK|SCORED|UNRATED|PENDING)$")] = None,
+    fund_codes: Annotated[list[str] | None, Query(alias="fundCode")] = None,
 ) -> InternalFundPage:
     """按兼容游标或页码返回已落库的真实基金目录样本。
 
@@ -90,6 +91,16 @@ def list_internal_funds(
                 "message": "page 与 cursor 不能同时使用。",
             },
         )
+    if fund_codes is not None and (
+        not fund_codes
+        or len(fund_codes) > 1000
+        or len(set(fund_codes)) != len(fund_codes)
+        or any(_FUND_CODE_PATTERN.fullmatch(fund_code) is None for fund_code in fund_codes)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "INVALID_FUND_CODE_FILTER", "message": "基金代码筛选参数无效。"},
+        )
     logger.info(
         "funds.list_internal_funds >>> persisted fund catalog page requested, trace_id=%s, page_size=%s, page=%s",
         get_trace_id(),
@@ -97,10 +108,11 @@ def list_internal_funds(
         page,
     )
     try:
-        # 不传评级时保留原调用及缓存契约；筛选失败必须显式报错，不能返回未筛选目录。
+        # 个人范围同样必须在分页前生效；不传评级时保留原缓存契约。
+        codes = tuple(fund_codes) if fund_codes is not None else None
         if rating is None:
-            return list_funds(keyword, fund_type, page_size, cursor, page)
-        return list_funds(keyword, fund_type, page_size, cursor, page, rating)
+            return list_funds(keyword, fund_type, page_size, cursor, page, fund_codes=codes)
+        return list_funds(keyword, fund_type, page_size, cursor, page, rating, codes)
     except (ValueError, SQLAlchemyError, OSError):
         if rating is None:
             raise

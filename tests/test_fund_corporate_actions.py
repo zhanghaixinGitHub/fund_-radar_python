@@ -91,6 +91,27 @@ def test_terminal_security_has_no_invented_quote_or_fund_valuation():
     assert row["non_trading_evidence"]["fund_current_quantity_or_fair_value_proved"] is False
 
 
+def test_daily_revalidation_preserves_no_quote_and_does_not_exempt_unproved_termination(monkeypatch):
+    from datetime import datetime
+
+    from app.services import fund_prediction_corporate_recovery as recovery
+
+    current = {"base_nav_date": "2026-10-21", "target_nav_date": "2026-10-22"}
+    monkeypatch.setattr(recovery, "now", lambda: datetime.fromisoformat("2026-10-21T20:00:00+08:00"))
+    monkeypatch.setattr(recovery, "window", lambda _: current)
+    data = sample()
+    documents = deepcopy(data["documents"])
+    receipts = recovery.refresh(data, current)
+    assert receipts[0]["status"] == "REVALIDATED_NOT_APPLICABLE"
+    assert recovery.verified_codes(data, current["base_nav_date"]) == {"601059.SH"}
+    assert data["companies"][0]["quote"] is None and data["documents"] == documents
+    invalid = sample()
+    invalid["market_quote_exceptions"]["601059.SH"]["effective_date"] = "2027-01-01"
+    prior = deepcopy(invalid)
+    assert recovery.refresh(invalid, current)[0]["status"] == "ACTION_REQUIRED"
+    assert invalid == prior
+
+
 @pytest.mark.parametrize(
     "problem",
     [

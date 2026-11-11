@@ -163,6 +163,12 @@ class DailyPredictionRun:
                 item.update(status="ACTION_REQUIRED", failure=failure)
             versioned_save(self.path, state)
         final = b.guard(root / "followthrough.json", blocked_file)
+        if hasattr(b, "ratings"):
+            try:
+                state["ratings"] = b.ratings(terminal)
+            except Exception as error:
+                state["ratings"] = {"status": "FAILED", "reason": type(error).__name__ + ":" + str(error)[:300]}
+            versioned_save(root / "ratings-status.json", state["ratings"])
         versioned_save(
             root / "work-items.json",
             {"owner_user_id": owner, "window": state["window"], "funds": final["funds"], "execution": state["funds"]},
@@ -176,5 +182,7 @@ class DailyPredictionRun:
         )
         if state["prediction_outcomes"] is None and state["status"] == "CLOSED":
             state["status"] = "OUTCOME_STEP_MISSING"
+        if state.get("ratings", {}).get("status") != "SUCCEEDED" and "ratings" in state and state["status"] == "CLOSED":
+            state["status"] = "RATINGS_PENDING"
         versioned_save(self.path, state)
         return state

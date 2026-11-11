@@ -223,7 +223,11 @@ def verified_qdii_window(
                     or f"Holiday Schedule for Year {date.fromisoformat(target).year}" not in body
                 ):
                     return False
-                if "Saturdays, Sundays" not in body or len(re.findall(r"\d{1,2}\s+[A-Za-z]+\s+2026", body)) < 15:
+                calendar_year = str(date.fromisoformat(target).year)
+                if (
+                    "Saturdays, Sundays" not in body
+                    or len(re.findall(r"\d{1,2}\s+[A-Za-z]+\s+" + calendar_year, body)) < 15
+                ):
                     return False
                 for day in (base, target):
                     if date.fromisoformat(day).strftime("%d %B %Y").lstrip("0") in body:

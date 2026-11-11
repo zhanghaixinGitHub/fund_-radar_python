@@ -8,6 +8,7 @@ from datetime import date, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -16,6 +17,7 @@ CURRENT_CALENDAR_FILE = CALENDAR_FILE.with_name("cn_a_share_2026_v1.json")
 # 修改休市事实须新增日历版本并重新验收；不能同版本无声改日期。
 EXPECTED_CALENDAR_HASH = "a7258f7368a071b9fd1df2b2ac039a60bb2be0b4e5c9bde51e836c76ca3c75fa"
 EXPECTED_CURRENT_CALENDAR_HASH = "87644e2cb7db2971ee6748f1708c985a8cd89854f76a3527738c98da6d02b86d"
+EXTENSION_MANIFEST = CALENDAR_FILE.with_name("verified_extensions.json")
 
 
 class CalendarCoverageError(ValueError):
@@ -24,7 +26,7 @@ class CalendarCoverageError(ValueError):
 
 class YearNotice(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    year: int = Field(ge=2021, le=2026, description="本条官方安排覆盖的年度；不自动接受尚未核验的年份")
+    year: int = Field(ge=2021, le=2100, description="必须有沪深官方公告并经核验的年度")
     announced_on: date = Field(description="年度安排公布日，不是本地抓取日")
     sources: tuple[str, str] = Field(description="沪深交易所原始公告链接；运行时不访问网页")
     closed_ranges: tuple[tuple[date, date], ...] = Field(
@@ -43,8 +45,9 @@ class YearNotice(BaseModel):
 
 class CalendarDefinition(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    version: Literal["CN_A_SHARE_2021_2025_V1", "CN_A_SHARE_2026_V1"] = Field(
-        description="独立固定版本；2026不回写2021–2025研究日历"
+    version: str = Field(
+        pattern=r"^CN_A_SHARE_(2021_2025|20[2-9][0-9])_V[1-9][0-9]*$",
+        description="独立固定版本；2026不回写2021–2025研究日历",
     )
     market: Literal["CN_A_SHARE_SSE_SZSE"] = Field(description="适用内地沪深股票市场，不代表基金申赎日历")
     construction: Literal["WEEKDAYS_MINUS_OFFICIAL_HOLIDAYS"] = Field(description="周一至周五扣除官方节假日休市")
@@ -55,7 +58,11 @@ class CalendarDefinition(BaseModel):
 
     @model_validator(mode="after")
     def complete_years(self):
-        expected_years = (2021, 2022, 2023, 2024, 2025) if self.version == "CN_A_SHARE_2021_2025_V1" else (2026,)
+        expected_years = (
+            (2021, 2022, 2023, 2024, 2025)
+            if self.version == "CN_A_SHARE_2021_2025_V1"
+            else (int(self.version.split("_")[-2]),)
+        )
         if (self.coverage_start, self.coverage_end) != (
             date(expected_years[0], 1, 1),
             date(expected_years[-1], 12, 31),
@@ -133,4 +140,34 @@ def load_prediction_calendar(cutoff: date) -> TradingCalendar:
         return load_calendar()
     if cutoff.year == 2026:
         return load_current_calendar()
+    for calendar in load_live_calendars()[2:]:
+        if calendar.definition.coverage_start <= cutoff <= calendar.definition.coverage_end:
+            return calendar
     raise CalendarCoverageError("尚无该年度已核验的交易日历，不使用普通工作日补齐。")
+
+
+def load_live_calendars() -> tuple[TradingCalendar, ...]:
+    """只追加有固定摘要和官方来源的新年历；旧文件及其历史版本不改变。"""
+    result = [load_calendar(), load_current_calendar()]
+    if not EXTENSION_MANIFEST.exists():
+        return tuple(result)
+    raw = EXTENSION_MANIFEST.read_bytes()
+    if len(raw) > 65536:
+        raise ValueError("CALENDAR_MANIFEST_TOO_LARGE")
+    for entry in json.loads(raw)["extensions"]:
+        path = (EXTENSION_MANIFEST.parent / entry["definition_file"]).resolve()
+        if path.parent != EXTENSION_MANIFEST.parent.resolve() or path.stat().st_size > 65536:
+            raise ValueError("CALENDAR_EXTENSION_PATH_OR_SIZE")
+        calendar = build_calendar(CalendarDefinition.model_validate_json(path.read_bytes()))
+        if calendar.content_hash != entry["definition_hash"]:
+            raise ValueError("CALENDAR_EXTENSION_HASH_MISMATCH")
+        if calendar.definition.coverage_start != result[-1].definition.coverage_end + timedelta(days=1):
+            raise ValueError("CALENDAR_EXTENSION_NOT_CONTIGUOUS")
+        notice = calendar.definition.years[0]
+        hosts = {urlparse(url).hostname for url in notice.sources}
+        if not any(h and (h == "sse.com.cn" or h.endswith(".sse.com.cn")) for h in hosts) or not any(
+            h and (h == "szse.cn" or h.endswith(".szse.cn")) for h in hosts
+        ):
+            raise ValueError("CALENDAR_OFFICIAL_SOURCES_REQUIRED")
+        result.append(calendar)
+    return tuple(result)
