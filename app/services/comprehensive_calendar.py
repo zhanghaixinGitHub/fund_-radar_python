@@ -6,6 +6,71 @@ from urllib.parse import urlparse
 
 from app.services.nav_repair import domestic_calendar_supported
 
+QDII_WORKDAY_POLICY = "QDII_EXPLICIT_CN_WORKDAY_NAV_V1"
+
+
+def verified_qdii_workday_valuation(material: dict, documents: dict) -> bool:
+    """只认本基金明确的逐境内工作日估值条款，不把交易开放日当估值日。
+
+    境外休市时股票可能沿用最近价格或作公允价值调整，汇率也可能变化。
+    本函数只确认应该估值的日期，不假定那天的净值、价格或收益不变。
+    """
+    from app.services.direction_1d_protocol import digest
+
+    evidence = material.get("calendar_evidence") or {}
+    own = documents.get(evidence.get("prospectus_ref"), {})
+    quotes = evidence.get("workday_valuation_quotes") or {}
+    body = own.get("body", "")
+    if (
+        evidence.get("policy") != "QDII_CNY_VERIFIED_SESSION_V1"
+        or evidence.get("future_valuation_policy") != QDII_WORKDAY_POLICY
+        or own.get("kind") != "PROSPECTUS"
+        or material.get("fund_code") not in own.get("codes", [])
+        or not body
+        or own.get("body_hash") != digest(body)
+        or urlparse(own.get("url", "")).hostname not in {"www.cifm.com", "www.jpmorganam.com.cn"}
+        or set(quotes) != {"workday", "daily", "holiday_close"}
+        or any(not isinstance(quote, str) or not quote or quote not in body for quote in quotes.values())
+    ):
+        return False
+    compact = {key: re.sub(r"\s+", "", quote) for key, quote in quotes.items()}
+    # 定义、估值义务和无交易时的估价方法须同时存在，不能只拿一句旧收盘价替代。
+    return bool(
+        re.fullmatch(r"工作日[：:]指上海证券交易所[、，]深圳证券交易所开放交易的工作日", compact["workday"])
+        and "基金管理人应在每个工作日对基金资产估值" in compact["daily"]
+        and "暂停估值时除外" in compact["daily"]
+        and "权益类证券" in compact["holiday_close"]
+        and "估值日无交易" in compact["holiday_close"]
+        and "最近交易日的市价（收盘价）估值" in compact["holiday_close"]
+        and "重大变化" in compact["holiday_close"]
+        and "公允价格" in compact["holiday_close"]
+    )
+
+
+def verified_gold_valuation_days(material: dict, documents: dict) -> bool:
+    """黄金多周期必须另核本基金逐工作日估值条款，不能只延长一次报价窗口。"""
+    evidence = material.get("calendar_evidence", {})
+    own = documents.get(evidence.get("valuation_contract_ref"), {})
+    quotes = evidence.get("valuation_day_quotes", {})
+    if (
+        evidence.get("policy") != "CN_GOLD_ETF_NAV_WINDOW_V1"
+        or own.get("kind") not in {"PROSPECTUS", "ANNOUNCEMENT"}
+        or material.get("fund_code") not in own.get("codes", [])
+        or "黄金" not in own.get("title", "")
+        or "联接" not in own.get("title", "")
+        or urlparse(own.get("url", "")).hostname
+        not in {"www.qhkyfund.com", "qhkyfund.com", "fund.eastmoney.com", "np-cnotice-fund.eastmoney.com"}
+        or set(quotes) != {"working_day", "daily_valuation"}
+        or any(not isinstance(q, str) or not q or q not in own.get("body", "") for q in quotes.values())
+    ):
+        return False
+    working, daily = [re.sub(r"\s+", "", quotes[key]) for key in ("working_day", "daily_valuation")]
+    return bool(
+        re.search(r"工作日[：:]指上海证券交易所[、，,]深圳证券交易所的正常交易日", working)
+        and "基金管理人应每个工作日对基金资产估值" in daily
+        and "暂停估值时除外" in daily
+    )
+
 
 def verified_domestic_window(profile: dict, material: dict, documents: dict, window: dict) -> bool:
     """核对公开日历、投向和本期实际行情，不能凭名称放开QDII等跨境产品。

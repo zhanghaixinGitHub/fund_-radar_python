@@ -95,10 +95,10 @@ def test_full_eight_dimension_content_preserves_dates_scores_and_inputs():
     actual = render(original, evidence, "INDEX")
     assert all(d["assessment"]["conclusion"] and d["assessment"]["paragraphs"] for d in actual["dimensions"])
     assert "0.75个百分点" in dimension(actual, "risk")["explanation"]
-    assert "7个月" in dimension(actual, "stability")["explanation"]
+    assert dimension(actual, "stability")["metrics"][0]["value"] == "7/12"
     assert "2025-10-10" in dimension(actual, "efficiency")["explanation"]
     assert "不是分散程度" in dimension(actual, "holdings")["explanation"]
-    assert "101元" in dimension(actual, "cost")["explanation"]
+    assert dimension(actual, "cost")["metrics"][0]["value"] == "101.00"
     assert dimension(actual, "holdings")["metrics"][0]["period"] == "2026-06-30"
     assert actual["dataDates"]["nav"] == "2026-09-30"
     assert [d["score"] for d in actual["dimensions"]] == [d["score"] for d in original["dimensions"]]
@@ -120,9 +120,17 @@ def test_active_fund_does_not_receive_passive_tracking_or_matching_conclusions()
     actual = render(item(), evidence, "ACTIVE_EQUITY")
     assert "合同仓位与策略执行" in dimension(actual, "efficiency")["explanation"]
     assert "跟踪误差" not in dimension(actual, "efficiency")["explanation"]
-    assert "89.00%" in dimension(actual, "efficiency")["explanation"]
+    execution = dimension(actual, "efficiency")
+    assert [(m["name"], m["value"], m["unit"], m["period"]) for m in execution["metrics"]] == [
+        ("股票占总资产", "89.00", "%", "2026-06-30"),
+        ("股票占净资产", "90.00", "%", "2026-06-30"),
+        ("合同认可现金占净资产", "6.00", "%", "2026-06-30"),
+    ]
+    assert not any(p.startswith("截至") for p in execution["assessment"]["paragraphs"])
     assert "80.00%至95.00%" in dimension(actual, "efficiency")["explanation"]
-    assert "52.00%" in dimension(actual, "holdings")["explanation"]
+    assert "现金下限为净资产的5.00%" in execution["explanation"]
+    assert "合同配置执行不等于收益保证，也不直接证明选股或择时能力。" in execution["assessment"]["limitations"]
+    assert dimension(actual, "holdings")["metrics"][0]["value"] == "52.00"
     assert "成分匹配" not in dimension(actual, "holdings")["explanation"]
 
 

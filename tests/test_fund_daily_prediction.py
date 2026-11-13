@@ -10,6 +10,12 @@ from app.services.fund_materials_store import versioned_save
 from app.services.fund_prediction_recovery import normalized_materials
 
 
+@pytest.fixture(autouse=True)
+def legacy_policy_for_this_module(monkeypatch):
+    """本文件验证旧路径；不读取正式库当前采用状态。"""
+    monkeypatch.setattr("app.services.prediction_review_v2_publication.adoption_status", lambda: None)
+
+
 class Backend:
     def __init__(self, codes=None):
         self.codes = codes or [f"{i:06d}" for i in range(1, 8)]

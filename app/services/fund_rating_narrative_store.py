@@ -65,6 +65,9 @@ def prepare(result, snapshot, *, root, force=False):
     from app.services.fund_rating_narrative_facts import compile_facts
 
     facts = compile_facts(bundle, result.dimension_values or {}, root=Path(root))
+    from app.services.fund_rating_narrative_methods import attach
+
+    facts = attach(bundle, result.dimension_values or {}, facts, root=Path(root))
     packet = {
         "revision": REVISION,
         "binding": _binding(result, snapshot),

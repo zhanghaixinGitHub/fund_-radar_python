@@ -22,6 +22,7 @@ from app.api.routes.market_revisions import router as market_revisions_router
 from app.api.routes.multi_predictions import router as multi_predictions_router
 from app.api.routes.nav_basis_audit import router as nav_basis_audit_router
 from app.api.routes.portfolio_advice import router as portfolio_advice_router
+from app.api.routes.prediction_review_v2 import router as prediction_review_v2_router
 from app.api.routes.signals import router as signals_router
 from app.api.routes.simulation_fee import router as simulation_fee_router
 from app.api.routes.simulation_market import router as simulation_market_router
@@ -37,6 +38,7 @@ api_router.include_router(fund_rating_router, prefix="/funds", tags=["fund-ratin
 api_router.include_router(market_revisions_router, prefix="/market-revisions", tags=["market-revisions"])
 api_router.include_router(fund_materials_router, prefix="/funds", tags=["fund-materials"])
 api_router.include_router(multi_predictions_router, prefix="/multi-predictions", tags=["multi-predictions"])
+api_router.include_router(prediction_review_v2_router, prefix="/multi-predictions", tags=["multi-predictions"])
 api_router.include_router(spx_manual_router, prefix="/spx-manual", tags=["spx-manual"])
 api_router.include_router(direction_1d_router, prefix="/direction-1d", tags=["direction-1d"])
 api_router.include_router(portfolio_advice_router, prefix="/portfolio-advice", tags=["portfolio-advice"])

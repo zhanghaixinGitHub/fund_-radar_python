@@ -1,0 +1,118 @@
+{
+  "version": "FUND_COMPREHENSIVE_REVIEW_V2_TRIAL_3",
+  "mode": "EXPERIMENTAL",
+  "target": "VERIFIED_DISTRIBUTION_ADJUSTED_FUND_TOTAL_RETURN_V2",
+  "confidence": "LOW",
+  "validation_status": "UNVALIDATED",
+  "automatic_direction": false,
+  "production_publication": false,
+  "flat_bands": {},
+  "gap_rules": {
+    "BLOCK": "缺失内容有现实可能让方向反过来，暂不判断，并继续补查。",
+    "QUALIFY": "已有依据足够支持有条件的倾向，缺项只降低把握；写明理由、限制和下一步。",
+    "NONE": "本项已经核实，没有需要处置的缺项。"
+  },
+  "event_checks_allowing_not_applicable": [
+    "next_session_events",
+    "catalyst_path",
+    "verification_window"
+  ],
+  "ongoing_evidence": "不要求每天有新消息。持续经营、行业、政策或利息因素可作主要依据，但须引用支持持续作用的原文，解释本周期怎样受影响。昨日价格本身不够。",
+  "partial_exposure": "不要求实时全仓。可以用已核实的产品投向、指数结构或有代表性的披露说明范围；不能把少量个股冒充全仓，也不能忽略可能改变方向的未知部分。",
+  "conditional_outlook": "半年实际终点未确认时，可以保存明确标记的有条件趋势分析；不得发布成日期已确认的正式预测或计算到期成绩。",
+  "common_checks": {
+    "exposure": "披露投向的日期、覆盖范围与未知部分是否足以支持组合判断？",
+    "new_information": "相对之前新增或变化了什么？历史背景为什么仍适用？",
+    "pricing": "已经观察到什么价格反应？剩余影响与未知市场预期分别是什么？",
+    "counter_search": "独立检查的最强相反因素是什么，检查范围到哪里？",
+    "sensitivity": "合理改变未知仓位、时点或假设后，方向是否仍成立？"
+  },
+  "asset_checks": {
+    "BROAD_INDEX": {
+      "index_structure": "指数结构与整体参与范围",
+      "earnings_valuation": "整体经营、估值和利率"
+    },
+    "SECTOR_INDEX": {
+      "sector_cycle": "行业供需、成本、价格及政策对象",
+      "constituents": "主要成分代表性和经营验证"
+    },
+    "ACTIVE_EQUITY": {
+      "style_portfolio": "实际披露组合、风格、集中与未知部分",
+      "earnings_valuation": "经营质量、估值与现金回收"
+    },
+    "MIXED": {
+      "asset_sleeves": "主要资产分别分析与披露比例",
+      "allocation_uncertainty": "未知配置是否可能改变合并判断"
+    },
+    "BOND": {
+      "rates_duration": "利率曲线、久期敏感性和利息收入",
+      "credit_liquidity": "信用、融资及流动性风险"
+    },
+    "CREDIT_BOND": {
+      "rates_duration": "利率曲线、久期和利息收入",
+      "credit_liquidity": "偿债、利差、集中及流动性"
+    },
+    "CONVERTIBLE": {
+      "equity_bond": "正股与债券价值分别判断",
+      "premium_terms": "转股溢价、信用及赎回回售等真实条款"
+    },
+    "GOLD": {
+      "gold_drivers": "利率、美元、风险需求及金价的相反作用",
+      "instrument_currency": "实际黄金产品、人民币换算及是否重复计算汇率"
+    },
+    "COMMODITY": {
+      "supply_demand": "实际标的供需、价格和库存",
+      "instrument_roll": "现货、期货、商品股票及换月结构"
+    },
+    "FOF": {
+      "lookthrough": "主要底层、资产分配、重复暴露",
+      "fund_costs": "费用及无法穿透部分"
+    },
+    "REIT": {
+      "operating_cash": "运营与可分配现金流",
+      "debt_price": "负债、利率和交易价格"
+    },
+    "MONEY_MARKET": {
+      "income_level": "收益水平与再投资",
+      "liquidity_credit": "流动性、信用及独立收益目标"
+    }
+  },
+  "overlay_checks": {
+    "FEEDER": {
+      "target_fund": "目标基金穿透、现金与跟踪，不把场内溢价当净值收益"
+    },
+    "ENHANCED": {
+      "index_enhancement": "基准与增强风险分开，不预加未经证实的超额收益"
+    },
+    "OVERSEAS": {
+      "fx_hedge": "计价、汇率与已核实的对冲安排",
+      "market_clock": "各市场时区、估值及已发生和未来作用"
+    },
+    "PASSIVE": {},
+    "THEMATIC": {}
+  },
+  "abstention_reasons": [
+    "DATA_MISSING",
+    "EXPOSURE_UNCERTAIN",
+    "BALANCED_EVIDENCE",
+    "TIMING_UNCLEAR",
+    "PRICING_UNCLEAR",
+    "BINARY_EVENT",
+    "TARGET_UNVERIFIED"
+  ],
+  "principles": [
+    "真实事实、基金关联、组合代表性、价格反映及本周期作用逐项解释。",
+    "支持与反证独立识别，经济事件去重，不按条数投票。",
+    "只完成来源与结构核验，不宣称程序证明语义或因果正确。",
+    "缺关键证据、仅已实现行情或对合理未知敏感时暂不判断。",
+    "不同周期相反必须解释驱动转变，不复制方向或通用反证。",
+    "试验不写正式预测、答案、评分或交易，不改旧规则和结果。"
+  ],
+  "horizon_files": {
+    "T1": "prediction_rules_v2_t1.json",
+    "T5_V1": "prediction_rules_v2_t5.json",
+    "T20_V1": "prediction_rules_v2_t20.json",
+    "M6_V1": "prediction_rules_v2_m6.json"
+  },
+  "period_separation": "四周期分别装载必查项目、基金类型问题、允许的主要依据和逐周期取舍；长期经营资料缺失不自动阻断一日五日。"
+}

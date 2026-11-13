@@ -57,6 +57,11 @@ def owner_scope(settings, owner):
 @material_read_cache
 def saved_records(owner, codes, target, core_env):
     """交叉核对Java本人留档和Python多周期原记录；不接受仅生成未归档的结果。"""
+    from app.services import fund_daily_prediction_v2 as v2
+
+    if v2.adoption() is not None:
+        return v2.saved_records(owner, codes, target)
+
     cfg = dotenv_values(core_env)
     url = URL.create(
         "postgresql+psycopg",
@@ -285,13 +290,16 @@ def main():
     owner = binding["owner_user_id"]
     settings, at = get_settings(), now()
     current_window = window(at)
+    from app.services import fund_daily_prediction_v2 as v2
+
+    active_v2 = v2.adoption() is not None
     # 同一次定时运行的目标窗口不可跨收市时间静默漂移；未做完必须保留原期失败。
     if args.output.exists():
         previous = read(args.output)
         if previous["owner_user_id"] != owner:
             raise ValueError("RECOVERY_LEDGER_OWNER_CHANGED")
         if previous["window"]["target_nav_date"] != current_window["target_nav_date"]:
-            if previous["status"] == "CLOSED":
+            if previous["status"] == "CLOSED" and not active_v2:
                 print(json.dumps({"status": "CLOSED", "reused_previous_closed_window": True}, ensure_ascii=True))
                 return
             previous.update(status="MISSED_DEADLINE", checked_at=at.isoformat(), all_predictions_generated=False)
@@ -303,6 +311,13 @@ def main():
     if not set(codes) <= set(scope):
         raise ValueError("FUND_OUTSIDE_BOUND_OWNER_SCOPE")
     records = saved_records(owner, codes, current_window["target_nav_date"], args.core_env)
+    if active_v2:
+        report = v2.followthrough_report(owner, codes, current_window, records, at=at)
+        versioned_save(args.output, report)
+        print(json.dumps({"status": report["status"], "pending_funds": report["pending_funds"],
+                          "output": str(args.output.resolve()), "analysis_version": report["analysis_version"]}))
+        raise SystemExit(2 if report["pending_funds"] else 0)
+
     exceptions = json.loads(args.blocked_file.read_text(encoding="utf-8")) if args.blocked_file else []
     results = []
     for code in codes:

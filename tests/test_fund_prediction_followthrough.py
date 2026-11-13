@@ -12,6 +12,13 @@ from app.services.direction_1d_protocol import ZONE, digest
 from app.services.fund_exposure_common import save
 from app.services.fund_prediction_followthrough import HORIZONS, recovery_actions, verify_outputs
 
+
+@pytest.fixture(autouse=True)
+def legacy_policy_for_this_module(monkeypatch):
+    """本文件验证旧路径；不读取正式库当前采用状态。"""
+    monkeypatch.setattr("app.services.prediction_review_v2_publication.adoption_status", lambda: None)
+
+
 WINDOW = {"base_nav_date": "2026-10-27", "target_nav_date": "2026-10-28"}
 DATES = {
     "T5_V1": {"endDateStatus": "RESOLVED", "endDate": "2026-11-03"},
@@ -220,6 +227,9 @@ def test_new_target_without_owner_archive_does_not_query_uuid_with_empty_integer
     from unittest.mock import MagicMock
 
     from app.commands import fund_prediction_followthrough as command
+    from app.services import fund_daily_prediction_v2 as daily_v2
+
+    monkeypatch.setattr(daily_v2, "adoption", lambda: None)
 
     core = MagicMock()
     core.connect.return_value.__enter__.return_value.execute.return_value.mappings.return_value = []

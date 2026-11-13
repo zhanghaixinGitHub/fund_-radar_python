@@ -11,6 +11,15 @@ from app.services.prediction_contract import PredictionFailure
 from tests.test_prediction_database import database  # noqa: F401
 
 
+@pytest.fixture(autouse=True)
+def explicit_legacy_policy_for_archived_path_tests(monkeypatch):
+    """旧入口用例明确检查旧状态，不能跟随本机正式采用记录改变分支。"""
+    from app.services import prediction_review_v2_publication, prediction_review_v2_requests
+
+    monkeypatch.setattr(prediction_review_v2_publication, "adoption_status", lambda: None)
+    monkeypatch.setattr(prediction_review_v2_requests, "find_task", lambda task_id: None)
+
+
 def sample():
     facts = {"F1": {"category": "持仓行情", "fact_id": "holdings", "text": "已发生行情偏弱。"}}
     data = {

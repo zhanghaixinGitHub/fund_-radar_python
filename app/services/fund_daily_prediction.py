@@ -139,10 +139,12 @@ class DailyPredictionRun:
                     try:
                         packet = b.freeze(code, horizon, folder)
                         folder = Path(packet.get("directory", folder))
-                        review_path = folder / "review.json"
+                        review_path = Path(packet.get("review_path", folder / "review.json"))
                         if not review_path.exists():
                             item["periods"].append(
-                                {**period, "status": "READ_AND_JUDGE", "input": packet, "review_path": str(review_path)}
+                                {**period, "status": "WAITING_ANALYSIS" if packet.get("generationStatus") ==
+                                 "WAITING_ANALYSIS" else "READ_AND_JUDGE", "input": packet,
+                                 "review_path": str(review_path)}
                             )
                             continue
                         receipt = b.import_and_archive(code, horizon, folder, owner, state["window"])

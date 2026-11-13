@@ -30,10 +30,11 @@ def review_calendar(data: dict, code: str, at: datetime):
 
     仅为完整披露股票均属境内、且有本基金估值条款的已核实政策增加衔接。
     再核对原文、全部证券、基准行情及项目日历摘要，不接受包内单个就绪标志。
-    港股通及人民币股票QDII仅使用境内外正常交易日完全一致的未来区间；
-    第一个休市差异、半日市或来源年度边界即停止覆盖，不推断差异日估值。
+    港股通及无明确逐工作日估值条款的人民币股票QDII只延续中外日历一致区间。
+    已核清逐境内工作日估值义务的QDII，可按其自身条款跨过境外休市日；
+    这不代表能够交易，也不代表境外休市时净值不变。
     已逐项核实的多市场上市原油产品另查自身开放日条款；仍只延续日历一致区间。
-    黄金及其他上市基金组合继续使用原路径，不从股票条款泛化其他资产。
+    境内黄金联接另查自己的工作日估值条款，不从股票条款泛化其他资产。
     """
     from app.services.fund_listed_product_contract import POLICY as multi_listed_policy
     from app.services.prediction_features import read_fund_data
@@ -43,10 +44,16 @@ def review_calendar(data: dict, code: str, at: datetime):
         "CN_NAV_DISCLOSED_DOMESTIC_ASSETS_V1",
         "CN_NAV_HK_CONNECT_WINDOW_V1",
         "QDII_CNY_VERIFIED_SESSION_V1",
+        "CN_GOLD_ETF_NAV_WINDOW_V1",
         multi_listed_policy,
     }:
         return read_fund_data(code, at)["calendar"]
-    from app.services.comprehensive_calendar import verified_domestic_window
+    from app.services.comprehensive_calendar import (
+        QDII_WORKDAY_POLICY,
+        verified_domestic_window,
+        verified_gold_valuation_days,
+        verified_qdii_workday_valuation,
+    )
     from app.services.prediction_contract import ValuationCalendar
     from app.services.trading_calendar import load_live_calendars
 
@@ -69,6 +76,8 @@ def review_calendar(data: dict, code: str, at: datetime):
         or not data.get("time_context", {}).get("baseline_complete")
         or data["window"]["calendar_version"] != calendar_hash
         or not verified(profiles[0], data, documents, data["window"])
+        or mode == "CN_GOLD_ETF_NAV_WINDOW_V1"
+        and not verified_gold_valuation_days(data, documents)
     ):
         raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "本基金实际投向或估值条款仍待核验")
     sessions, end, source_hash = (
@@ -76,10 +85,18 @@ def review_calendar(data: dict, code: str, at: datetime):
         current.definition.coverage_end,
         calendar_hash,
     )
-    if mode != "CN_NAV_DISCLOSED_DOMESTIC_ASSETS_V1":
+    calendar_id = mode
+    if (data.get("calendar_evidence") or {}).get("future_valuation_policy") == QDII_WORKDAY_POLICY:
+        if not verified_qdii_workday_valuation(data, documents):
+            raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "本基金逐境内工作日估值条款仍待核验")
+        calendar_id = QDII_WORKDAY_POLICY
+        evidence = data["calendar_evidence"]
+        own = documents[evidence["prospectus_ref"]]
+        source_hash = digest([calendar_hash, calendar_id, own["body_hash"], evidence["workday_valuation_quotes"]])
+    elif mode not in {"CN_NAV_DISCLOSED_DOMESTIC_ASSETS_V1", "CN_GOLD_ETF_NAV_WINDOW_V1"}:
         sessions, end, source_hash = _matched_future_sessions(data, documents, sessions, end, calendar_hash)
     return ValuationCalendar(
-        mode,
+        calendar_id,
         sessions,
         past.definition.coverage_start,
         end,

@@ -1,7 +1,14 @@
 """隔离验收每日检查：不能把漏跑、部分失败或持仓变化报告为成功。"""
 
+import pytest
 from app.commands.fund_daily_check import assess
 from app.services.direction_1d_protocol import digest
+
+
+@pytest.fixture(autouse=True)
+def legacy_policy_for_this_module(monkeypatch):
+    """本文件验证旧检查契约；不读取正式库当前采用状态。"""
+    monkeypatch.setattr("app.services.prediction_review_v2_publication.adoption_status", lambda: None)
 
 
 def completed():

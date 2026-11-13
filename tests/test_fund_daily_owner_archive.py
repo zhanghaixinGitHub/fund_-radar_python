@@ -6,6 +6,12 @@ import pytest
 from app.services.fund_daily_owner_archive import runtime_classpath
 
 
+@pytest.fixture(autouse=True)
+def legacy_policy_for_this_module(monkeypatch):
+    """本文件验证旧归档；不读取正式库当前采用状态。"""
+    monkeypatch.setattr("app.services.prediction_review_v2_publication.adoption_status", lambda: None)
+
+
 def test_maven_single_classpath_argfile_and_direct_ide_classpath(tmp_path):
     core = Path('C:/ideaProject/workSpace12')
     cp = r'C:\ideaProject\workSpace12\target\classes;C:\maven repository\spring.jar'

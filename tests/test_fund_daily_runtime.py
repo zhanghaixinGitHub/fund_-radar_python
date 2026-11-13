@@ -10,6 +10,12 @@ from app.services.fund_exposure_common import read
 from app.services.fund_materials_store import versioned_save
 
 
+@pytest.fixture(autouse=True)
+def legacy_policy_for_this_module(monkeypatch):
+    """本文件验证旧路径；不读取正式库当前采用状态。"""
+    monkeypatch.setattr("app.services.prediction_review_v2_publication.adoption_status", lambda: None)
+
+
 def test_one_day_clock_skew_retries_same_owner_target_once_and_retains_first(tmp_path):
     """只恢复真实的新鲜度拒绝，不调整日期、容差、账号或预测内容。"""
     import json
@@ -61,7 +67,10 @@ def test_uncertain_submission_does_not_submit_again():
 
 def test_approval_cannot_select_old_package_after_new_original_was_collected(tmp_path, monkeypatch):
     """新原件和旧包不能分走两条成功链；缺该原件即在正式用途批准前拒绝。"""
+    from app.services import fund_daily_prediction_v2 as daily_v2
     from app.services import fund_market_review
+
+    monkeypatch.setattr(daily_v2, "adoption", lambda: None)
 
     b = object.__new__(LocalDailyBackend)
     b.directory = tmp_path

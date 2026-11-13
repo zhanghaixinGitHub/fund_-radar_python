@@ -46,6 +46,10 @@ def _creation_time(connection):
 
 def create_task(codes, *, request_key=None, horizons=None, retry_items=None):
     """相同期次、策略和项目集合才能复用；冲突旧任务占用时不另起执行者。"""
+    from app.services.prediction_review_v2_requests import enabled_v2, request_batch
+
+    if enabled_v2():
+        return request_batch(codes, request_key=request_key, horizons=horizons, retry_items=retry_items)
     codes = sorted(set(codes))
     policy = prediction_policy()
     allowed = {h["horizon_id"] for h in policy["horizons"]}
@@ -202,6 +206,11 @@ def _dispatch_task(task_id):
 
 
 def task_status(task_id):
+    from app.services.prediction_review_v2_requests import find_task
+
+    second_edition = find_task(task_id)
+    if second_edition is not None:
+        return second_edition
     with get_engine().connect() as c:
         task = one(c, "SELECT * FROM prediction_generation_task WHERE task_id=:id", id=task_id)
         if not task:
@@ -523,6 +532,15 @@ def recover_tasks():
 
 
 def retry_failed(task_id):
+    from app.services.prediction_review_v2_requests import find_task, request_batch
+
+    second_edition = find_task(task_id)
+    if second_edition is not None:
+        return request_batch(
+            [i["fundCode"] for i in second_edition["items"]],
+            horizons={i["horizonId"] for i in second_edition["items"]},
+            request_key=str(uuid4()),
+        )
     previous = task_status(task_id)
     failed = {(i["fundCode"], i["horizonId"]) for i in previous["items"] if i["status"] == "FAILED"}
     with get_engine().connect() as c:

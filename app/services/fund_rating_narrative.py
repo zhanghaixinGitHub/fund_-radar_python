@@ -3,7 +3,7 @@
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation
 
-REVISION = "RATING_NARRATIVE_20261111_2"
+REVISION = "RATING_NARRATIVE_20261112_1"
 PROFILES = {
     "INDEX": ("指数基金", "跟踪表现", "指数匹配不等于行业风险分散。"),
     "ACTIVE_EQUITY": ("主动权益基金", "合同仓位与策略执行", "集中度不直接代表选股能力或未来收益。"),
@@ -41,6 +41,8 @@ def _assessment(conclusion, paragraphs=(), limitations=()):
 
 def render(item: dict, facts: dict, family: str) -> dict:
     """输入只含同批事实；保留原有分数、范围、状态和等级。"""
+    from app.services.fund_rating_narrative_methods import tidy
+
     output = deepcopy(item)
     profile = PROFILES.get(family, ("本类型基金", "本基金合同目标", "仅依据本基金已披露的适用资料评价。"))
     passive = family == "INDEX"
@@ -61,7 +63,7 @@ def render(item: dict, facts: dict, family: str) -> dict:
     reference = reference if reference is not None and reference >= -1 else None
     if fund is not None:
         metric("return", "近一年总回报", f"{fund * 100:.2f}", "%", period)
-        paragraphs = [f"考察期内本份额总回报为{pct(fund)}。"]
+        paragraphs = [] if period else [f"考察期内本份额总回报为{pct(fund)}。"]
         if reference is not None:
             gap = (fund - reference) * 100
             position = "领先" if gap > 0 else "落后" if gap < 0 else "持平"
@@ -81,12 +83,9 @@ def render(item: dict, facts: dict, family: str) -> dict:
             else:
                 conclusion = f"期间收益持平，{relative}。"
             conclusion = conclusion.replace("基准", comparison_word)
-            paragraphs = [
-                f"基金总回报{pct(fund)}，{reference_label}{pct(reference)}，"
-                + (f"{position}{abs(gap):.2f}个百分点。" if gap else "两者期间回报相同。")
-            ]
+            paragraphs = []
             metric("return", f"{reference_label}回报", f"{reference * 100:.2f}", "%", period)
-            metric("return", "相对基准收益差", f"{gap:.2f}", "个百分点", period)
+            metric("return", f"相对{comparison_word}收益差", f"{gap:+.2f}" if gap > 0 else f"{gap:.2f}", "个百分点", period)
         else:
             conclusion = (
                 "考察期取得正收益。" if fund > 0 else "考察期实际收益为负。" if fund < 0 else "考察期收益持平。"
@@ -102,7 +101,7 @@ def render(item: dict, facts: dict, family: str) -> dict:
 
     drawdown = number(performance.get("drawdown"))
     if drawdown is not None and 0 <= drawdown <= 1:
-        paragraphs = [f"最大回撤为{pct(drawdown)}，指净值从一个高点到随后低点的最大跌幅。"]
+        paragraphs = ["最大回撤指净值从一个高点到随后低点的最大跌幅。"]
         reference_dd = number(performance.get("reference_drawdown"))
         if reference_dd is not None and 0 <= reference_dd <= 1:
             difference = (reference_dd - drawdown) * 100
@@ -110,17 +109,17 @@ def render(item: dict, facts: dict, family: str) -> dict:
                 f"小{difference:.2f}" if difference > 0 else f"大{abs(difference):.2f}" if difference < 0 else "相同"
             )
             paragraphs.append(
-                f"同期基准最大回撤{pct(reference_dd)}，基金的最大跌幅"
+                "基金的最大跌幅"
                 + (f"比基准{relation}个百分点。" if difference else "与基准相同。")
             )
             metric("risk", "同期基准最大回撤", f"{reference_dd * 100:.2f}", "%", period)
         if performance.get("drawdown_peak") and performance.get("drawdown_trough"):
             paragraphs.append(
                 f"本次最大回撤对应{performance['drawdown_peak']}至{performance['drawdown_trough']}。"
-                f"高点一万元折算到低点约{10000 * (1 - drawdown):.0f}元。"
             )
+            paragraphs.append(f"高点一万元折算到低点约{10000 * (1 - drawdown):.0f}元。")
         assessments["risk"] = _assessment(
-            f"期间最大跌幅{pct(drawdown)}，风险分不代表未来损失上限。",
+            "本项记录考察期内从高点到低点的跌幅，不能代表未来损失上限。",
             paragraphs,
             [
                 "本项未提供同类回撤排名，不能据此声称同类更抗跌。",
@@ -133,10 +132,10 @@ def render(item: dict, facts: dict, family: str) -> dict:
     error = number(performance.get("tracking_error"))
     if passive and error is not None and error >= 0:
         paragraphs = [
-            f"年化跟踪误差约{pct(error)}。跟踪误差衡量基金每日涨跌与基准差异的波动程度，通常越小说明跟踪越稳定。"
+            "跟踪误差衡量基金每日涨跌与基准差异的波动程度，通常越小说明跟踪越稳定。"
         ]
         limit = number(execution.get("tracking_error_limit"))
-        if limit is not None:
+        if limit is not None and not execution.get("contract_date"):
             paragraphs.append(f"所引合同的年跟踪误差目标为{pct(limit)}以内。")
         transition = execution.get("transition_date")
         post = number(execution.get("post_transition_tracking_error"))
@@ -175,7 +174,6 @@ def render(item: dict, facts: dict, family: str) -> dict:
         ):
             ratio = number(execution.get(field))
             if ratio is not None:
-                paragraphs.append(f"截至{report_date}，{label}{pct(ratio)}。")
                 metric("efficiency", label, f"{ratio * 100:.2f}", "%", report_date)
         low, high, cash_min = (number(execution.get(k)) for k in ("stock_min", "stock_max", "cash_min"))
         if low is not None and high is not None:
@@ -197,7 +195,7 @@ def render(item: dict, facts: dict, family: str) -> dict:
         and months > 0
     ):
         assessments["stability"] = _assessment(
-            f"{months}个完整月中有{wins}个月达到或超过{comparison_word}。",
+            f"本项看相对{comparison_word}的表现能否在不同月份持续出现。",
             [
                 f"达标月份占比{Decimal(wins) / months * 100:.2f}%，另外{months - wins}个月落后{comparison_word}。"
                 "这反映相对表现是否持续出现，不能由全年领先推断每个月都占优。"
@@ -211,7 +209,7 @@ def render(item: dict, facts: dict, family: str) -> dict:
         assessments["management"] = _assessment(
             management.get("conclusion", "已有本基金实际任职与公开履职依据。"),
             management["paragraphs"],
-            ["这些分项反映当前规则的证据档位，不能直接解释成经理投资能力等级。公开披露与托管复核的范围限于所引期间。"],
+            ["本项基于任职、责任接续和公开治理资料，不能直接等同于投资能力；公开披露及托管核查只覆盖所引期间。"],
         )
 
     holdings = facts.get("holdings", {})
@@ -220,7 +218,6 @@ def render(item: dict, facts: dict, family: str) -> dict:
         paragraphs = [f"截至{report_date}，已核主要{total}只股票中有{matched}只是目标指数成分。"]
         fraction = number(holdings.get("target_etf_nav_fraction"))
         if fraction is not None and 0 <= fraction <= 1:
-            paragraphs.insert(0, f"目标ETF占本基金净资产约{pct(fraction)}。")
             metric("holdings", "目标ETF占净资产", f"{fraction * 100:.2f}", "%", report_date)
         assessments["holdings"] = _assessment(
             "已核主要持仓与指数匹配，投资方向本身的风险仍然存在。"
@@ -241,7 +238,7 @@ def render(item: dict, facts: dict, family: str) -> dict:
         ratio = number(holdings["major_holdings_nav_fraction"])
         if 0 <= ratio <= 1 and family in {"ACTIVE_EQUITY", "QDII_EQUITY"}:
             assessments["holdings"] = _assessment(
-                f"已披露前十大股票占净资产{pct(ratio)}。",
+                "本项看前十大股票占基金净资产的比重。",
                 ["这一比例反映主要持仓的集中程度，集中持仓会使少数股票对基金表现的影响更大。"],
                 [profile[2]],
             )
@@ -253,15 +250,13 @@ def render(item: dict, facts: dict, family: str) -> dict:
         paragraphs = []
         net_assets = number(liquidity.get("total_net_assets"))
         if net_assets is not None and net_assets >= 0:
-            paragraphs.append(
-                f"截至{report_date}，基金全部份额合计净资产约"
-                f"{net_assets / Decimal(100000000):.2f}亿元，不是仅本份额规模。"
-            )
+            metric("liquidity", "基金各类份额合计净资产", f"{net_assets / Decimal(100000000):.2f}", "亿元", report_date)
+            paragraphs.append("基金规模是各类份额合计净资产，不是仅当前份额的资产。")
         redeemed = number(liquidity.get("reported_redemption_shares"))
         if redeemed is not None and redeemed >= 0:
             paragraphs.append(
-                f"所引报告期本{facts.get('share_class', '')}类份额累计赎回约"
-                f"{redeemed / Decimal(100000000):.2f}亿份；这是期间累计，不是单日集中赎回。"
+                f"上面的赎回量是本{facts.get('share_class', '')}类在报告期内的累计份额，"
+                "不是现金金额或单日赎回量，也不表示每笔申请当天到账。"
             )
         paragraphs.append(
             "已核资料包含实际申赎及托管复核。"
@@ -288,8 +283,7 @@ def render(item: dict, facts: dict, family: str) -> dict:
     if amount is not None and amount >= 0:
         fee_date = facts.get("fee_date", "")
         paragraphs = [
-            f"按本份额一万元持有一年的既有费用情景，估算成本约{amount:.0f}元。"
-            "这是统一情景的金额，实际费用随资产价值、持有条件及实际发生额变化。"
+            "上面的金额按本份额一万元持有一年估算；实际费用随资产价值、持有条件及实际发生额变化。"
         ]
         rate = number(cost.get("annual_total_rate"))
         if rate is not None:
@@ -320,6 +314,8 @@ def render(item: dict, facts: dict, family: str) -> dict:
                 ["现有范围或资料不能替代完整确定评分。"],
             )
             assessment = dimension["assessment"]
+            assessment = tidy(assessment)
+            dimension["assessment"] = assessment
             dimension["explanation"] = " ".join(
                 [assessment["conclusion"], *assessment["paragraphs"], *assessment["limitations"]]
             )
@@ -337,6 +333,15 @@ def render(item: dict, facts: dict, family: str) -> dict:
             dimension["sources"] = facts["sources"][key]
         # 旧客户端仍读取explanation，保持同样的事实和边界。
         assessment = dimension["assessment"]
+        purpose = facts.get("dimension_purposes", {}).get(key)
+        if purpose and assessment["conclusion"] and (
+            assessment["conclusion"].startswith(("原", "既有")) or any(
+                text.startswith(assessment["conclusion"].rstrip("。")) for text in assessment["paragraphs"]
+            )
+        ):
+            assessment = {**assessment, "conclusion": purpose}
+        assessment = tidy(assessment, facts.get("score_methods", {}).get(key))
+        dimension["assessment"] = assessment
         dimension["explanation"] = " ".join(
             [assessment["conclusion"], *assessment["paragraphs"], *assessment["limitations"]]
         )

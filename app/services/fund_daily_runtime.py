@@ -307,6 +307,14 @@ class LocalDailyBackend:
         return result
 
     def recover_materials(self, code, output, current_window):
+        from app.services import fund_daily_prediction_v2 as v2
+
+        if v2.adoption() is not None:
+            handoff = registered_materials(code, at=now())
+            return {"status": "V2_MATERIAL_REVIEW_REQUIRED" if handoff else "WAITING_MATERIALS",
+                    "analysis_version": "COMPREHENSIVE_REVIEW_V2",
+                    "next_action": "按本期第二版规则审阅真实资料，完成 prepare/evaluate 后发布。"}
+
         from app.services.fund_prediction_recovery import recover
 
         # 同一输入版本已复核且守卫无资料行动时，无须重复采集或改写批准时间。
@@ -321,6 +329,11 @@ class LocalDailyBackend:
         return recover(code, output, current_window, collector=self.collector)
 
     def approve(self, code, review):
+        from app.services import fund_daily_prediction_v2 as v2
+
+        if v2.adoption() is not None:
+            raise ValueError("V2_STRICT_REVIEWED_TRIAL_REFERENCE_REQUIRED")
+
         from app.services.fund_market_review import approve_comprehensive, record_prediction_event_review
         from app.services.fund_news_identity import record_applicability_review
 
@@ -375,6 +388,24 @@ class LocalDailyBackend:
         return {"fund_code": code, "notice_reviews_applied": len(identities)}
 
     def periods(self, code, current_window):
+        from app.services import fund_daily_prediction_v2 as v2
+
+        if v2.adoption() is not None:
+            from app.services.fund_prediction_snapshot_compat import materials_input_identity
+
+            handoff = registered_materials(code, at=now())
+            material = read(Path(handoff["materials_path"])) if handoff else None
+            if not hasattr(self, "materials_input_hashes"):
+                self.materials_input_hashes = {}
+            identity = materials_input_identity(material) if material else None
+            self.materials_input_hashes[code] = identity
+            # 这里只允许进入审阅队列；旧版缺口清单不代替第二版逐周期判断。
+            ready = bool(handoff)
+            checked = v2.verify_outputs(code, current_window, self.records,
+                                        materials_input_hash=identity, materials_ready=ready)
+            return [{**row, "status": "READY" if row["status"] == "ACTION_REQUIRED" and ready
+                     else row["status"]} for row in checked["horizons"]]
+
         from app.commands.fund_prediction_followthrough import horizon_dates
         from app.services.fund_information_snapshot import prepare
         from app.services.fund_materials import snapshot
@@ -433,6 +464,14 @@ class LocalDailyBackend:
         ]
 
     def read_back(self, code, horizon, current_window):
+        from app.services import fund_daily_prediction_v2 as v2
+
+        if v2.adoption() is not None:
+            result = v2.verify_outputs(code, current_window, self.records,
+                                      materials_input_hash=self.materials_input_hashes.get(code))
+            return any(row["horizon"] == horizon and row["status"] in
+                       {"SAVED_AND_READ_BACK", "CONDITIONAL_SAVED", "REVIEWED_ABSTAIN"}
+                       for row in result["horizons"])
 
         records = self.records
         expected = getattr(self, "period_dates", {}).get(code, {}).get(horizon) or {}
@@ -449,6 +488,14 @@ class LocalDailyBackend:
         )
 
     def freeze(self, code, horizon, folder):
+        from app.services import fund_daily_prediction_v2 as v2
+
+        if v2.adoption() is not None:
+            handoff = registered_materials(code, at=now())
+            if not handoff:
+                raise ValueError("V2_CURRENT_MATERIALS_REQUIRED")
+            return v2.freeze_request(folder, self.owner, code, horizon, self.window, handoff)
+
         from app.services import comprehensive_multi_prediction as multi
         from app.services.fund_codex_analysis import freeze_packet
 
@@ -478,6 +525,17 @@ class LocalDailyBackend:
 
     def import_and_archive(self, code, horizon, folder, owner, current_window):
         from app.commands.fund_prediction_followthrough import owner_scope
+        from app.services import fund_daily_prediction_v2 as v2
+
+        if v2.adoption() is not None:
+            if code not in owner_scope(self.settings, owner):
+                raise ValueError("OWNER_REMOVED_BEFORE_SAVE")
+            receipt = v2.import_reviewed_trial(folder, owner, code, horizon, current_window,
+                                              self.materials_input_hashes.get(code))
+            self.records = [r for r in self.records if r["fund_code"] != code] + v2.saved_records(
+                owner, [code], current_window["target_nav_date"])
+            return receipt
+
         from app.services import comprehensive_multi_prediction as multi
         from app.services.fund_codex_analysis import import_review
         from app.services.fund_daily_owner_archive import archive_multi
