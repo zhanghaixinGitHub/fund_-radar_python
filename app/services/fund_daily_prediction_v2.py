@@ -6,6 +6,7 @@ from app.services.direction_1d_protocol import digest
 from app.services.direction_1d_protocol import window as planning_window
 from app.services.fund_exposure_common import now, read
 from app.services.fund_materials_store import versioned_save
+from app.services.prediction_daily_guidance import review_guidance
 from app.services.prediction_review_v2 import policy_v2
 
 
@@ -183,6 +184,11 @@ def freeze_request(folder, owner, code, horizon, window, handoff):
     if current["policyHash"] != identity["policy_hash"]:
         raise ValueError("V2_DAILY_RULES_DIFFER_FROM_ADOPTED_POLICY")
     folder = Path(folder) / "v2" / digest(identity)
+    # 指引单独留版本，不改变旧请求身份、已审阅原文或正式政策摘要。
+    guidance = review_guidance()
+    guidance_path = folder / ("review-guidance-" + digest(guidance) + ".json")
+    if not guidance_path.exists():
+        versioned_save(guidance_path, guidance)
     path = folder / "analysis-request.json"
     if not path.exists():
         request = {
@@ -193,6 +199,8 @@ def freeze_request(folder, owner, code, horizon, window, handoff):
             "materials_path": handoff["materials_path"],
             "period_rule": rules["horizons"][horizon],
             "legacy_material_gaps": handoff.get("gaps", []),
+            "review_guidance": guidance,
+            "review_guidance_hash": digest(guidance),
             "instructions": "阅读本期原文，按本周期规则比较主次。完成严格 prepare/evaluate 后，"
             "在 reviewed-trial-ref.json 填 trial_directory；不能复制旧方向或使用旧 V1 审阅回执。",
         }
@@ -214,6 +222,8 @@ def freeze_request(folder, owner, code, horizon, window, handoff):
         "input_hash": digest(request),
         "generationStatus": "WAITING_ANALYSIS",
         "review_path": str(folder / "reviewed-trial-ref.json"),
+        "review_guidance_path": str(guidance_path),
+        "review_guidance_hash": digest(guidance),
         "task": task,
     }
 

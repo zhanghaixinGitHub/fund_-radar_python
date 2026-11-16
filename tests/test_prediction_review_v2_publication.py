@@ -4,7 +4,7 @@ import importlib.util
 import json
 import sys
 from copy import deepcopy
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -206,6 +206,59 @@ def release_db(monkeypatch):
         engine.dispose()
         with original.begin() as connection:
             connection.execute(text(f"DROP SCHEMA {schema} CASCADE"))
+
+
+def test_history_keeps_dates_revisions_and_cursor_ties_without_private_archive(release_db):
+    from uuid import UUID
+
+    at = datetime(2026, 11, 16, tzinfo=UTC)
+    with release_db.begin() as connection:
+        for number, code, start in [
+            (1, "016008", "2026-11-16"),
+            (2, "016008", "2026-11-16"),
+            (3, "016008", "2026-11-13"),
+            (4, "001632", "2026-11-16"),
+        ]:
+            view = {
+                "fundCode": code,
+                "periods": [
+                    {
+                        "horizonId": "T1",
+                        "startDate": start,
+                        "endDate": start,
+                        "kind": "DATED_ANALYSIS",
+                        "limitations": [],
+                    }
+                ],
+            }
+            connection.execute(
+                text("""INSERT INTO prediction_review_v2_release
+                (release_id,version,policy_hash,content_hash,adopted_at,archive,views)
+                VALUES (:id,'test',:hash,:hash,:at,CAST(:archive AS jsonb),CAST(:views AS jsonb))"""),
+                {
+                    "id": UUID(int=number),
+                    "hash": str(number).zfill(64),
+                    "at": at,
+                    "archive": json.dumps({"cases": [{"private": "must not escape"}]}),
+                    "views": json.dumps({code: view}),
+                },
+            )
+    page = service.review_history("016008", limit=1)
+    assert page["items"][0]["releaseId"] == str(UUID(int=2))
+    seen = []
+    while page["items"]:
+        seen.extend(page["items"])
+        if not page["nextCursor"]:
+            break
+        cursor = page["nextCursor"]
+        page = service.review_history(
+            "016008", before=datetime.fromisoformat(cursor["before"]), before_id=cursor["beforeId"], limit=1
+        )
+    assert [v["releaseId"] for v in seen] == [str(UUID(int=n)) for n in (2, 1, 3)]
+    assert [v["periods"][0]["startDate"] for v in seen] == ["2026-11-16", "2026-11-16", "2026-11-13"]
+    assert all("archive" not in v and v["fundCode"] == "016008" for v in seen)
+    with pytest.raises(ValueError):
+        service.review_history("016008", before=at)
 
 
 def test_append_only_idempotence_and_per_fund_latest_keeps_other_funds(strict_trial, release_db):

@@ -433,6 +433,47 @@ def read_review(fund_code):
     return current_review(fund_code)
 
 
+def review_history(fund_code, *, before=None, before_id=None, limit=30):
+    """按采用时刻和编号翻页，保留每天及同日修订；只读正式档案的公开视图。"""
+    from uuid import UUID
+
+    if not re.fullmatch(r"[0-9]{6}", fund_code) or not 1 <= limit <= 100:
+        raise ValueError("V2_HISTORY_ARGUMENT_INVALID")
+    if (before is None) != (before_id is None):
+        raise ValueError("V2_HISTORY_CURSOR_INVALID")
+    params = {"code": fund_code, "limit": limit + 1}
+    cursor = ""
+    if before is not None:
+        params.update(before=_stamp(before.isoformat()), id=UUID(str(before_id)))
+        cursor = """ AND (views->:code->'periods'->0->>'startDate',adopted_at,release_id) <
+          ((SELECT views->:code->'periods'->0->>'startDate' FROM prediction_review_v2_release
+            WHERE release_id=:id AND adopted_at=:before AND views ? :code),:before,:id)"""
+    with get_engine().connect() as connection:
+        if connection.scalar(text("SELECT to_regclass('prediction_review_v2_release')")) is None:
+            return {"items": [], "nextCursor": None}
+        rows = (
+            connection.execute(
+                text(
+                    "SELECT release_id,adopted_at,views FROM prediction_review_v2_release "
+                    "WHERE views ? :code" + cursor + " ORDER BY views->:code->'periods'->0->>'startDate' DESC,"
+                    "adopted_at DESC,release_id DESC LIMIT :limit"
+                ),
+                params,
+            )
+            .mappings()
+            .all()
+        )
+    items = [
+        dict(public_view(row["views"][fund_code], row["adopted_at"]), releaseId=str(row["release_id"]))
+        for row in rows[:limit]
+    ]
+    last = rows[limit - 1] if len(rows) > limit else None
+    return {
+        "items": items,
+        "nextCursor": {"before": last["adopted_at"].isoformat(), "beforeId": str(last["release_id"])} if last else None,
+    }
+
+
 def prepare_trial_release(directory: Path, *, holdings=None, clock=None):
     """任意当前持仓的严格第二版审阅结果，重新验收后封包；不重新生成观点。"""
     from app.services.fund_prediction_snapshot_compat import materials_input_identity

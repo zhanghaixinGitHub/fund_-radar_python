@@ -71,6 +71,9 @@ def test_freeze_selection_can_directly_prepare_without_v1_review(tmp_path, isola
     result = command.freeze_sources(tmp_path / "sources", holdings_provider=lambda: inventory, clock=AT)
     selection = json.loads(Path(result["selection_path"]).read_text(encoding="utf-8"))
     assert result["directions_generated"] == 0
+    guidance = read(Path(result["review_guidance_path"]))
+    assert result["review_guidance_hash"] == digest(guidance)
+    assert guidance["changes_strict_validation"] is False
     assert result["source_ready_count"] == 1
     assert selection[0]["source_kind"] == "FROZEN"
     source = read(Path(selection[0]["source_path"]))

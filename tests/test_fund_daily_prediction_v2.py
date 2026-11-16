@@ -126,9 +126,18 @@ def test_freeze_request_is_idempotent_and_keeps_cycle_rules(tmp_path, monkeypatc
     assert request["format"] == "FUND_PREDICTION_V2_DAILY_ANALYSIS_REQUEST"
     assert request["legacy_material_gaps"] == handoff["gaps"]
     assert "decision" not in request
+    assert request["review_guidance"]["automatic_decision"] is False
+    assert request["review_guidance_hash"] == digest(read(Path(first["review_guidance_path"])))
+    assert request["review_guidance_hash"] == again["review_guidance_hash"]
+    # 已有请求的身份及实际请求时刻保持不变，续办仍可获取独立指引。
+    legacy = {k: v for k, v in request.items() if k not in {"review_guidance", "review_guidance_hash"}}
+    versioned_save(Path(first["path"]), legacy)
+    resumed = v2.freeze_request(tmp_path, "owner", "002112", "T1", WINDOW, handoff)
+    assert read(Path(resumed["path"])) == legacy
+    assert read(Path(resumed["review_guidance_path"])) == request["review_guidance"]
     from app.services.fund_prediction_snapshot_compat import materials_input_identity
 
-    assert calls == [(["002112"], {"horizons": ["T1"], "materials_input_hash": materials_input_identity(material)})] * 2
+    assert calls == [(["002112"], {"horizons": ["T1"], "materials_input_hash": materials_input_identity(material)})] * 3
 
 
 def test_import_ref_wrong_window_rejected_before_publication(tmp_path, monkeypatch):

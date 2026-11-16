@@ -12,6 +12,7 @@ from app.services.fund_information_snapshot import prepare
 from app.services.fund_prediction_snapshot_compat import materials_input_identity
 from app.services.fund_workflow_materials import registered_materials
 from app.services.prediction_contract import PredictionFailure, add_months, prediction_policy, target_dates
+from app.services.prediction_daily_guidance import review_guidance
 from app.services.prediction_review_v2 import policy_v2
 from app.services.prediction_trial_v2 import current_holdings, local_path, save_once, storage_check
 from app.services.prediction_v2_baseline import baseline_ready
@@ -201,6 +202,9 @@ def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_pr
         "production_publication": False,
         "directions_generated": 0,
     }
+    guidance = review_guidance()
+    save_once(directory / "review-guidance.json", guidance)
+    result.update(review_guidance_path=str(directory / "review-guidance.json"), review_guidance_hash=digest(guidance))
     save_once(directory / "freeze-summary.json", result)
     return result
 
