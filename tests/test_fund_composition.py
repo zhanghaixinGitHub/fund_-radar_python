@@ -134,6 +134,10 @@ def test_internal_composition_api_requires_token_and_validates_codes(monkeypatch
     client = TestClient(app)
     assert client.get("/composition?fundCodes=000001").status_code == 403
     app.dependency_overrides[require_service_token] = lambda: None
-    monkeypatch.setattr(fund_composition, "batch", lambda codes: {"version": 1, "funds": codes, "themeDefinitions": []})
+    from app.services import fund_composition_cache
+
+    monkeypatch.setattr(
+        fund_composition_cache, "batch", lambda codes: {"version": 1, "funds": codes, "themeDefinitions": []}
+    )
     assert client.get("/composition?fundCodes=000001,000002").status_code == 200
     assert client.get("/composition?fundCodes=../000001").status_code == 422

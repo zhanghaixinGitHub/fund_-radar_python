@@ -11,6 +11,15 @@ from app.services.fund_materials import snapshot
 PROJECT = Path(__file__).resolve().parents[2]
 
 
+def _snapshot(code):
+    from app.services.fund_composition_cache import active, observe, read
+
+    if not active():
+        return snapshot(code)
+    observe(Path(get_settings().fund_material_directory) / f"{code}.json")
+    return snapshot(code, reader=read)
+
+
 def _latest(reports: list[dict], field: str) -> dict | None:
     rows = [r for r in reports if r.get(field)]
     return max(rows, key=lambda r: (r["endDate"], r["publishedDate"]), default=None)
@@ -130,11 +139,13 @@ def _normalized_name(value: str) -> str:
 def _chain(code: str) -> tuple[list[dict], str | None]:
     """只读已核验工作流身份，不在页面请求中补采集或重新解析原件。"""
     try:
-        from app.services.fund_exposure_common import read
+        from app.services.fund_composition_cache import read
         from app.services.fund_workflow_materials import registered_materials
 
         root = Path(get_settings().fund_insight_directory) / "market-workflow"
-        parent = registered_materials(code, root=root)
+        parent = registered_materials(code, root=root, reader=read)
+        if parent is None:
+            raise ValueError("COMPOSITION_HANDOFF_MISSING")
         material = read(Path(parent["materials_path"]))
         chain = material.get("exposure_chain") or [code]
         if chain[0] != code or len(chain) > 8 or len(chain) != len(set(chain)):
@@ -144,7 +155,7 @@ def _chain(code: str) -> tuple[list[dict], str | None]:
             if target == code:
                 rows.append({"fundCode": code, "fundName": material.get("fund_name")})
                 continue
-            target_data = snapshot(target)
+            target_data = _snapshot(target)
             target_report = _latest((target_data or {}).get("reports", []), "holdings")
             target_name = (
                 re.split(r"20\d{2}\s*年", target_report["title"])[0].strip()
@@ -184,7 +195,7 @@ def _themes(code: str, data: dict | None, chain: list[dict]) -> dict | None:
     sources = [_source(parent, code, chain[0].get("fundName"))]
     used_target = False
     for target in chain[1:]:
-        target_data = snapshot(target["fundCode"])
+        target_data = _snapshot(target["fundCode"])
         target_report = _latest((target_data or {}).get("reports", []), "holdings")
         target_name = target.get("fundName")
         if target_data is None or target_report is None or not target_name:
@@ -239,7 +250,7 @@ def batch(codes: list[str]) -> dict:
     for code in codes:
         if not re.fullmatch(r"\d{6}", code):
             raise ValueError("INVALID_FUND_CODE")
-        data = snapshot(code)
+        data = _snapshot(code)
         chain, warning = _chain(code)
         funds.append(
             {

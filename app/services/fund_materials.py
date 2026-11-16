@@ -15,10 +15,12 @@ def _snapshot(path: str, modified_ns: int | str) -> dict:
     return read(Path(path))
 
 
-def snapshot(code: str) -> dict | None:
+def snapshot(code: str, *, reader=None) -> dict | None:
     if not re.fullmatch(r"\d{6}", code):
         raise ValueError("INVALID_FUND_CODE")
     p = Path(get_settings().fund_material_directory) / f"{code}.json"
+    if reader is not None:
+        return reader(p) if location_exists(p) else None
     from app.services.material_content import managed, repository
 
     if managed(p):

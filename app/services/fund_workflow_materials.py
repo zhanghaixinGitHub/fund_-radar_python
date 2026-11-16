@@ -21,15 +21,16 @@ def receipt_path(code: str, root=None) -> Path:
     return workflow_root(root) / "comprehensive-inputs" / (code + ".json")
 
 
-def registered_materials(code: str, *, root=None, at=None):
+def registered_materials(code: str, *, root=None, at=None, reader=None):
     """只复用当前来源版本的交接；路径、正文、基金身份或取得时间变化都重新审阅。"""
     path = receipt_path(code, root)
     if not location_exists(path):
         return None
-    receipt = read(path)
-    material = read(workflow_root(root) / "materials" / (code + ".json"))
+    load = reader or read
+    receipt = load(path)
+    material = load(workflow_root(root) / "materials" / (code + ".json"))
     candidate = Path(receipt["materials_path"])
-    payload = read(candidate)
+    payload = load(candidate)
     reviewed = datetime.fromisoformat(receipt["checked_at"])
     if (
         receipt.get("fund_code") != code
