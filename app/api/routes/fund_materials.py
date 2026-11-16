@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.dependencies import require_service_token
-from app.services import fund_evaluation_status, fund_materials, fund_news_sync, fund_risk_summary
+from app.services import fund_composition, fund_evaluation_status, fund_materials, fund_news_sync, fund_risk_summary
 from app.services.fund_catalog_read import get_fund
 
 router = APIRouter(dependencies=[Depends(require_service_token)])
@@ -33,6 +33,19 @@ def get_evaluation_status(
         return fund_evaluation_status.batch(fund_codes.split(","))
     except (ValueError, OSError, KeyError, SQLAlchemyError) as exc:
         raise HTTPException(503, "历史评价资料暂时无法读取，请稍后重试。") from exc
+
+
+@router.get("/composition")
+def get_composition(
+    fund_codes: Annotated[str, Query(alias="fundCodes", pattern=r"^\d{6}(,\d{6}){0,99}$")],
+):
+    """批量返回公共报告和主题依据；不接收账户、金额或用户身份。"""
+    try:
+        return fund_composition.batch(fund_codes.split(","))
+    except ValueError as exc:
+        raise HTTPException(422, "基金构成资料参数不正确。") from exc
+    except (OSError, KeyError, SQLAlchemyError) as exc:
+        raise HTTPException(503, "基金构成资料暂时无法读取，请稍后重试。") from exc
 
 
 @router.get("/{fund_code}/risk-summary")

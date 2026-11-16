@@ -7,6 +7,31 @@ from app.services.fund_rating_direct_index import Originals
 from app.services.fund_rating_market_review import normalized_text
 
 
+def appointment_verified(pages, person, begin):
+    """兼容人员表把任职年月日拆到相邻两行的版式；仍核原件实际日期。
+
+    只接受姓名开头的人员行、任职年份后紧接离任/从业栏，以及下一正文行
+    的月日。不能在任意履历段落中拼日期，也不能跨人员或跨页寻找月日。
+    """
+    pattern = rf"{begin.year}(?:年|-0?){begin.month}(?:月|-0?){begin.day}日?"
+    for page in pages:
+        if re.search(re.escape(person) + r".{0,220}" + pattern, normalized_text(page)):
+            return True
+        lines = [line.strip() for line in page.splitlines() if line.strip()]
+        for line, following in zip(lines, lines[1:], strict=False):
+            if not re.match(re.escape(person) + r"\s", line):
+                continue
+            if not re.search(rf"\b{begin.year}-\s+(?:-|\d+年)(?:\s|$)", line):
+                continue
+            month_day = rf"(?<!\d)0?{begin.month}-0?{begin.day}(?!\d)"
+            if re.search(month_day + r"\s+-", following) or (
+                re.search(rf"\b{begin.year}-\s+-\s", line)
+                and re.search(month_day + r"(?=\s{2,}|$)", following)
+            ):
+                return True
+    return False
+
+
 def verify_management_anchor(inputs, root, report_hash):
     anchor = inputs.get("management_primary_report_hash", report_hash)
     if anchor == report_hash:
@@ -36,7 +61,15 @@ def verify_management_anchor(inputs, root, report_hash):
     known_full = []
     for sha, ref in inputs["sources"].items():
         if ref["kind"] != "pdf":
-            continue
+            if ref["kind"] != "json":
+                continue
+            # 已有完整发行人公告也可能以JSON封存正文。净值/目录JSON不能
+            # 充当报告，必须实际含完整notice_content后再核正文身份和日期。
+            original = source.json(sha)
+            data = original.get("data") if isinstance(original, dict) else None
+            content = data.get("notice_content") if isinstance(data, dict) else None
+            if not isinstance(content, str) or len(content) < 15000:
+                continue
         pages = source.pages(sha)
         head = normalized_text("\n".join(pages))
         if legal in head[:400] and code in head[:16000] and re.search("中期报告|年度报告", head[:400]):
@@ -60,9 +93,8 @@ def verify_management_anchor(inputs, root, report_hash):
     for row in active:
         person = row["name"]
         begin = date.fromisoformat(row["start"])
-        date_pattern = rf"{begin.year}(?:年|-0?){begin.month}(?:月|-0?){begin.day}日?"
-        for body in [primary, complete]:
-            if re.search(re.escape(person) + r".{0,220}" + date_pattern, body) is None:
+        for source_hash in [report_hash, anchor]:
+            if not appointment_verified(source.pages(source_hash), person, begin):
                 raise ValueError("MANAGEMENT_ANCHOR_PERSON_APPOINTMENT_MISMATCH")
         if not any(
             claim["source_hash"] == report_hash

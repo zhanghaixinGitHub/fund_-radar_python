@@ -126,7 +126,9 @@ def test_freeze_request_is_idempotent_and_keeps_cycle_rules(tmp_path, monkeypatc
     assert request["format"] == "FUND_PREDICTION_V2_DAILY_ANALYSIS_REQUEST"
     assert request["legacy_material_gaps"] == handoff["gaps"]
     assert "decision" not in request
-    assert calls == [(["002112"], {"horizons": ["T1"]})] * 2
+    from app.services.fund_prediction_snapshot_compat import materials_input_identity
+
+    assert calls == [(["002112"], {"horizons": ["T1"], "materials_input_hash": materials_input_identity(material)})] * 2
 
 
 def test_import_ref_wrong_window_rejected_before_publication(tmp_path, monkeypatch):
@@ -152,12 +154,14 @@ def test_import_ref_wrong_window_rejected_before_publication(tmp_path, monkeypat
 
 def test_report_does_not_count_conditional_as_all_predictions_generated(tmp_path, monkeypatch):
     from app.services import fund_workflow_materials as workflow
+    from app.services import prediction_review_watch as watch
     from app.services.fund_prediction_snapshot_compat import materials_input_identity
 
     material = {"fund_code": "002112"}
     source = tmp_path / "material.json"
     versioned_save(source, material)
     monkeypatch.setattr(workflow, "registered_materials", lambda *a, **k: {"materials_path": str(source)})
+    monkeypatch.setattr(watch, "watch_report", lambda *a, **k: {"reassessment_pending_count": 0, "failure_count": 0})
     rows = [record(h, materials_input_hash=materials_input_identity(material)) for h in ("T1", "T5_V1", "T20_V1")]
     rows.append(
         record(
@@ -175,3 +179,13 @@ def test_report_does_not_count_conditional_as_all_predictions_generated(tmp_path
     assert report["all_predictions_generated"] is False
     assert report["conditional_saved_count"] == 1
     assert report["dated_prediction_count"] == 3
+
+
+def test_half_year_abstain_counts_as_reviewed_without_conditional_direction():
+    rows = [record("M6_V1", decision="ABSTAIN", record_kind="CONDITIONAL_OUTLOOK", end_date=None,
+                   ex_ante_eligible=False, review_complete=True)]
+    result = v2.verify_outputs("002112", WINDOW, rows, materials_input_hash="current-material")
+    half = result["horizons"][3]
+    assert half["status"] == "REVIEWED_ABSTAIN"
+    assert half["generationStatus"] == "ABSTAIN" and half["review_complete"]
+    assert not half["direction_available"] and not half["counts_as_dated_forecast"]

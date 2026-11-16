@@ -99,7 +99,11 @@ def time_context(data: dict, sessions: list[str] | None = None) -> dict:
     missing_markets = [code for code, q in markets.items() if q["status"] not in {"READY", "READY_LAST_SESSION"}]
     stock_applicable = data.get("stock_market_applicable", True)
     ready = (
-        nav_state == "READY" and (bool(stocks) or not stock_applicable) and not missing_stocks and not missing_markets
+        nav_state == "READY"
+        and (bool(stocks) or not stock_applicable)
+        and not missing_stocks
+        and not missing_markets
+        and (data.get("valuation_status") is None or data["valuation_status"].get("ready") is True)
     )
     statements = [f"目标日{target}，比较基准日{base}；资料截止北京时间{stamp:%Y-%m-%d %H:%M}。"]
     statements.append(f"已取得净值截至{latest_nav or '暂缺'}，持仓行情最新日期{latest_quote or '暂缺'}。")
@@ -122,6 +126,8 @@ def time_context(data: dict, sessions: list[str] | None = None) -> dict:
             statements.append("部分所列持仓股票的比较基准日行情尚未取得。")
         if missing_markets:
             statements.append("部分对照指数的比较基准日行情尚未取得。")
+        if (data.get("valuation_status") or {}).get("ready") is False:
+            statements.append("越南估值用汇率或行情证据仍未核齐，详见具体资料缺口。")
     statements.append("目标日尚未收盘，目标日收盘行情尚未形成，不属于资料缺失。")
     return {
         "target_date": target,

@@ -1,5 +1,6 @@
 """任意基金的综合资料适配；只消费已留原文的本机资料包，不套用其他基金资料。"""
 
+import re
 from copy import deepcopy
 from datetime import date, datetime
 from pathlib import Path
@@ -12,7 +13,24 @@ from app.services.comprehensive_prediction_policy import policy
 from app.services.direction_1d_protocol import ZONE, digest, input_days, window
 from app.services.fund_exposure_common import read
 from app.services.fund_information_contracts import time_context
-from app.services.material_content import source_exists
+from app.services.material_content import content_digest, source_bytes, source_exists
+
+
+def verified_undated_reference(document: dict) -> bool:
+    """静态单位/接口说明可无出版日期；必须有真实响应、摘要和实际取得时刻。"""
+    if (
+        document.get("kind") not in {"PROVIDER_UNIT_EXCERPT", "PROVIDER_API_REFERENCE"}
+        or document.get("published_date") is not None
+        or document.get("publication_date_status") != "NOT_STATED"
+        or document.get("http_status", document.get("receipt_http")) != 200
+        or urlparse(document.get("url", "")).scheme != "https"
+    ):
+        return False
+    try:
+        raw = source_bytes(Path(document["raw_path"]))
+        return len(raw) <= 8_000_000 and content_digest(raw) == document["raw_sha256"]
+    except (KeyError, OSError, TypeError, ValueError):
+        return False
 
 
 def checked_documents(now: datetime, code: str, material: dict) -> list[dict]:
@@ -34,6 +52,8 @@ def checked_documents(now: datetime, code: str, material: dict) -> list[dict]:
         uri = urlparse(document["url"])
         available = datetime.fromisoformat(document["available_at"])
         published_at = datetime.fromisoformat(document["published_at"]) if document.get("published_at") else None
+        published = document.get("published_date")
+        undated = published is None and verified_undated_reference(document)
         if (
             uri.scheme not in {"https", "http"}
             or not uri.hostname
@@ -41,14 +61,20 @@ def checked_documents(now: datetime, code: str, material: dict) -> list[dict]:
             or uri.password
             or available.tzinfo is None
             or available > now
-            or document["published_date"] > str(now.date())
-            or available.astimezone(ZONE).date().isoformat() < document["published_date"]
+            or (published is None and not undated)
+            or (
+                published is not None
+                and (not isinstance(published, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", published))
+            )
+            or (isinstance(published, str) and published > str(now.date()))
+            or (isinstance(published, str) and available.astimezone(ZONE).date().isoformat() < published)
             or (
                 published_at is not None
                 and (published_at.tzinfo is None or published_at > available or published_at > now)
             )
             or (
-                published_at is None and document["published_date"] == str(now.date())
+                published_at is None
+                and published == str(now.date())
                 and not observed_public_notice(document, code, now)
             )
             or digest(document["body"]) != document["body_hash"]
@@ -56,7 +82,7 @@ def checked_documents(now: datetime, code: str, material: dict) -> list[dict]:
             raise ValueError("COMPREHENSIVE_SOURCE_INVALID")
         # 同日资料只有日期且没有真实首次公开响应时仍拒绝；取得回执只证明
         # 截止前可见，不被写成准确发布时间，也不默认按零点处理。
-        document.setdefault("date", document["published_date"])
+        document.setdefault("date", published)
         document.setdefault("source_hash", document["body_hash"])
         document.setdefault("body_truncated", document.get("body_scope") != "FULL_TEXT")
     return documents
@@ -117,8 +143,15 @@ def prepare(now, code: str, materials_path=None) -> dict:
         profile = profiles[0]
         from app.services.comprehensive_calendar import verified_domestic_window
         from app.services.qdii_valuation_contract import verified_qdii_window
+        from app.services.vietnam_valuation_contract import POLICY as vn_policy
+        from app.services.vietnam_valuation_contract import assess_vietnam_valuation
 
-        if not verified_domestic_window(profile, material, by_id, w) and not verified_qdii_window(
+        valuation_status = None
+        if (material.get("calendar_evidence") or {}).get("policy") == vn_policy:
+            valuation_status = assess_vietnam_valuation(profile, material, by_id, w, as_of=now)
+            if not valuation_status["supported"]:
+                raise ValueError("COMPREHENSIVE_VN_CONTRACT_CALENDAR_REQUIRED")
+        elif not verified_domestic_window(profile, material, by_id, w) and not verified_qdii_window(
             profile, material, by_id, w, as_of=now
         ):
             raise ValueError("COMPREHENSIVE_CALENDAR_POLICY_REQUIRED")
@@ -170,6 +203,9 @@ def prepare(now, code: str, materials_path=None) -> dict:
         data["source_manifest"]["nav_provenance"] = deepcopy(data["nav_provenance"])
     if material.get("market_quote_exceptions") is not None:
         data["market_quote_exceptions"] = deepcopy(material["market_quote_exceptions"])
+    if valuation_status is not None:
+        # 允许编译真实缺项以便续办，不把支持合同/日历误写成可以预测。
+        data["valuation_status"] = valuation_status
     if len(data["inventory"]) != 16:
         raise ValueError("COMPREHENSIVE_INVENTORY_INVALID")
     data["time_context"] = time_context(data)

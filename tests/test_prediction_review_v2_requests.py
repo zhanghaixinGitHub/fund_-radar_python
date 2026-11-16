@@ -65,7 +65,7 @@ def test_removed_holding_rejects_before_reading_or_writing_requests(monkeypatch)
         service.request_batch(["013330"])
 
 
-@pytest.mark.parametrize("mismatch", [None, "old_window", "owner", "after_deadline", "unverified_snapshot"])
+@pytest.mark.parametrize("mismatch", [None, "old_window", "owner", "after_deadline", "unverified_snapshot", "material"])
 def test_only_real_current_review_completes_request_and_conditional_is_separate(mismatch):
     payload = {
         "analysisPolicyHash": "policy",
@@ -88,6 +88,8 @@ def test_only_real_current_review_completes_request_and_conditional_is_separate(
         identity["owner_hash"] = "another-owner"
     if mismatch == "unverified_snapshot":
         identity["snapshot_verified"] = False
+    if mismatch == "material":
+        payload["_materialsInputHash"] = "new-material"
     evaluated = "2026-11-13T15:01:00+08:00" if mismatch == "after_deadline" else "2026-11-13T00:30:00+08:00"
     prepared = {
         "policyHash": "policy",
@@ -110,3 +112,21 @@ def test_only_real_current_review_completes_request_and_conditional_is_separate(
     else:
         assert result["status"] == "SUCCEEDED" and result["pendingItems"] == 0
         assert result["createdItems"] == 1 and result["conditionalItems"] == 1
+
+
+def test_reviewed_half_year_abstain_is_not_a_conditional_direction_or_unreviewed_item():
+    payload = {"analysisPolicyHash": "policy", "_ownerHash": "owner",
+               "planningWindow": {"base_nav_date": "2026-11-12", "target_nav_date": "2026-11-13"},
+               "items": [{"fundCode": "005284", "horizonId": "M6_V1", "status": "PENDING"}]}
+    prepared = {"policyHash": "policy", "archive": {"cases": [{
+        "case": {"fund_code": "005284", "horizon": "M6_V1", "decision": "ABSTAIN"},
+        "analysis": {"evaluated_at": "2026-11-13T17:00:00+08:00"},
+        "workflow_identity": {"owner_hash": "owner", "base_date": "2026-11-12", "target_date": "2026-11-13",
+                              "snapshot_verified": True, "materials_input_hash": "actual", "end_date": None,
+                              "ex_ante_eligible": False}}]}}
+    result = service._completed_payload(
+        payload, prepared, "release", datetime.fromisoformat("2026-11-13T17:01:00+08:00")
+    )
+    assert result["allReviewsSaved"] and not result["allPredictionsGenerated"]
+    assert result["abstainItems"] == 1 and result["conditionalItems"] == result["createdItems"] == 0
+    assert result["items"][0]["status"] == "REVIEWED_ABSTAIN"

@@ -25,6 +25,12 @@ def verified_qdii_window(
     非上市基金的滞后净值、未核验的币种或其他未覆盖仓位不能冒称已经补齐。
     """
     evidence = material.get("calendar_evidence") or {}
+    from app.services.vietnam_valuation_contract import POLICY as vn_policy
+
+    if evidence.get("policy") == vn_policy:
+        from app.services.vietnam_valuation_contract import assess_vietnam_valuation
+
+        return assess_vietnam_valuation(profile, material, documents, window, as_of=as_of)["ready"]
     multi_listed = evidence.get("policy") == MULTI_LISTED_POLICY
     listed_fof = evidence.get("policy") in {LISTED_FOF_POLICY, MULTI_LISTED_POLICY}
     if evidence.get("policy") not in {POLICY, LISTED_FOF_POLICY, MULTI_LISTED_POLICY}:

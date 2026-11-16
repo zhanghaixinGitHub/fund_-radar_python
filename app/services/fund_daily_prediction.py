@@ -188,6 +188,12 @@ class DailyPredictionRun:
             pending_funds=final["pending_funds"],
             current_fund_code=None,
         )
+        # 审阅完成、方向数量和旧区间的变化观察分别汇总，互不冒充完成。
+        for key in ("all_reviews_saved", "reviewed_period_count", "unreviewed_period_count",
+                    "dated_prediction_count", "conditional_saved_count", "abstain_saved_count",
+                    "reassessment_watch", "reassessment_pending_count", "reassessment_check_failure_count"):
+            if key in final:
+                state[key] = final[key]
         if state["prediction_outcomes"] is None and state["status"] == "CLOSED":
             state["status"] = "OUTCOME_STEP_MISSING"
         if state["one_day_outcomes"].get("status") != "SUCCEEDED" and state["status"] == "CLOSED":

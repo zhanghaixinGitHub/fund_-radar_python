@@ -1,0 +1,109 @@
+{
+  "version": "2026-11-16.v1",
+  "themes": [
+    {
+      "id": "CHIP",
+      "name": "芯片",
+      "definition": "半导体、集成电路及相关设备、设计和制造公司。",
+      "sourceName": "华夏国证半导体芯片ETF2026年第三季度报告所载主要持仓与指数主题",
+      "sourceUrl": "https://pdf.dfcfw.com/pdf/H2_AN202610261830932007_1.pdf?1793038806000.pdf",
+      "classificationDate": "2026-11-16",
+      "method": "REVIEWED_DISCLOSED_INDEX_HOLDINGS"
+    },
+    {
+      "id": "COMMUNICATION",
+      "name": "通信",
+      "definition": "光通信器件、光模块、光互联与数据通信相关产品。",
+      "sourceName": "Tushare公司主营构成（2026年中期），逐只核对光通信相关产品",
+      "sourceUrl": null,
+      "classificationDate": "2026-11-16",
+      "method": "REVIEWED_COMPANY_BUSINESS"
+    },
+    {
+      "id": "OIL",
+      "name": "石油",
+      "definition": "石油天然气勘探、生产、炼化及相关公司。",
+      "sourceName": "博时标普石油天然气勘探及生产精选行业指数基金2026年第三季度报告所载主要持仓与指数主题",
+      "sourceUrl": "https://pdf.dfcfw.com/pdf/H2_AN202610271830984464_1.pdf?1793096810000.pdf",
+      "classificationDate": "2026-11-16",
+      "method": "REVIEWED_DISCLOSED_INDEX_HOLDINGS"
+    },
+    {
+      "id": "FOOD",
+      "name": "食品",
+      "definition": "食品、饮料、酒类及相关日用消费产品公司。",
+      "sourceName": "天弘中证食品饮料ETF2026年第三季度报告所载主要持仓与指数主题",
+      "sourceUrl": "https://pdf.dfcfw.com/pdf/H2_AN202610261830928741_1.pdf?1793037162000.pdf",
+      "classificationDate": "2026-11-16",
+      "method": "REVIEWED_DISCLOSED_INDEX_HOLDINGS"
+    },
+    {
+      "id": "GAME",
+      "name": "游戏",
+      "definition": "以网络游戏研发、发行或运营为主要业务的公司。",
+      "sourceName": "上市公司2025年年度报告主营业务",
+      "sourceUrl": null,
+      "classificationDate": "2026-11-16",
+      "method": "REVIEWED_COMPANY_ANNUAL_REPORT"
+    }
+  ],
+  "securities": {
+    "688256.SH": {"name": "寒武纪", "themes": ["CHIP"]},
+    "002371.SZ": {"name": "北方华创", "themes": ["CHIP"]},
+    "688012.SH": {"name": "中微公司", "themes": ["CHIP"]},
+    "603986.SH": {"name": "兆易创新", "themes": ["CHIP"]},
+    "688008.SH": {"name": "澜起科技", "themes": ["CHIP"]},
+    "688981.SH": {"name": "中芯国际", "themes": ["CHIP"]},
+    "688041.SH": {"name": "海光信息", "themes": ["CHIP"]},
+    "688498.SH": {"name": "源杰科技", "themes": ["CHIP"]},
+    "688072.SH": {"name": "拓荆科技", "themes": ["CHIP"]},
+    "300604.SZ": {"name": "长川科技", "themes": ["CHIP"]},
+    "300394.SZ": {"name": "天孚通信", "themes": ["COMMUNICATION"]},
+    "300308.SZ": {"name": "中际旭创", "themes": ["COMMUNICATION"]},
+    "300502.SZ": {"name": "新易盛", "themes": ["COMMUNICATION"]},
+    "300548.SZ": {"name": "长芯博创", "themes": ["COMMUNICATION"]},
+    "300570.SZ": {"name": "太辰光", "themes": ["COMMUNICATION"]},
+    "002281.SZ": {"name": "光迅科技", "themes": ["COMMUNICATION"]},
+    "300620.SZ": {"name": "光库科技", "themes": ["COMMUNICATION"]},
+    "PBF.US": {"name": "PBF", "themes": ["OIL"]},
+    "VLO.US": {"name": "VLO", "themes": ["OIL"]},
+    "DINO.US": {"name": "DINO", "themes": ["OIL"]},
+    "XOM.US": {"name": "XOM", "themes": ["OIL"]},
+    "MPC.US": {"name": "MPC", "themes": ["OIL"]},
+    "PARR.US": {"name": "PARR", "themes": ["OIL"]},
+    "PSX.US": {"name": "PSX", "themes": ["OIL"]},
+    "MUR.US": {"name": "MUR", "themes": ["OIL"]},
+    "CVX.US": {"name": "CVX", "themes": ["OIL"]},
+    "DK.US": {"name": "DK", "themes": ["OIL"]},
+    "600887.SH": {"name": "伊利股份", "themes": ["FOOD"]},
+    "600519.SH": {"name": "贵州茅台", "themes": ["FOOD"]},
+    "000858.SZ": {"name": "五粮液", "themes": ["FOOD"]},
+    "600809.SH": {"name": "山西汾酒", "themes": ["FOOD"]},
+    "603288.SH": {"name": "海天味业", "themes": ["FOOD"]},
+    "000568.SZ": {"name": "泸州老窖", "themes": ["FOOD"]},
+    "605499.SH": {"name": "东鹏饮料", "themes": ["FOOD"]},
+    "000895.SZ": {"name": "双汇发展", "themes": ["FOOD"]},
+    "600298.SH": {"name": "安琪酵母", "themes": ["FOOD"]},
+    "002304.SZ": {"name": "洋河股份", "themes": ["FOOD"]},
+    "002517.SZ": {
+      "name": "恺英网络",
+      "themes": [{"id": "GAME", "sourceUrl": "http://static.cninfo.com.cn/finalpage/2026-04-29/1225225837.PDF"}]
+    },
+    "603444.SH": {
+      "name": "吉比特",
+      "themes": [{"id": "GAME", "sourceUrl": "http://static.cninfo.com.cn/finalpage/2026-03-27/1225034661.PDF"}]
+    },
+    "002555.SZ": {
+      "name": "三七互娱",
+      "themes": [{"id": "GAME", "sourceUrl": "http://static.cninfo.com.cn/finalpage/2026-04-17/1225109787.PDF"}]
+    },
+    "002624.SZ": {
+      "name": "完美世界",
+      "themes": [{"id": "GAME", "sourceUrl": "http://static.cninfo.com.cn/finalpage/2026-04-28/1225207317.PDF"}]
+    },
+    "002558.SZ": {
+      "name": "巨人网络",
+      "themes": [{"id": "GAME", "sourceUrl": "http://static.cninfo.com.cn/finalpage/2026-04-27/1225190388.PDF"}]
+    }
+  }
+}

@@ -665,6 +665,8 @@ def daily_records(owner, codes, target):
                         "analysis_version": VERSION,
                         "record_kind": kind,
                         "ex_ante_eligible": bool(eligible and not expired),
+                        "review_complete": identity.get("snapshot_verified") is True,
+                        "reviewed_at": item["analysis"].get("evaluated_at"),
                         "policy_hash": stored["policy_hash"],
                     }
                 )

@@ -24,7 +24,14 @@ def assess(state, followthrough, scope, ratings_readback, checked_at, live_windo
         issues.append("PREDICTION_WINDOW_CHANGED")
     if live_window and state.get("window", {}).get("target_nav_date") != live_window["target_nav_date"]:
         issues.append("LIVE_PREDICTION_WINDOW_CHANGED")
-    if followthrough.get("status") != "CLOSED" or not followthrough.get("all_predictions_generated"):
+    if followthrough.get("analysis_version") == "COMPREHENSIVE_REVIEW_V2":
+        if followthrough.get("status") != "CLOSED" or not followthrough.get("all_reviews_saved"):
+            issues.append("PREDICTION_REVIEWS_INCOMPLETE")
+        if followthrough.get("reassessment_pending_count", 0):
+            issues.append("REASSESSMENT_REQUIRED")
+        if followthrough.get("reassessment_check_failure_count", 0):
+            issues.append("REASSESSMENT_CHECK_FAILED")
+    elif followthrough.get("status") != "CLOSED" or not followthrough.get("all_predictions_generated"):
         issues.append("PREDICTIONS_INCOMPLETE")
     materials = state.get("materials_terminal") or {}
     if not materials.get("terminal"):

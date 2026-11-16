@@ -95,6 +95,12 @@ def main():
                 "run_dir": str(directory.resolve()),
                 "work_items": str((directory / "work-items.json").resolve()),
                 "all_predictions_generated": result.get("all_predictions_generated", False),
+                "all_reviews_saved": result.get("all_reviews_saved", False),
+                "reviewed_period_count": result.get("reviewed_period_count", 0),
+                "unreviewed_period_count": result.get("unreviewed_period_count", 0),
+                "abstain_saved_count": result.get("abstain_saved_count", 0),
+                "reassessment_pending_count": result.get("reassessment_pending_count", 0),
+                "reassessment_check_failure_count": result.get("reassessment_check_failure_count", 0),
                 "one_day_outcomes": {
                     k: v for k, v in result.get("one_day_outcomes", {}).items() if k in {"status", "summary", "reason"}
                 },

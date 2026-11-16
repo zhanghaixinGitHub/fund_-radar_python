@@ -40,11 +40,14 @@ def review_calendar(data: dict, code: str, at: datetime):
     from app.services.prediction_features import read_fund_data
 
     mode = (data.get("calendar_evidence") or {}).get("policy")
+    from app.services.vietnam_valuation_contract import POLICY as vn_policy
+
     if mode not in {
         "CN_NAV_DISCLOSED_DOMESTIC_ASSETS_V1",
         "CN_NAV_HK_CONNECT_WINDOW_V1",
         "QDII_CNY_VERIFIED_SESSION_V1",
         "CN_GOLD_ETF_NAV_WINDOW_V1",
+        vn_policy,
         multi_listed_policy,
     }:
         return read_fund_data(code, at)["calendar"]
@@ -64,6 +67,28 @@ def review_calendar(data: dict, code: str, at: datetime):
     past, current = calendars[0], calendars[-1]
     calendar_hash = digest([item.content_hash for item in calendars])
     from app.services.qdii_valuation_contract import verified_qdii_window
+
+    if mode == vn_policy:
+        from app.services.vietnam_valuation_contract import assess_vietnam_valuation
+
+        # 日期契约可独立核验，缺行情/指定汇率/本基金净值仍由source_ready阻断。
+        if (
+            data.get("fund_code") != code
+            or len(profiles) != 1
+            or data["window"]["calendar_version"] != calendar_hash
+            or not assess_vietnam_valuation(profiles[0], data, documents, data["window"], as_of=at)["supported"]
+        ):
+            raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "越南基金实际合同及官方年度日历仍待核验")
+        sessions, end, source_hash = _matched_future_sessions(
+            data,
+            documents,
+            tuple(day for item in calendars for day in item.sessions),
+            current.definition.coverage_end,
+            calendar_hash,
+        )
+        return ValuationCalendar(
+            mode, sessions, max(past.definition.coverage_start, date(at.year, 1, 1)), end, source_hash
+        )
 
     verified = (
         verified_qdii_window
@@ -117,6 +142,14 @@ def _matched_future_sessions(data, documents, sessions, coverage_end, calendar_h
     from app.services.fund_listed_product_contract import POLICY as multi_listed_policy
     from app.services.fund_listed_product_contract import european_calendar
     from app.services.fund_valuation_sessions import hk_closed_dates
+    from app.services.vietnam_valuation_contract import POLICY as vn_policy
+
+    if data["calendar_evidence"].get("policy") == vn_policy:
+        from app.services.vietnam_valuation_contract import future_sessions
+
+        return future_sessions(
+            data, documents, sessions, coverage_end, calendar_hash, at=datetime.fromisoformat(data["as_of"])
+        )
 
     evidence = data["calendar_evidence"]
     own = documents.get(evidence.get("prospectus_ref"), {})

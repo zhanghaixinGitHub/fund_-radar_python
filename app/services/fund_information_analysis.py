@@ -133,6 +133,11 @@ def analyze(
 
     if not enabled(data.get("fund_code", "")):
         raise ValueError("ANALYSIS_FUND_SCOPE_INVALID")
+    if data.get("valuation_status") is not None and (
+        data["valuation_status"].get("ready") is not True
+        or data.get("time_context", {}).get("baseline_complete") is not True
+    ):
+        raise ValueError("VN_VALUATION_INPUTS_REQUIRED")
     timing = time_context(data)
     facts = dict(data["facts"])
     gaps = []

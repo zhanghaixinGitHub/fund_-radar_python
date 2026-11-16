@@ -315,7 +315,13 @@ def main():
         report = v2.followthrough_report(owner, codes, current_window, records, at=at)
         versioned_save(args.output, report)
         print(json.dumps({"status": report["status"], "pending_funds": report["pending_funds"],
-                          "output": str(args.output.resolve()), "analysis_version": report["analysis_version"]}))
+                            "output": str(args.output.resolve()), "analysis_version": report["analysis_version"],
+                            "all_reviews_saved": report["all_reviews_saved"],
+                            "reviewed_period_count": report["reviewed_period_count"],
+                            "unreviewed_period_count": report["unreviewed_period_count"],
+                            "abstain_saved_count": report["abstain_saved_count"],
+                            "reassessment_pending_count": report["reassessment_pending_count"],
+                            "reassessment_check_failure_count": report["reassessment_check_failure_count"]}))
         raise SystemExit(2 if report["pending_funds"] else 0)
 
     exceptions = json.loads(args.blocked_file.read_text(encoding="utf-8")) if args.blocked_file else []

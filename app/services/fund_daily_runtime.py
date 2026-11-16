@@ -310,10 +310,23 @@ class LocalDailyBackend:
         from app.services import fund_daily_prediction_v2 as v2
 
         if v2.adoption() is not None:
-            handoff = registered_materials(code, at=now())
-            return {"status": "V2_MATERIAL_REVIEW_REQUIRED" if handoff else "WAITING_MATERIALS",
-                    "analysis_version": "COMPREHENSIVE_REVIEW_V2",
-                    "next_action": "按本期第二版规则审阅真实资料，完成 prepare/evaluate 后发布。"}
+            from app.services.fund_prediction_recovery import recover
+
+            # 第二版改变的是审阅与发布规则，不能绕过原件补充。恢复器只生成
+            # 未批准候选；取得新资料后仍须真实审阅，不能沿用旧批准直接发布。
+            if not hasattr(self, "collector"):
+                from app.services.market_company_materials import MarketCompanyCollector
+
+                self.collector = MarketCompanyCollector(workflow_root())
+            recovered = recover(code, output, current_window, collector=self.collector)
+            return {
+                **recovered,
+                "analysis_version": "COMPREHENSIVE_REVIEW_V2",
+                "next_action": (
+                    "读取本次 supplement.json 和候选原文；"
+                    "按第二版完成 prepare/evaluate 后发布，不能只核验旧结果。"
+                ),
+            }
 
         from app.services.fund_prediction_recovery import recover
 

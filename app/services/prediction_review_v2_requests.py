@@ -43,7 +43,7 @@ def _readiness(codes, instant):
     return planning, found
 
 
-def request_batch(codes, *, horizons=None, request_key=None, retry_items=None):
+def request_batch(codes, *, horizons=None, request_key=None, retry_items=None, materials_input_hash=None):
     """保存真实待办，不复用旧版本生成器，也不把已发布旧分析当新窗口完成。"""
     if not enabled_v2():
         raise PredictionFailure("V2_NOT_ADOPTED", "GENERATE", "第二版尚未正式启用")
@@ -83,6 +83,7 @@ def request_batch(codes, *, horizons=None, request_key=None, retry_items=None):
             "window": planning,
             "policy": digest(policy_v2()),
             "request": str(request_key) if request_key else None,
+            **({"materials_input_hash": materials_input_hash} if materials_input_hash is not None else {}),
         }
     )
     payload = {
@@ -108,6 +109,7 @@ def request_batch(codes, *, horizons=None, request_key=None, retry_items=None):
         "items": items,
         "note": "等待新的实际审阅；此请求不含方向，不是已完成的预测。",
         "_ownerHash": scope["owner_hash"],
+        "_materialsInputHash": materials_input_hash,
     }
     with get_engine().begin() as connection:
         connection.execute(
@@ -181,20 +183,22 @@ def _completed_payload(payload, prepared, release_id, adopted_at):
                 or identity.get("target_date") != planning.get("target_nav_date")
                 or identity.get("snapshot_verified") is not True
                 or not identity.get("materials_input_hash")
+                or (payload.get("_materialsInputHash") is not None
+                    and identity.get("materials_input_hash") != payload["_materialsInputHash"])
             ):
                 continue
             evaluated = record.get("evaluated_at")
             if not evaluated or not identity.get("target_date"):
                 continue
             deadline = datetime.combine(date.fromisoformat(identity["target_date"]), time(15), ZONE)
-            if datetime.fromisoformat(evaluated) >= deadline:
-                continue
             decision = source.get("decision")
+            if datetime.fromisoformat(evaluated) >= deadline and decision not in {"ABSTAIN", "BLOCKED"}:
+                continue
             conditional = item["horizonId"] == "M6_V1" and not identity.get("end_date")
-            if conditional:
-                state = "CONDITIONAL_SAVED"
-            elif decision in {"ABSTAIN", "BLOCKED"}:
+            if decision in {"ABSTAIN", "BLOCKED"}:
                 state = "REVIEWED_ABSTAIN"
+            elif conditional and decision in {"UP", "DOWN"}:
+                state = "CONDITIONAL_SAVED"
             elif identity.get("ex_ante_eligible") is True and decision in {"UP", "DOWN"}:
                 state = "CREATED"
             else:
@@ -221,6 +225,8 @@ def _completed_payload(payload, prepared, release_id, adopted_at):
         reviewedItems=len(states) - pending,
         conditionalItems=states.count("CONDITIONAL_SAVED"),
         abstainItems=states.count("REVIEWED_ABSTAIN"),
+        allReviewsSaved=not pending,
+        allPredictionsGenerated=not pending and all(state == "CREATED" for state in states),
         finishedAt=adopted_at.isoformat() if not pending else None,
         summary="本期审阅已保存；半年条件意见和暂不判断单列，不代表每个周期都有事前预测。"
         if not pending

@@ -564,12 +564,34 @@ def _validate(root, code, entry, source, value):
             )
             and not re.search(r"基金经理|基金合同|调整.{0,8}费率|本基金.{0,8}估值", _compact(body))
         )
+        # 已逐篇阅读的产品冒名风险提示及全公司风险分级指引属于客户服务说明。
+        # 只接精确管理人标题与完整限定，不把部分基金评级、经理或估值调整混入。
+        product_impersonation_warning = (
+            value["scope"] == "MANAGER_SERVICE"
+            and title == "关于防范不法分子冒用" + manager + "基金产品名义进行非法活动的风险提示"
+            and all(
+                term in _compact(body)
+                for term in ("所投资产品并非本公司基金", "本公司无官方APP客户端", "投资者办理本公司旗下基金产品")
+            )
+            and not re.search(r"基金经理|基金合同|调整.{0,8}费率|本基金.{0,8}估值", _compact(body))
+        )
+        manager_risk_classification_guide = (
+            value["scope"] == "MANAGER_SERVICE"
+            and title == manager + "公开募集证券投资基金产品风险等级划分指引"
+            and all(
+                term in _compact(body)
+                for term in ("本指引适用于", "旗下所有公开募集证券投资基金产品", "R1、R2、R3、R4、R5", "投资者适当性")
+            )
+            and not re.search(r"基金经理|(?:修改|修订|变更)基金合同|调整.{0,8}费率|本基金.{0,8}估值", _compact(body))
+        )
         if (
             re.search(r"旗下部分基金|关联交易|估值方法|基金经理|获配|承销证券", title)
             or not re.search(terms, title + _compact(body[:400]))
             and not board_change
             and not impersonation_warning
             and not privacy_update
+            and not product_impersonation_warning
+            and not manager_risk_classification_guide
         ):
             raise ValueError("MARKET_NEWS_MANAGER_SCOPE_UNPROVEN")
     return value

@@ -93,23 +93,58 @@ def _specific_notice(sources, title, body):
     _, client, _, _, _, _ = sources
     entry = {"id": ARTICLE, "title": title, "published": "2026-10-15"}
     source = client._archive(
-        json.dumps({"success": 1, "data": {"art_code": ARTICLE, "notice_title": title,
-                    "notice_content": body}}, ensure_ascii=False).encode(),
-        ".json", BODY_URL, {"art_code": ARTICLE},
+        json.dumps(
+            {"success": 1, "data": {"art_code": ARTICLE, "notice_title": title, "notice_content": body}},
+            ensure_ascii=False,
+        ).encode(),
+        ".json",
+        BODY_URL,
+        {"art_code": ARTICLE},
     )
     catalog = client._archive(
-        json.dumps({"ErrCode": 0, "Data": [{"ID": ARTICLE, "FUNDCODE": CODE,
-                    "TITLE": title, "PUBLISHDATEDesc": "2026-10-15"}]}).encode(),
-        ".json", CATALOG_URL, {"fundcode": CODE},
+        json.dumps(
+            {"ErrCode": 0, "Data": [{"ID": ARTICLE, "FUNDCODE": CODE, "TITLE": title, "PUBLISHDATEDesc": "2026-10-15"}]}
+        ).encode(),
+        ".json",
+        CATALOG_URL,
+        {"fundcode": CODE},
     )
     return {"entry": entry, "source": source, "catalog_source": catalog, "quotes": [body]}
 
 
 @pytest.mark.parametrize("economic_change", [False, True])
+@pytest.mark.parametrize("kind", ["product_impersonation", "risk_guide"])
+def test_exact_new_manager_notices_do_not_expand_to_economic_changes(sources, economic_change, kind):
+    manager = "某某基金管理有限公司"
+    if kind == "product_impersonation":
+        title = "关于防范不法分子冒用" + manager + "基金产品名义进行非法活动的风险提示"
+        body = manager + (
+            "声明所投资产品并非本公司基金，本公司无官方APP客户端。"
+            "投资者办理本公司旗下基金产品时应核实合法渠道，保护财产安全。"
+        )
+    else:
+        title = manager + "公开募集证券投资基金产品风险等级划分指引"
+        body = manager + (
+            "落实投资者适当性。本指引适用于本公司旗下所有公开募集证券投资基金产品，"
+            "等级为R1、R2、R3、R4、R5，其他说明以正式文件为准。"
+        )
+    if economic_change:
+        body += "本次调整基金经理。"
+    args = _specific_notice(sources, title, body)
+    if economic_change:
+        with pytest.raises(ValueError, match="MANAGER_SCOPE_UNPROVEN"):
+            review(sources, **args)
+    else:
+        assert review(sources, **args)["does_not_determine_direction"] is True
+
+
+@pytest.mark.parametrize("economic_change", [False, True])
 def test_privacy_notice_is_only_exact_manager_service_background(sources, economic_change):
     title = "某某基金管理有限公司隐私政策更新提示"
-    body = ("某某基金管理有限公司更新客户隐私政策、第三方信息共享清单、个人信息收集清单，"
-            "以上隐私政策自发布之日起生效。客户应阅读条款，有疑问按声明方式联系。")
+    body = (
+        "某某基金管理有限公司更新客户隐私政策、第三方信息共享清单、个人信息收集清单，"
+        "以上隐私政策自发布之日起生效。客户应阅读条款，有疑问按声明方式联系。"
+    )
     if economic_change:
         body += "本次同时调整基金经理。"
     args = _specific_notice(sources, title, body)
@@ -129,24 +164,42 @@ def test_report_bound_valuation_background_does_not_assert_portfolio(sources, pr
     if problem == "ETF":
         product = "某某行业交易型开放式指数证券投资基金"
     title = "某某基金管理有限公司关于旗下基金调整长期停牌股票估值方法的提示性公告"
-    body = ("某某基金管理有限公司经与基金托管人协商一致，对本公司旗下基金所持有的"
-            "中国稀土（股票代码：000831）按指数收益法估值。"
-            "待该股票的交易体现活跃市场交易特征后，恢复采用交易所当日收盘价。")
+    body = (
+        "某某基金管理有限公司经与基金托管人协商一致，对本公司旗下基金所持有的"
+        "中国稀土（股票代码：000831）按指数收益法估值。"
+        "待该股票的交易体现活跃市场交易特征后，恢复采用交易所当日收盘价。"
+    )
     if problem == "unrelated_title":
         title = "某某基金管理有限公司关于旗下部分基金调整费率的公告"
     if problem == "missing_recovery":
         body = body.split("待该股票")[0]
     args = _specific_notice(sources, title, body)
-    own = (f"某某基金管理有限公司\n基金全称 {product}\n下属分级基金的交易代码 010736 "
-           f"{CODE if problem != 'wrong_share' else '999999'}")
-    document = {"id": "own-report", "kind": "REPORT", "codes": [CODE], "body": own,
-                "body_hash": digest(own), "published_date": "2026-10-15", "available_at": instant.isoformat()}
+    own = (
+        f"某某基金管理有限公司\n基金全称 {product}\n下属分级基金的交易代码 010736 "
+        f"{CODE if problem != 'wrong_share' else '999999'}"
+    )
+    document = {
+        "id": "own-report",
+        "kind": "REPORT",
+        "codes": [CODE],
+        "body": own,
+        "body_hash": digest(own),
+        "published_date": "2026-10-15",
+        "available_at": instant.isoformat(),
+    }
     material = {"fund_code": CODE, "documents": [document]}
     path = root / "own-report-material.json"
     versioned_save(path, material)
-    args.update(scope="MANAGER_CONDITIONAL_VALUATION", product_name=product,
-                identity_proof={"materials_path": str(path), "materials_hash": digest(material),
-                                "document_id": document["id"], "quote": own})
+    args.update(
+        scope="MANAGER_CONDITIONAL_VALUATION",
+        product_name=product,
+        identity_proof={
+            "materials_path": str(path),
+            "materials_hash": digest(material),
+            "document_id": document["id"],
+            "quote": own,
+        },
+    )
     if problem not in {None, "tampered_flag"}:
         with pytest.raises(ValueError, match="CONDITIONAL_VALUATION_UNPROVEN"):
             review(sources, **args)
@@ -172,14 +225,33 @@ def test_manager_system_shutdown_is_service_but_partial_fund_scope_is_rejected(s
     )
     entry = {"id": ARTICLE, "title": title, "published": "2026-10-15"}
     source = client._archive(
-        json.dumps({"success": 1, "data": {"art_code": ARTICLE, "notice_title": title,
-                    "notice_content": body, "security": [{"stock": "000001"}]}}, ensure_ascii=False).encode(),
-        ".json", BODY_URL, {"art_code": ARTICLE},
+        json.dumps(
+            {
+                "success": 1,
+                "data": {
+                    "art_code": ARTICLE,
+                    "notice_title": title,
+                    "notice_content": body,
+                    "security": [{"stock": "000001"}],
+                },
+            },
+            ensure_ascii=False,
+        ).encode(),
+        ".json",
+        BODY_URL,
+        {"art_code": ARTICLE},
     )
     catalog = client._archive(
-        json.dumps({"ErrCode": 0, "Data": [{"ID": ARTICLE, "FUNDCODE": CODE,
-                    "TITLE": title, "PUBLISHDATEDesc": "2026-10-15"}]}, ensure_ascii=False).encode(),
-        ".json", CATALOG_URL, {"fundcode": CODE},
+        json.dumps(
+            {
+                "ErrCode": 0,
+                "Data": [{"ID": ARTICLE, "FUNDCODE": CODE, "TITLE": title, "PUBLISHDATEDesc": "2026-10-15"}],
+            },
+            ensure_ascii=False,
+        ).encode(),
+        ".json",
+        CATALOG_URL,
+        {"fundcode": CODE},
     )
     kwargs = {"entry": entry, "source": source, "catalog_source": catalog, "quotes": [body]}
     if partial_fund:
@@ -840,23 +912,42 @@ def test_benchmark_product_name_uses_only_same_row_display_columns():
 def test_short_legal_product_still_requires_independent_share_original(sources, product, accepted):
     root, client, _, _, _, instant = sources
     title = "某某基金管理有限公司关于旗下部分基金修订基金合同的公告"
-    body = (f"某某基金管理有限公司公告：{product}修订基金合同，本产品以实际公告条款为准。"
-            "投资者应阅读与本份额对应的完整合同，本公告的产品适用性不能仅由转载证券列表推断。")
+    body = (
+        f"某某基金管理有限公司公告：{product}修订基金合同，本产品以实际公告条款为准。"
+        "投资者应阅读与本份额对应的完整合同，本公告的产品适用性不能仅由转载证券列表推断。"
+    )
     entry = {"id": ARTICLE, "title": title, "published": "2026-10-15"}
     raw = {"success": 1, "data": {"art_code": ARTICLE, "notice_title": title, "notice_content": body}}
     source = client._archive(json.dumps(raw, ensure_ascii=False).encode(), ".json", BODY_URL, {"art_code": ARTICLE})
-    rows = {"ErrCode": 0, "Data": [{"ID": ARTICLE, "FUNDCODE": CODE, "TITLE": title,
-                                   "PUBLISHDATEDesc": "2026-10-15"}]}
+    rows = {"ErrCode": 0, "Data": [{"ID": ARTICLE, "FUNDCODE": CODE, "TITLE": title, "PUBLISHDATEDesc": "2026-10-15"}]}
     catalog = client._archive(json.dumps(rows).encode(), ".json", CATALOG_URL, {"fundcode": CODE})
     proof_body = f"{product}独立季度报告，本份额基金代码为{CODE}，主代码及其他份额代码另行披露。"
-    document = {"id": "own-report", "kind": "REPORT", "codes": [CODE], "body": proof_body,
-                "body_hash": digest(proof_body), "available_at": instant.isoformat(), "published_date": "2026-10-15"}
+    document = {
+        "id": "own-report",
+        "kind": "REPORT",
+        "codes": [CODE],
+        "body": proof_body,
+        "body_hash": digest(proof_body),
+        "available_at": instant.isoformat(),
+        "published_date": "2026-10-15",
+    }
     material = {"fund_code": CODE, "documents": [document]}
     path = root / "own-report.json"
     versioned_save(path, material)
-    args = dict(entry=entry, source=source, catalog_source=catalog, scope="EXPLICIT_PRODUCT_NAME",
-                quotes=[body], product_name=product, identity_proof={"materials_path": str(path),
-                "materials_hash": digest(material), "document_id": document["id"], "quote": proof_body})
+    args = dict(
+        entry=entry,
+        source=source,
+        catalog_source=catalog,
+        scope="EXPLICIT_PRODUCT_NAME",
+        quotes=[body],
+        product_name=product,
+        identity_proof={
+            "materials_path": str(path),
+            "materials_hash": digest(material),
+            "document_id": document["id"],
+            "quote": proof_body,
+        },
+    )
     if accepted:
         assert review(sources, **args)["does_not_determine_direction"]
         with pytest.raises(ValueError):

@@ -53,8 +53,10 @@ def verify_outputs(code, window, records, *, materials_input_hash=None, material
             r
             for r in candidates
             if horizon == "M6_V1" and r.get("record_kind") == "CONDITIONAL_OUTLOOK" and not r.get("end_date")
+            and r.get("decision") in {"UP", "DOWN"}
         ]
-        abstain = [r for r in candidates if r.get("decision") == "ABSTAIN" and r.get("ex_ante_eligible") is True]
+        abstain = [r for r in candidates if r.get("decision") == "ABSTAIN"
+                   and (r.get("review_complete") is True or r.get("ex_ante_eligible") is True)]
         if dated:
             status, selected = "SAVED_AND_READ_BACK", dated
         elif conditional:
@@ -78,6 +80,11 @@ def verify_outputs(code, window, records, *, materials_input_hash=None, material
                 if materials_ready
                 else "WAITING_MATERIALS",
                 "counts_as_dated_forecast": bool(dated),
+                "review_complete": bool(selected),
+                "direction_available": bool(dated or conditional),
+                "review_status": (
+                    "REVIEWED_ABSTAIN" if abstain else "REVIEWED_DIRECTION" if selected else "NOT_REVIEWED"
+                ),
                 # 正式第二版尚未接入旧准确率计算，保存方向不等于已验证准确率。
                 "eligible_for_accuracy": False,
             }
@@ -122,6 +129,9 @@ def followthrough_report(owner, codes, window, records, *, at):
         results.append(result)
     pending = [row["fund_code"] for row in results if row["status"] == "ACTION_REQUIRED"]
     periods = [period for row in results for period in row["horizons"]]
+    from app.services.prediction_review_watch import watch_report
+
+    watch = watch_report(owner, codes, at=at)
     return {
         "checked_at": at.isoformat(),
         "owner_user_id": owner,
@@ -135,6 +145,11 @@ def followthrough_report(owner, codes, window, records, *, at):
         "dated_prediction_count": sum(p["counts_as_dated_forecast"] for p in periods),
         "conditional_saved_count": sum(p["status"] == "CONDITIONAL_SAVED" for p in periods),
         "abstain_saved_count": sum(p["status"] == "REVIEWED_ABSTAIN" for p in periods),
+        "reviewed_period_count": sum(p["review_complete"] for p in periods),
+        "unreviewed_period_count": sum(not p["review_complete"] for p in periods),
+        "reassessment_watch": watch,
+        "reassessment_pending_count": watch["reassessment_pending_count"],
+        "reassessment_check_failure_count": watch["failure_count"],
         "pending_funds": pending,
     }
 
@@ -186,7 +201,7 @@ def freeze_request(folder, owner, code, horizon, window, handoff):
         request = read(path)
         if any(request.get(k) != v for k, v in identity.items()):
             raise ValueError("V2_DAILY_REQUEST_IDENTITY_CHANGED")
-    task = request_batch([code], horizons=[horizon])
+    task = request_batch([code], horizons=[horizon], materials_input_hash=identity["materials_input_hash"])
     if task.get("planningWindow") and (
         task["planningWindow"]["base_nav_date"] != window["base_nav_date"]
         or task["planningWindow"]["target_nav_date"] != window["target_nav_date"]

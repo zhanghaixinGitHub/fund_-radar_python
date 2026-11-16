@@ -61,6 +61,20 @@ def test_changed_holdings_and_yesterdays_run_are_not_success():
     assert {"HOLDINGS_CHANGED", "RUN_NOT_CHECKED_TODAY", "RATINGS_INCOMPLETE"} <= set(result["issues"])
 
 
+def test_v2_reviewed_abstain_is_complete_review_but_not_all_directions():
+    state, guard, codes = completed()
+    guard.update(analysis_version="COMPREHENSIVE_REVIEW_V2", all_reviews_saved=True,
+                 all_predictions_generated=False, abstain_saved_count=2)
+    ratings = [{"fundCode": c, "status": "SCORED", "score": "70"} for c in codes]
+    live = dict(total=4, completed=4, pending=0, failed=0, remaining=0)
+    result = assess(state, guard, codes, ratings, "2026-11-11T09:00:00+08:00", one_day_readback=live)
+    assert result["status"] == "SUCCEEDED"
+    assert result["predictions"]["all_predictions_generated"] is False
+    guard.update(reassessment_pending_count=1, reassessment_check_failure_count=1)
+    result = assess(state, guard, codes, ratings, "2026-11-11T09:00:00+08:00", one_day_readback=live)
+    assert {"REASSESSMENT_REQUIRED", "REASSESSMENT_CHECK_FAILED"} <= set(result["issues"])
+
+
 def test_missing_counts_partial_rating_and_external_blocks_are_reported():
     state, guard, codes = completed()
     state["prediction_outcomes"]["summary"].pop("remaining")

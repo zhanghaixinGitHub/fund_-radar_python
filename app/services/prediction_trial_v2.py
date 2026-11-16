@@ -12,6 +12,7 @@ from sqlalchemy import text
 from app.services.direction_1d_protocol import digest
 from app.services.fund_exposure_common import now, read, save
 from app.services.prediction_review_v2 import policy_v2, validate_cross_horizons, validate_review_v2
+from app.services.prediction_v2_baseline import baseline_ready
 
 PROJECT = Path(__file__).resolve().parents[2]
 HORIZONS = ("T1", "T5_V1", "T20_V1", "M6_V1")
@@ -121,7 +122,7 @@ def prepare_trial(directory, selection, *, holdings=None, clock=None):
         target = window.get("target_nav_date") or data.get("calendar_evidence", {}).get("target_date")
         if not base or not target:
             raise ValueError("V2_SOURCE_WINDOW_MISSING")
-        ready = kind == "FROZEN" and data.get("time_context", {}).get("baseline_complete") is True
+        ready = kind == "FROZEN" and baseline_ready(data)
         periods = {}
         for horizon in HORIZONS:
             periods[horizon] = {

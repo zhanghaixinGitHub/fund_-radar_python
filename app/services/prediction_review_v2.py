@@ -251,7 +251,7 @@ def validate_review_v2(packet, data, value, *, at=None):
                     stamp = datetime.fromisoformat(doc[name])
                     if stamp.tzinfo is None or stamp > source_cutoff:
                         raise ValueError("V2_SOURCE_AFTER_CUTOFF")
-            if doc.get("published_date", "") > packet["source_cutoff"][:10]:
+            if doc.get("published_date") is not None and doc["published_date"] > packet["source_cutoff"][:10]:
                 raise ValueError("V2_SOURCE_AFTER_CUTOFF")
 
     for row in r.reading:
@@ -378,6 +378,11 @@ def validate_review_v2(packet, data, value, *, at=None):
         raise ValueError("V2_M6_SCENARIOS_REQUIRED")
 
     if r.decision in {"UP", "DOWN", "FLAT"}:
+        if data.get("valuation_status") is not None and (
+            data["valuation_status"].get("ready") is not True
+            or data.get("time_context", {}).get("baseline_complete") is not True
+        ):
+            raise ValueError("V2_TARGET_OR_SOURCE_UNVERIFIED")
         if r.classification.base_type == "MONEY_MARKET":
             raise ValueError("V2_SEPARATE_INCOME_TARGET_REQUIRED")
         if not packet["source_ready"] or (

@@ -14,6 +14,7 @@ from app.services.fund_workflow_materials import registered_materials
 from app.services.prediction_contract import PredictionFailure, add_months, prediction_policy, target_dates
 from app.services.prediction_review_v2 import policy_v2
 from app.services.prediction_trial_v2 import current_holdings, local_path, save_once, storage_check
+from app.services.prediction_v2_baseline import baseline_ready
 
 HORIZONS = ("T5_V1", "T20_V1", "M6_V1")
 
@@ -112,7 +113,7 @@ def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_pr
                 or request.get("materials_input_hash") != materials_input_identity(material)
             ):
                 raise ValueError("V2_SOURCE_REQUEST_MATERIALS_CHANGED")
-            # 共用资料准备器核来源、净值与基准。这里只读其结果，不重写 source_ready。
+            # 共用准备器保留全部来源状态；第二版区分基金基准与历史个股缺口。
             data = prepare(at, code, material_path)
             if data.get("fund_code") != code or any(
                 data.get("window", {}).get(k) != current[k] for k in ("base_nav_date", "target_nav_date")
@@ -126,7 +127,7 @@ def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_pr
             row.update(
                 source_path=str(source),
                 source_hash=digest(packet),
-                source_ready=data.get("time_context", {}).get("baseline_complete") is True,
+                source_ready=baseline_ready(data),
                 time_context=data.get("time_context", {}),
             )
             try:

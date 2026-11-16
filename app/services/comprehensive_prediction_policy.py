@@ -34,6 +34,11 @@ def validate_review(data: dict, review: dict, facts: dict) -> None:
     必需维度的来源、无新增公告的检索回执，以及反证检查均须进入冻结资料。
     判断至少引用一个已核实的非净值事实；无法满足时保存缺口并暂不生成。
     """
+    if data.get("valuation_status") is not None and (
+        data["valuation_status"].get("ready") is not True
+        or data.get("time_context", {}).get("baseline_complete") is not True
+    ):
+        raise ValueError("COMPREHENSIVE_VN_VALUATION_INPUTS_REQUIRED")
     # 独立V2试验不得通过补填V1版本字段混入正式发布；正式迁移须另行接通目标与账号契约。
     if review.get("version", "").startswith("FUND_COMPREHENSIVE_REVIEW_V2"):
         raise ValueError("EXPERIMENTAL_V2_NOT_PRODUCTION_REVIEW")

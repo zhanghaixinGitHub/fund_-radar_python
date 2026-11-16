@@ -97,6 +97,29 @@ def test_baseline_gap_is_not_promoted_to_source_ready(tmp_path, isolated):
     assert packet["periods"]["T1"]["status"] == "UNVERIFIED"
 
 
+def test_v2_freeze_and_trial_share_partial_stock_baseline_boundary(tmp_path, isolated):
+    inventory, data, _ = isolated
+    data["nav"] = [{"nav_date": "2026-11-12"}]
+    data["market"] = {"ETF": {"date": "2026-11-12", "change_pct": -1.2}}
+    data["time_context"] = {
+        "baseline_complete": False,
+        "baseline_date": "2026-11-12",
+        "nav_status": "READY",
+        "latest_nav_date": "2026-11-12",
+        "stocks": {"SUSPENDED": {"date": "2026-10-30", "status": "STALE"}},
+        "markets": {"ETF": {"date": "2026-11-12", "status": "READY"}},
+    }
+    result = command.freeze_sources(tmp_path / "sources", holdings_provider=lambda: inventory, clock=AT)
+    assert result["source_ready_count"] == 1
+    trial.prepare_trial(tmp_path / "trial", Path(result["selection_path"]), holdings=inventory, clock=AT)
+    packet = read(tmp_path / "trial/inputs/002112.json")
+    assert packet["source_ready"] is True
+    original = read(Path(packet["source_path"]))["input"]
+    assert original["time_context"]["baseline_complete"] is False
+    assert original["time_context"]["stocks"]["SUSPENDED"]["status"] == "STALE"
+    assert packet["periods"]["T1"]["status"] == "RESOLVED"
+
+
 def test_calendar_failure_is_preserved_not_filled_with_weekdays(tmp_path, isolated, monkeypatch):
     inventory, _, _ = isolated
 
