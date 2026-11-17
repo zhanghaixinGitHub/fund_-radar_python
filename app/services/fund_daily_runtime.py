@@ -319,6 +319,13 @@ class LocalDailyBackend:
 
                 self.collector = MarketCompanyCollector(workflow_root())
             recovered = recover(code, output, current_window, collector=self.collector)
+            if recovered.get("materials_path"):
+                from app.services.fund_workflow_materials import inspect_materials
+
+                # 获取新行情后旧交接摘要必然失效。登记本次未批准候选，令
+                # 第二版能冻结真实新期资料；inspect只核原件和缺口，不批准方向。
+                inspected = inspect_materials(code, recovered["materials_path"])
+                recovered = {**recovered, "material_inspection": inspected}
             return {
                 **recovered,
                 "analysis_version": "COMPREHENSIVE_REVIEW_V2",

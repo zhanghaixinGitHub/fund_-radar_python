@@ -16,7 +16,8 @@ def main():
     parser.add_argument("--reviews-file", type=Path)
     args = parser.parse_args()
     at = now()
-    guard = storage_check(at.replace(hour=9, minute=50, second=0, microsecond=0).isoformat())
+    # 凌晨执行不能从尚未到来的09:50查事件，否则会漏掉本夜已发生的存储错误。
+    guard = storage_check(at.replace(hour=0, minute=0, second=0, microsecond=0).isoformat())
     if args.operation == "prepare":
         if args.selection is None:
             parser.error("prepare必须提供实际持仓样本选择文件")
