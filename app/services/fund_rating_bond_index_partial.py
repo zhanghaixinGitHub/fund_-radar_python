@@ -26,13 +26,20 @@ def calculate(inputs, *, root: Path):
         "fund_code": "001021",
         "legal_name": "亚债中国债券指数基金",
         "manager_name": "华夏基金管理有限公司",
-        "as_of_date": "2026-09-30",
         "holding_date": "2026-06-30",
         "primary_ref": "58fd1c2e700ed5ba99b68e12314bc2542494701f66996d27a4055879d7b65447",
     }
     base.require(all(inputs.get(k) == v for k, v in scope.items()), "PARTIAL_VERIFIED_SCOPE")
     base.require(inputs.get("currency") == "CNY" and inputs.get("share_class") == "A", "PARTIAL_CURRENCY_SHARE")
     source = Originals(inputs, Path(root), lazy=True)
+    if inputs["as_of_date"] != "2026-09-30":
+        from app.services.fund_rating_period import validate_period
+
+        class OriginalText:
+            def body(self, ref):
+                return source.plain(ref)
+
+        validate_period(inputs, OriginalText())
     base.require(inputs["refs"]["half"] == inputs["primary_ref"], "PARTIAL_REPORT_BINDING")
     pages = source.pages(inputs["primary_ref"])
     text = "\n".join(pages)
@@ -60,7 +67,7 @@ def calculate(inputs, *, root: Path):
         ctx.prec = 65
         try:
             days, ends, values = base._nav(inputs, source)
-            base.require(ends[0] == "2025-09-30" and ends[-1] == "2026-09-30", "PARTIAL_VERIFIED_YEAR")
+            base.require(ends[-1] == inputs["as_of_date"], "PARTIAL_VERIFIED_YEAR")
             peak = values[0]
             drawdown = D(0)
             for value in values:

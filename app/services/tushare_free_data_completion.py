@@ -61,7 +61,7 @@ class TushareFreeDataCompletionService:
         return None
 
     def sync(
-        self, *, as_of_date: date | None = None, progress_reporter: ProgressReporter | None = None
+        self, *, as_of_date: date | None = None, progress_reporter: ProgressReporter | None = None, fund_codes=None
     ) -> FreeDataCompletionResult:
         """执行手动全量补齐并以父子运行记录所有成功或失败阶段。
 
@@ -94,6 +94,7 @@ class TushareFreeDataCompletionService:
                 fund_result = fund_service.sync_market_details(
                     history_end_date=target_date,
                     progress_reporter=progress_reporter,
+                    **({"fund_codes": fund_codes} if fund_codes is not None else {}),
                 )
                 outcomes.extend(fund_result.outcomes)
                 stage_issues.extend(fund_result.overall_outcome.issues)
@@ -103,13 +104,15 @@ class TushareFreeDataCompletionService:
                 stage_issues.append("基金资料：执行未完成，成功成果保留")
             _report(progress_reporter, 1, 2, None, "正在补齐场内基金与市场参考指数数据")
             try:
-                market_reference_service = self._market_reference_service_factory()
-                market_result = market_reference_service.sync_all(
-                    parent_sync_run_id=parent_sync_run_id,
-                    as_of_date=target_date,
-                    progress_reporter=progress_reporter,
-                )
-                outcomes.extend(market_result.outcomes)
+                # 持仓批次不扫描全市场场内基金和指数目录；具体基准由逐基金补件按需取得。
+                if fund_codes is None:
+                    market_reference_service = self._market_reference_service_factory()
+                    market_result = market_reference_service.sync_all(
+                        parent_sync_run_id=parent_sync_run_id,
+                        as_of_date=target_date,
+                        progress_reporter=progress_reporter,
+                    )
+                    outcomes.extend(market_result.outcomes)
             except Exception:
                 logger.exception("tushare_free_data_completion.sync >>> 市场资料阶段未完成 run=%s", parent_sync_run_id)
                 stage_issues.append("市场参考资料：执行未完成，成功成果保留")

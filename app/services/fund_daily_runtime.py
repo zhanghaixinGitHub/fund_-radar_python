@@ -38,8 +38,12 @@ class LocalDailyBackend:
 
     def one_day_outcomes(self, *, all_archived=False):
         from app.services.fund_daily_outcomes import reconcile
+        from app.services.prediction_natural_month import reconcile_due_endpoints
 
-        return reconcile(self, all_archived=all_archived)
+        result = reconcile(self, all_archived=all_archived)
+        result["natural_month_endpoints"] = reconcile_due_endpoints(self)
+        versioned_save(self.directory / "natural-month-endpoints-summary.json", result["natural_month_endpoints"])
+        return result
 
     def one_day_outcome_status(self):
         return self.get(
@@ -47,14 +51,86 @@ class LocalDailyBackend:
             + f"/internal/v1/direction-1d/sync/users/{self.owner}/outcomes/status?dueBefore={now().date()}"
         )
 
+    def repair_handoffs(self, scope):
+        from app.services.fund_workflow_materials import refresh_changed_handoff
+
+        rows = []
+        for code in scope:
+            try:
+                rows.append(refresh_changed_handoff(code))
+            except Exception as error:
+                rows.append(
+                    {"fund_code": code, "status": "FAILED", "failure": type(error).__name__ + ":" + str(error)[:180]}
+                )
+        versioned_save(self.directory / "handoff-recovery.json", rows)
+        return rows
+
+    def prepare_monthly(self, scope):
+        from app.services.fund_rating_monthly import prepare_monthly
+
+        return prepare_monthly(scope, self.directory)
+
+    def nav_input_hash(self, code):
+        from app.services.fund_prediction_nav_identity import current_nav_identity
+
+        return current_nav_identity(code, self.window["base_nav_date"])
+
+    def refresh_nav(self, code, output, current_window):
+        from app.services.fund_daily_nav import refresh_missing_nav
+
+        if not hasattr(self, "nav_refreshes"):
+            self.nav_refreshes = {}
+        if code not in self.nav_refreshes:
+            self.nav_refreshes[code] = refresh_missing_nav(
+                code, current_window["base_nav_date"], Path(output) / "base-nav-refresh"
+            )
+        return self.nav_refreshes[code]
+
+    def advice(self, state, final):
+        from datetime import date, timedelta
+
+        from app.services.fund_daily_advice import generate_advice
+        from app.services.fund_rating_pipeline import _period_covered
+
+        target_month = now().date().replace(day=1) - timedelta(days=1)
+        ratings = {r.get("fundCode"): r for r in state.get("ratings", {}).get("readback", [])}
+        dependencies = {}
+        for fund in final["funds"]:
+            code, pending = fund["fund_code"], []
+            for period in fund.get("horizons", []):
+                if period.get("data_blocked"):
+                    pending.append({"step": "PREDICTION_INPUT", "horizon": period.get("horizon"),
+                                    "status": "BLOCKED", "reasons": period.get("source_reasons", [])})
+                if not period.get("review_complete", period.get("status") == "SAVED_AND_READ_BACK"):
+                    pending.append({"step": "PREDICTION", "horizon": period.get("horizon"), "status": period["status"]})
+            rating = ratings.get(code, {})
+            as_of = rating.get("asOfDate")
+            bundle = getattr(self, "rating_bundles", {}).get(code, {})
+            if not as_of or not _period_covered(bundle, date.fromisoformat(as_of), target_month):
+                pending.append({"step": "MONTHLY_RATING", "required_month": str(target_month)[:7], "as_of": as_of})
+            if rating.get("status") != "SCORED":
+                pending.append({"step": "COMPLETE_RATING", "status": rating.get("status", "UNAVAILABLE")})
+            dependencies[code] = pending
+        return generate_advice(self, state["scope"], dependencies)
+
     def ratings(self, terminal):
         """资料终态后执行持仓月评；公告和持仓检查没有真实回执时保持待办。"""
         # 再取一次本人持仓，避免同步期间已清仓的基金仍被新发布。
+        from sqlalchemy.orm import Session
+
         from app.commands.fund_prediction_followthrough import owner_scope
+        from app.db.session import get_nav_preview_engine
         from app.services.fund_market_preparation import market_scope
         from app.services.fund_market_workflow import MarketSyncWorkflow
+        from app.services.fund_rating_pipeline import current_inputs
 
         codes = set(owner_scope(self.settings, self.owner))
+        with Session(get_nav_preview_engine()) as session:
+            current = current_inputs(session, sorted(codes))
+        self.rating_bundles = {
+            code: next(m["bundle"] for m in row["input_snapshot"]["members"] if m["fund_code"] == code)
+            for code, row in current.items()
+        }
         catalog = market_scope()
         if not codes <= {row["fund_code"] for row in catalog}:
             raise ValueError("RATING_HOLDING_NOT_IN_ACTIVE_CATALOG")
@@ -91,6 +167,13 @@ class LocalDailyBackend:
             result["readback"] = [
                 self.get(f"http://127.0.0.1:8000/internal/v1/funds/{code}/rating") for code in sorted(codes)
             ]
+            # 更新器可能刚发布了新期，建议门控必须配对新输入，不能拿发布前的包核新日期。
+            with Session(get_nav_preview_engine()) as session:
+                current = current_inputs(session, sorted(codes))
+            self.rating_bundles = {
+                code: next(m["bundle"] for m in row["input_snapshot"]["members"] if m["fund_code"] == code)
+                for code, row in current.items()
+            }
             return result
         finally:
             workflow.close()
@@ -330,8 +413,7 @@ class LocalDailyBackend:
                 **recovered,
                 "analysis_version": "COMPREHENSIVE_REVIEW_V2",
                 "next_action": (
-                    "读取本次 supplement.json 和候选原文；"
-                    "按第二版完成 prepare/evaluate 后发布，不能只核验旧结果。"
+                    "读取本次 supplement.json 和候选原文；按第二版完成 prepare/evaluate 后发布，不能只核验旧结果。"
                 ),
             }
 
@@ -421,10 +503,14 @@ class LocalDailyBackend:
             self.materials_input_hashes[code] = identity
             # 这里只允许进入审阅队列；旧版缺口清单不代替第二版逐周期判断。
             ready = bool(handoff)
-            checked = v2.verify_outputs(code, current_window, self.records,
-                                        materials_input_hash=identity, materials_ready=ready)
-            return [{**row, "status": "READY" if row["status"] == "ACTION_REQUIRED" and ready
-                     else row["status"]} for row in checked["horizons"]]
+            checked = v2.verify_outputs(
+                code, current_window, self.records, materials_input_hash=identity, materials_ready=ready,
+                nav_input_hash=self.nav_input_hash(code),
+            )
+            return [
+                {**row, "status": "READY" if row["status"] == "ACTION_REQUIRED" and ready else row["status"]}
+                for row in checked["horizons"]
+            ]
 
         from app.commands.fund_prediction_followthrough import horizon_dates
         from app.services.fund_information_snapshot import prepare
@@ -487,11 +573,15 @@ class LocalDailyBackend:
         from app.services import fund_daily_prediction_v2 as v2
 
         if v2.adoption() is not None:
-            result = v2.verify_outputs(code, current_window, self.records,
-                                      materials_input_hash=self.materials_input_hashes.get(code))
-            return any(row["horizon"] == horizon and row["status"] in
-                       {"SAVED_AND_READ_BACK", "CONDITIONAL_SAVED", "REVIEWED_ABSTAIN"}
-                       for row in result["horizons"])
+            result = v2.verify_outputs(
+                code, current_window, self.records, materials_input_hash=self.materials_input_hashes.get(code),
+                nav_input_hash=self.nav_input_hash(code),
+            )
+            return any(
+                row["horizon"] == horizon
+                and row["status"] in {"SAVED_AND_READ_BACK", "CONDITIONAL_SAVED", "REVIEWED_ABSTAIN"}
+                for row in result["horizons"]
+            )
 
         records = self.records
         expected = getattr(self, "period_dates", {}).get(code, {}).get(horizon) or {}
@@ -514,7 +604,12 @@ class LocalDailyBackend:
             handoff = registered_materials(code, at=now())
             if not handoff:
                 raise ValueError("V2_CURRENT_MATERIALS_REQUIRED")
-            return v2.freeze_request(folder, self.owner, code, horizon, self.window, handoff)
+            # 资料包不变但晚到净值入库时，也必须准备新输入，不能永久复用缺净值快照。
+            nav_hash = self.nav_input_hash(code)
+            packet = v2.freeze_request(folder, self.owner, code, horizon, self.window, handoff, nav_input_hash=nav_hash)
+            from app.services.fund_daily_review import prepare_daily_review
+
+            return prepare_daily_review(self.directory, packet)
 
         from app.services import comprehensive_multi_prediction as multi
         from app.services.fund_codex_analysis import freeze_packet
@@ -550,10 +645,12 @@ class LocalDailyBackend:
         if v2.adoption() is not None:
             if code not in owner_scope(self.settings, owner):
                 raise ValueError("OWNER_REMOVED_BEFORE_SAVE")
-            receipt = v2.import_reviewed_trial(folder, owner, code, horizon, current_window,
-                                              self.materials_input_hashes.get(code))
+            receipt = v2.import_reviewed_trial(
+                folder, owner, code, horizon, current_window, self.materials_input_hashes.get(code)
+            )
             self.records = [r for r in self.records if r["fund_code"] != code] + v2.saved_records(
-                owner, [code], current_window["target_nav_date"])
+                owner, [code], current_window["target_nav_date"]
+            )
             return receipt
 
         from app.services import comprehensive_multi_prediction as multi

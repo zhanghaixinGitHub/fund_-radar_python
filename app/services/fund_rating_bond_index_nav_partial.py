@@ -16,6 +16,8 @@ from app.services.fund_rating_metrics import total_return
 
 VERSION = "BOND_INDEX_FIVE_PARTIAL_OFFICIAL_NAV_REINVEST_20261111_V1"
 PROOF_VERSION = "001021_A_OFFICIAL_UNIT_NAV_AND_REINVEST_NOTICE_V1"
+ROLLING_VERSION = "BOND_INDEX_FIVE_PARTIAL_OFFICIAL_NAV_REINVEST_ROLLING_V2"
+ROLLING_PROOF = "001021_A_OFFICIAL_UNIT_NAV_AND_REINVEST_ROLLING_V2"
 NAV_URL = "https://www.chinaamc.com/product/fundLishijingzhi.do"
 HISTORY_URL = "https://www.chinaamc.com/product/fundLishifenhong.do?fundcode=001021"
 IDENTITY_URL = "https://www.chinaamc.com/fund/001021/lishifenhong.shtml?source=click"
@@ -75,19 +77,26 @@ def _rows(soup):
 
 def rebuild(inputs, *, root):
     proof = inputs["nav_reconstruction"]
-    require(proof["version"] == PROOF_VERSION and proof["event"] == EVENT, "PROOF_VERSION_OR_EVENT")
+    rolling = inputs.get("version") == ROLLING_VERSION
+    require(proof["version"] == (ROLLING_PROOF if rolling else PROOF_VERSION) and proof["event"] == EVENT,
+            "PROOF_VERSION_OR_EVENT")
+    hashes = tuple(p["source_hash"] for p in proof["nav_pages"]) if rolling else NAV_HASHES
+    history_hash = proof["history_hash"] if rolling else HISTORY_HASH
+    identity_hash = proof["identity_hash"] if rolling else IDENTITY_HASH
+    window = proof["window"] if rolling else ["2025-09-30", "2026-09-30"]
     require(proof["fund_code"] == "001021" and proof["share_class"] == "A" and proof["currency"] == "CNY", "SHARE")
-    require(proof["window"] == ["2025-09-30", "2026-09-30"], "WINDOW")
-    require(proof["nav_pages"] == [{"page": i, "source_hash": h} for i, h in enumerate(NAV_HASHES, 1)], "PAGE_MANIFEST")
-    require(set(proof["sources"]) == {*NAV_HASHES, NOTICE_HASH, HISTORY_HASH, IDENTITY_HASH}, "SOURCE_MANIFEST")
+    require(len(window) == 2 and proof["window"] == window and window[-1] == inputs["as_of_date"], "WINDOW")
+    require(1 <= len(hashes) <= 20 and len(set(hashes)) == len(hashes), "PAGE_MANIFEST")
+    require(proof["nav_pages"] == [{"page": i, "source_hash": h} for i, h in enumerate(hashes, 1)], "PAGE_MANIFEST")
+    require(set(proof["sources"]) == {*hashes, NOTICE_HASH, history_hash, identity_hash}, "SOURCE_MANIFEST")
     checked = datetime.fromisoformat(proof["sources_checked_at"])
     require(checked.tzinfo is not None, "SOURCE_REVIEW_TIME")
     for ref in proof["sources"].values():
         acquired = datetime.fromisoformat(ref["acquired_at"])
         require(acquired.tzinfo is not None and acquired <= checked, "SOURCE_ACQUISITION_TIME")
     source = _nav_originals(inputs, Path(root))
-    _ref(source, IDENTITY_HASH, url=IDENTITY_URL, role="OFFICIAL_A_DIVIDEND_PAGE_IDENTITY", kind="html")
-    identity = _html(source, IDENTITY_HASH)
+    _ref(source, identity_hash, url=IDENTITY_URL, role="OFFICIAL_A_DIVIDEND_PAGE_IDENTITY", kind="html")
+    identity = _html(source, identity_hash)
     require("华夏亚债中国指数A" in identity.title.get_text() and "001021" in identity.get_text(), "OFFICIAL_A_IDENTITY")
     require(
         any(f.get("src") == "/product/fundLishifenhong.do?fundcode=001021" for f in identity.select("iframe")),
@@ -112,8 +121,8 @@ def rebuild(inputs, *, root):
         ),
         "ORIGINAL_DIVIDEND_TERMS",
     )
-    _ref(source, HISTORY_HASH, url=HISTORY_URL, role="OBSERVED_OFFICIAL_A_EVENT_HISTORY", kind="html")
-    history = _html(source, HISTORY_HASH)
+    _ref(source, history_hash, url=HISTORY_URL, role="OBSERVED_OFFICIAL_A_EVENT_HISTORY", kind="html")
+    history = _html(source, history_hash)
     require(
         [t.get_text(" ", strip=True) for t in history.select("th")]
         == ["年份", "权益登记日", "每份分红（元）", "分红发放日"],
@@ -127,17 +136,17 @@ def rebuild(inputs, *, root):
         len(event_rows) == 8 and event_rows[0] == ["2025", "2025-12-19", "0.0200", "2025-12-22"],
         "EVENT_HISTORY_COVERAGE",
     )
-    window_events = {r[1]: D(r[2]) for r in event_rows if inputs["as_of_date"] >= r[1] > "2025-09-30"}
+    window_events = {r[1]: D(r[2]) for r in event_rows if inputs["as_of_date"] >= r[1] > window[0]}
     require(window_events == {EVENT["ex_date"]: D(EVENT["cash_per_share"])}, "EVENT_HISTORY_MISMATCH")
 
     official, order = {}, []
-    for page, sha in enumerate(NAV_HASHES, 1):
+    for page, sha in enumerate(hashes, 1):
         ref = _ref(source, sha, url=NAV_URL, role="HISTORICAL_DAILY_NAV_BUSINESS_DATE_PER_ROW", kind="html")
         # 官网首次查询true；翻页必须留空，否则服务器会重置到第一页。
         form = {
             "fundcode": "001021",
-            "beginDate": "2025-09-30",
-            "endDate": "2026-09-30",
+            "beginDate": window[0],
+            "endDate": window[-1],
             "isQuery": "true" if page == 1 else "",
             "pageIndex": str(page),
         }
@@ -151,14 +160,14 @@ def rebuild(inputs, *, root):
         page_numbers = [
             int(m[1]) for a in soup.select("a[onclick]") if (m := re.fullmatch(r"thisPage\((\d+)\)", a["onclick"]))
         ]
-        require(max(page_numbers) == 13, "PAGE_TOTAL")
+        require(max(page_numbers) == len(hashes), "PAGE_TOTAL")
         require(
             [h.get_text(" ", strip=True) for h in soup.select("th")]
             == ["净值日期", "单位净值", "累计净值", "资产净值"],
             "NAV_HEADERS",
         )
         rows = _rows(soup)
-        require(len(rows) == (20 if page < 13 else 2), "PAGE_ROW_COUNT")
+        require(len(rows) == 20 if page < len(hashes) else 0 < len(rows) <= 20, "PAGE_ROW_COUNT")
         for row in rows:
             require(len(row) == 4 and all(re.fullmatch(r"\d+\.\d{4}", v) for v in row[1:3]), "NAV_ROW")
             day = row[0]
@@ -168,7 +177,8 @@ def rebuild(inputs, *, root):
     old_source = Originals(inputs, Path(root), lazy=True)
     base = previous.previous.base
     days, ends, old_values = base._nav(inputs, old_source)
-    require(len(days) == 242 and order == list(reversed(days)), "COMPLETE_REAL_CALENDAR")
+    require((rolling or len(days) == 242) and ends[0] == window[0]
+            and order == list(reversed(days)), "COMPLETE_REAL_CALENDAR")
     provider = old_source.json(inputs["refs"]["provider"])
     rows = {r["nav_date"]: r for r in provider["history"]["rows"]}
     for day in days:
@@ -203,8 +213,8 @@ def rebuild(inputs, *, root):
         values,
         {
             "method": "OFFICIAL_UNIT_NAV_ORIGINAL_NOTICE_CASH_REINVESTMENT_EX_DATE",
-            "official_unit_and_accumulated_rows_checked": 242,
-            "nav_page_count": 13,
+            "official_unit_and_accumulated_rows_checked": len(days),
+            "nav_page_count": len(hashes),
             "cash_events": {d: str(v) for d, v in window_events.items()},
             "reinvestment_nav_date": "2025-12-19",
             "reinvestment_unit_nav": str(official["2025-12-19"]["unit_nav"]),
@@ -225,7 +235,7 @@ def rebuild(inputs, *, root):
 def calculate(inputs, *, root: Path):
     if inputs.get("version") in {previous.VERSION, previous.OLD_VERSION}:
         return previous.calculate(inputs, root=root)
-    require(inputs.get("version") == VERSION, "VERSION")
+    require(inputs.get("version") in {VERSION, ROLLING_VERSION}, "VERSION")
     old = copy.deepcopy(inputs)
     old["version"] = previous.VERSION
     result = previous.calculate(old, root=root)

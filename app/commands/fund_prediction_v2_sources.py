@@ -137,7 +137,13 @@ def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_pr
                 calendar, calendar_failure = None, failure(error)
             for horizon in HORIZONS:
                 reason = calendar_failure
-                if calendar is None:
+                if horizon == "M6_V1" and row["source_ready"] and calendar is not None:
+                    from app.services.prediction_natural_month import natural_month_target
+
+                    dates = natural_month_target(current["base_nav_date"], current["target_nav_date"])
+                    # 当前基准仍须真实齐备，只有未来终点不再依赖尚未公布的日历。
+                    reason = None
+                elif calendar is None:
                     dates = _missing_dates(horizon, current, reason)
                 else:
                     try:

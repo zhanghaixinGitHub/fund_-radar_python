@@ -225,6 +225,25 @@ def test_missing_review_stays_action_with_real_input_path(tmp_path):
     assert not b.saved
 
 
+def test_advice_runs_after_ratings_and_cannot_close_with_pending_dependencies(tmp_path):
+    b = Backend(["123456"])
+    reviews(tmp_path, b.codes)
+    steps = []
+    b.ratings = lambda terminal: steps.append("ratings") or {"status": "SUCCEEDED"}
+
+    def advice(state, final):
+        assert state["ratings"]["status"] == "SUCCEEDED"
+        assert final["all_predictions_generated"]
+        steps.append("advice")
+        return {"status": "ACTION_REQUIRED", "items": []}
+
+    b.advice = advice
+    result = DailyPredictionRun(tmp_path, b).advance()
+    assert steps == ["ratings", "advice"]
+    assert result["status"] == "ADVICE_PENDING"
+    assert read(tmp_path / "advice-status.json")["status"] == "ACTION_REQUIRED"
+
+
 def test_missing_outcomes_is_not_zero_or_complete(tmp_path):
     b = Backend(["123456"])
     b.outcomes = None

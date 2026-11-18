@@ -80,7 +80,13 @@ def fund_wealth(source, spec, code, days):
             point = D(str(row["unit_nav"]))
             require(day not in selected or selected[day] == point, "NAV_CONFLICTING_DUPLICATE")
             if has_public:
-                require(point == public[day], "NAV_UNIT_SOURCE_CONFLICT")
+                # 单位净值JS也可能把已披露四位数串成相邻IEEE浮点数；沿累计
+                # 净值相同的一个ULP界核验并留审计，不放宽到经济数值舍入。
+                unit_tail = cumulative_crosscheck(point, public[day])
+                if unit_tail:
+                    serialization_audit.append({**unit_tail, "field": "UNIT_NAV", "code": code,
+                                                "date": day, "licensed_source": sha,
+                                                "public_source": spec["public_curve_ref"]})
                 tail = cumulative_crosscheck(row["accum_nav"], accum[day])
                 if tail:
                     serialization_audit.append(
@@ -185,13 +191,11 @@ def compile_performance(inputs, source):
             calendar.append(iso(row["cal_date"]))
     require(len(calendar) == len(set(calendar)) and sorted(calendar) == days, "CALENDAR_ORIGINAL_COMPLETE_WINDOW")
     require(spec["return_peers"] == RETURN_PEERS and spec["strict_peers"] == STRICT_PEERS, "FROZEN_PEER_SET")
+    from app.services.fund_rating_monthly_r5 import validate_window
+
+    validate_window(days, months, sorted(calendar), inputs["as_of_date"])
     require(
-        len(days) == 727 and len(months) == 37 and days == sorted(set(days)) and months == sorted(set(months)),
-        "FROZEN_CALENDAR",
-    )
-    require(days[0] == months[0] == "2023-09-28" and days[-1] == months[-1] == "2026-09-30", "FROZEN_WINDOW")
-    require(
-        content_digest(json.dumps(days, separators=(",", ":")).encode()) == spec["calendar_sha256"] == CALENDAR_SHA256,
+        content_digest(json.dumps(days, separators=(",", ":")).encode()) == spec["calendar_sha256"],
         "CALENDAR_HASH",
     )
     ids = [int(day[:4]) * 12 + int(day[5:7]) for day in months]

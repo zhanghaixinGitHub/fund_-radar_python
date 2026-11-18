@@ -8,6 +8,22 @@ import pytest
 from app.services.fund_rating_management_inputs import calculate
 
 
+def test_pdf_business_kind_is_not_read_as_empty_json(tmp_path, monkeypatch):
+    from app.services.fund_rating_management_inputs import _source_text
+
+    content = b"%PDF-test-original"
+    key = hashlib.sha256(content).hexdigest()
+    path = tmp_path / "sources" / (key + ".pdf")
+    path.parent.mkdir()
+    path.write_bytes(content)
+    monkeypatch.setattr("app.services.fund_rating_pdf.text_pages", lambda path: ["同版本原PDF的真实解析文字"])
+    reference = {"file": "sources/" + path.name, "sha256": key, "kind": "prospectus"}
+    assert _source_text(tmp_path, reference) == "同版本原PDF的真实解析文字"
+    path.write_bytes(b"changed")
+    with pytest.raises(ValueError, match="ARCHIVE_HASH"):
+        _source_text(tmp_path, reference)
+
+
 @pytest.fixture
 def inputs(tmp_path):
     sources, statements = {}, []

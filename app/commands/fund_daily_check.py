@@ -10,7 +10,8 @@ from app.services.fund_exposure_common import now, read
 from app.services.fund_materials_store import versioned_save
 
 
-def assess(state, followthrough, scope, ratings_readback, checked_at, live_window=None, one_day_readback=None):
+def assess(state, followthrough, scope, ratings_readback, checked_at, live_window=None, one_day_readback=None,
+           advice_readback=None):
     issues = []
     if state.get("owner_user_id") != followthrough.get("owner_user_id"):
         issues.append("OWNER_MISMATCH")
@@ -80,6 +81,25 @@ def assess(state, followthrough, scope, ratings_readback, checked_at, live_windo
         issues.append("RATING_READBACK_SCOPE_MISMATCH")
     elif any(r.get("status") not in {"RATED", "SCORED"} or r.get("score") is None for r in ratings_readback):
         issues.append("RATING_RESULTS_NOT_COMPLETE")
+    if state.get("workflow_version") == "HOLDINGS_END_TO_END_V1":
+        from datetime import date
+
+        from app.services.fund_rating_period import last_completed_month
+
+        target = str(last_completed_month(date.fromisoformat(checked_at[:10])))[:7]
+        if any((r.get("asOfDate") or "")[:7] < target for r in ratings_readback):
+            issues.append("MONTHLY_RATINGS_OUTDATED")
+        advice = state.get("advice", {})
+        if advice.get("status") != "SUCCEEDED" or set(advice.get("scope", [])) != set(scope):
+            issues.append("ADVICE_INPUTS_PENDING")
+        if advice_readback is None or {r["fund_code"] for r in advice_readback} != set(scope):
+            issues.append("ADVICE_READBACK_INCOMPLETE")
+        elif any(not r["read_back"] for r in advice_readback):
+            issues.append("ADVICE_REPORTS_NOT_COMPLETE")
+        if advice_readback is not None and any(
+            r.get("read_back") and not r.get("inputs_current") for r in advice_readback
+        ):
+            issues.append("ADVICE_INPUTS_CHANGED_OR_UNVERIFIED")
     return {
         "status": "SUCCEEDED" if not issues else "INCOMPLETE",
         "checked_at": checked_at,
@@ -92,14 +112,23 @@ def assess(state, followthrough, scope, ratings_readback, checked_at, live_windo
         "prediction_outcomes": outcome,
         "one_day_outcomes": daily,
         "one_day_outcome_readback": one_day_readback,
+        "advice": state.get("advice"),
+        "advice_readback": advice_readback,
     }
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path)
+    parser.add_argument("--output", type=Path, help="人工复验另存，不覆盖当日09:40检查记录")
     args = parser.parse_args()
     at = now().isoformat()
+    output = args.output or PROJECT / ".local-runs" / "daily-checks" / (now().strftime("%Y%m%d") + ".json")
+    if not output.resolve().is_relative_to(PROJECT / ".local-runs"):
+        raise ValueError("DAILY_CHECK_OUTPUT_OUTSIDE_LOCAL_RUNS")
+    from app.services.prediction_trial_v2 import storage_check
+
+    storage_check(now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat())
     directory = args.run_dir or PROJECT / ".local-runs" / ("daily-prediction-" + now().strftime("%Y%m%d"))
     path = directory / "run.json"
     if not path.exists():
@@ -109,10 +138,17 @@ def main():
         try:
             _, _, scope, live_window = backend.context()
             # 重新交叉核对两端原预测、当前资料摘要和本人归档，不只读昨天的成功标志。
-            followthrough = backend.guard(directory / "check-followthrough.json", None)
+            guard_output = output.with_name(output.stem + "-followthrough.json") if args.output else (
+                directory / "check-followthrough.json"
+            )
+            followthrough = backend.guard(guard_output, None)
             ratings = [backend.get(f"http://127.0.0.1:8000/internal/v1/funds/{c}/rating") for c in scope]
+            state = read(path)
+            from app.services.fund_daily_advice import read_saved_advice
+
+            advice = read_saved_advice(state["owner_user_id"], state.get("advice", {}), backend=backend)
             result = assess(
-                read(path), followthrough, scope, ratings, at, live_window, backend.one_day_outcome_status()
+                state, followthrough, scope, ratings, at, live_window, backend.one_day_outcome_status(), advice
             )
         except Exception as error:
             result = {
@@ -123,7 +159,6 @@ def main():
             }
         finally:
             backend.close()
-    output = PROJECT / ".local-runs" / "daily-checks" / (now().strftime("%Y%m%d") + ".json")
     versioned_save(output, result)
     print(
         json.dumps({"status": result["status"], "issues": result["issues"], "output": str(output)}, ensure_ascii=False)

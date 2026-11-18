@@ -256,6 +256,9 @@ def recover(code, output, window, *, collector=None):
     from app.services.fund_prediction_bond_recovery import refresh as refresh_bonds
 
     bond_receipts = refresh_bonds(candidate, window["base_nav_date"], output.parents[1] / "public")
+    from app.services.fund_prediction_gold_recovery import refresh as refresh_gold
+
+    gold_receipt = refresh_gold(candidate, window["base_nav_date"], output / "gold")
     from app.services.fund_prediction_news_recovery import refresh as refresh_news
 
     notice_receipt = refresh_news(candidate, root=root, checked_at=now())
@@ -270,6 +273,9 @@ def recover(code, output, window, *, collector=None):
 
     bind_latest_partial(candidate, latest)
     companies = {c["code"]: c for c in candidate.get("companies", [])}
+    from app.services.fund_prediction_company_originals import refresh as refresh_company_originals
+
+    shared_company_receipt = refresh_company_originals(candidate, root=root, checked_at=now())
     required = {h["stockCode"] for h in latest.get("holdings", [])} | set(companies)
     required |= {h["stockCode"] for r in target_reports for h in r.get("report", {}).get("holdings", [])}
     receipts = []
@@ -372,9 +378,11 @@ def recover(code, output, window, *, collector=None):
     value = {
         "status": "SUPPLEMENTED_REVIEW_REQUIRED",
         "materials_path": str(path.resolve()),
+        "gold_recovery": gold_receipt,
         "latest_report": latest,
         "securities": sorted(required),
         "company_attempts": receipts,
+        "shared_company_originals": shared_company_receipt,
         "market_attempts": market_receipts,
         "bond_attempts": bond_receipts,
         "hk_attempts": hk_receipts,

@@ -143,6 +143,7 @@ def list_stock_feature_inputs(
     source_sync_run_id: UUID,
     source_sync_finished_at: datetime,
     history_limit: int,
+    scope_codes=None,
 ) -> tuple[StockFeatureInput, ...]:
     """批量读取股票型试点基金最近净值，不混入其他来源或基金类型。"""
     if history_limit < 1:
@@ -155,6 +156,7 @@ def list_stock_feature_inputs(
                 FundShareClass.fund_type == "STOCK",
                 FundShareClass.status == "ACTIVE",
                 FundShareClass.source_code == source_code,
+                  *([FundShareClass.fund_code.in_(scope_codes)] if scope_codes is not None else []),
             )
             .order_by(FundShareClass.fund_code.asc())
         ).all()

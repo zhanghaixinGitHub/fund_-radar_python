@@ -22,13 +22,15 @@ def need(ok, code):
 
 
 def compile_material_review(inputs, source):
+    from app.services.fund_rating_monthly_r5 import three_year_disclosure_start
+
     ref = inputs["material_event_review_ref"]
     need(source.sources[ref]["archive_kind"] == "DERIVED", "TYPED_RESEARCH_REQUIRED")
     r = source.json(ref)
     need(
         r["version"] == "018590_MATERIAL_APPLICABILITY_ORIGINALS_V1"
         and r["as_of_date"] == inputs["as_of_date"]
-        and r["window_start"] == "2023-09-30",
+        and r["window_start"] == three_year_disclosure_start(inputs["as_of_date"]),
         "TIME_CONTRACT",
     )
     catalogs = {}
@@ -106,6 +108,9 @@ def compile_material_review(inputs, source):
         else:
             need(e["applicability"] == "FUND_CONFIRMED", "UNREVIEWED_APPLICABILITY")
         all_events.append(e)
+    from app.services.fund_rating_monthly_r5 import annual_disclosure_range
+
+    issuer_start, issuer_end = annual_disclosure_range(inputs["as_of_date"])
     issuer_ids = {}
     issuer_coverage = {}
     for security, refs in r["issuer_catalogs"].items():
@@ -120,7 +125,7 @@ def compile_material_review(inputs, source):
                 or {}
             )
             need(
-                params.get("seDate") == "2025-10-01~2026-09-30"
+                params.get("seDate") == issuer_start + "~" + issuer_end
                 and str(params.get("stock", "")).startswith(security + ",")
                 and int(params.get("pageNum", 0)) == page,
                 "ISSUER_FULL_YEAR_REQUEST",
@@ -140,8 +145,8 @@ def compile_material_review(inputs, source):
         issuer_coverage[security] = {
             "source_refs": refs,
             "count": total,
-            "window_start": "2025-10-01",
-            "window_end": "2026-09-30",
+            "window_start": issuer_start,
+            "window_end": issuer_end,
         }
     for e in r["issuer_events"]:
         row = issuer_ids[e["security"]].get(e["id"])

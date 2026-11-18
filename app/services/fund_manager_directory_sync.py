@@ -764,11 +764,16 @@ class ManagerDirectorySync:
         return result
 
 
-def synchronize(manager_ids=(), *, dry_run=False, fetch=False, progress=None):
+def synchronize(manager_ids=(), *, dry_run=False, fetch=False, progress=None, fund_codes=None):
     """HTTP与CLI共用入口；真实读取先检查本机来源授权，不改变原市场目录。"""
     source, run_id = None, None
     maintenance = ManagerDirectorySync()
     frozen_targets = maintenance.seeds()
+    if fund_codes is not None:
+        from app.services.fund_market_preparation import validate_codes
+
+        codes = set(validate_codes(fund_codes))
+        frozen_targets = [seed for seed in frozen_targets if seed["code"] in codes]
     if manager_ids:
         frozen_targets = [seed for seed in frozen_targets if seed["id"] in set(manager_ids)]
         if {seed["id"] for seed in frozen_targets} != set(manager_ids):
@@ -792,7 +797,7 @@ def synchronize(manager_ids=(), *, dry_run=False, fetch=False, progress=None):
                     scope_snapshot={
                         "managerIds": [str(seed["id"]) for seed in frozen_targets],
                         "anchorFundCodes": sorted({seed["code"] for seed in frozen_targets}),
-                        "scope": "REGISTERED_ANCHORS",
+                        "scope": "CURRENT_HOLDINGS" if fund_codes is not None else "REGISTERED_ANCHORS",
                     },
                 )
                 session.add(run)

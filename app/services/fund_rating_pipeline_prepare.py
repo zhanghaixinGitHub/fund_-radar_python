@@ -574,6 +574,70 @@ def prepare_active_broad_components(session, request: dict, *, root: Path) -> di
     return prepare(session, canonical, root=root)
 
 
+def _initial_fee_bundle(session, request, root):
+    """本轮仅开放017437自身费用首评；不创建其他七维结论或完整总分。"""
+    from bs4 import BeautifulSoup
+
+    from app.services.fund_rating_reviewed_quality import ACTIVE_BASIS, policy
+
+    code, raw = request["fund_code"], request["inputs"]
+    if code != "017437" or request.get("initial_partial_fee") is not True:
+        raise ValueError("R5_FEE_CURRENT_PERIOD_REQUIRED")
+    master = session.execute(text("""
+        SELECT s.fund_name AS public_name,s.share_class,s.fund_master_id,
+               m.fund_name AS catalog_legal_name,m.manager_name
+        FROM fund_share_class s JOIN fund_master m USING(fund_master_id)
+        WHERE s.fund_code=:code AND s.status='ACTIVE'
+    """), {"code": code}).mappings().one()
+    if (raw.get("fund_code") != code or raw.get("as_of_date") != request["as_of_date"]
+            or raw.get("share_class") != master["share_class"] or raw.get("basis") != ACTIVE_BASIS):
+        raise ValueError("R5_FEE_INITIAL_IDENTITY")
+    raw["sources"] = {sha: canonical_source(root, ref) for sha, ref in raw["sources"].items()}
+    ref = raw["sources"][raw["primary_ref"]]
+    if ref.get("archive_kind") == "DERIVED":
+        raise ValueError("R5_FEE_INITIAL_ORIGINAL_REQUIRED")
+    original = json.loads(source_text(root / ref["file"], encoding="utf-8"))
+    data = original.get("data", {})
+    body = BeautifulSoup(data.get("notice_content", ""), "html.parser").get_text("\n", strip=True)
+    plain = re.sub(r"\s+", "", body)
+    legal = raw["legal_name"]
+    def clean(value):
+        return re.sub(r"\s+", "", value).replace("（", "(").replace("）", ")")
+    published = str(data.get("notice_date", ""))[:10]
+    cover = re.search(r"(20\d{2})年(\d{1,2})月(\d{1,2})日", plain[:1200])
+    if (original.get("success") != 1 or not cover or code not in plain[:18000]
+            or master["manager_name"] not in plain[:18000]
+            or clean(legal) not in clean(data.get("notice_title", ""))
+            or clean(legal) not in clean(body[:18000]) or "股票" not in legal or "QDII" not in legal
+            or code not in {x.get("stock") for x in data.get("security", [])}
+            or published != ref.get("published_on") or published > request["as_of_date"]):
+        raise ValueError("R5_FEE_INITIAL_PRIMARY_ORIGINAL_IDENTITY")
+    from datetime import date
+
+    holding = date(*map(int, cover.groups())).isoformat()
+    if holding > request["as_of_date"]:
+        raise ValueError("R5_FEE_INITIAL_REPORT_AFTER_CUTOFF")
+    unknown = "本份额首次仅核公开费用；本维自身原件输入或适用方法尚未完成，保持未知，不借用其他基金结论。"
+    doc = {"code": code, "as_of": request["as_of_date"],
+           "outer_weights_percent": {key: policy(ACTIVE_BASIS)["weights"][value] for key, value in KEYS.items()},
+           "dimensions": {key: {"lower": "0", "upper": "100", "candidate": None, "reason": unknown}
+                          for key in KEYS}, "full_total": None, "grade": None,
+           "independent_product_validation": False}
+    identity = {"code": code, "identity_verified": True, "published_on": published,
+                "title": data["notice_title"], "pages": [body], "source": {"sha256": ref["sha256"]}}
+    return {"basis": BASIS, "fund_code": code, "family": "QDII_EQUITY", "share_class": master["share_class"],
+            "public_name": master["public_name"], "as_of_date": request["as_of_date"], "holding_date": holding,
+            "verified_at": datetime.now(UTC).isoformat(),
+            "identity": {"legal_name": legal, "manager_name": master["manager_name"]},
+            "existing_catalog_binding": {"fund_master_id": str(master["fund_master_id"]),
+                                         "catalog_legal_name": master["catalog_legal_name"]},
+            "research_format": "single", "research_archive": archive_json(root, doc), "reviewed_document": doc,
+            "identity_archive": archive_json(root, identity), "original_report_archive": ref,
+            "report_title": data["notice_title"], "report_url": ref["url"], "report_published_on": published,
+            "extra_archives": list(raw["sources"].values()), "public_explanations": {key: unknown for key in KEYS},
+            "public_limitations": ["首次仅费用分项；其余七维、完整总分和等级均未完成。"]}
+
+
 def prepare_fees(session, request: dict, *, root: Path) -> dict:
     """独立补本期本份额的绝对费用项，其余维度、日期和历史批次保持。"""
     from app.services.fund_rating_fee_inputs import calculate as calculate_fees
@@ -584,9 +648,10 @@ def prepare_fees(session, request: dict, *, root: Path) -> dict:
     if not isinstance(code, str) or not re.fullmatch(r"[0-9]{6}", code):
         raise ValueError("R5_FEE_CODE")
     previous = current_inputs(session, [code]).get(code)
-    if not previous or str(previous["as_of_date"]) != request["as_of_date"]:
+    if previous and str(previous["as_of_date"]) != request["as_of_date"]:
         raise ValueError("R5_FEE_CURRENT_PERIOD_REQUIRED")
-    bundle = deepcopy(next(m["bundle"] for m in previous["input_snapshot"]["members"] if m["fund_code"] == code))
+    bundle = (deepcopy(next(m["bundle"] for m in previous["input_snapshot"]["members"] if m["fund_code"] == code))
+              if previous else _initial_fee_bundle(session, request, root))
     if bundle.get("basis") != BASIS or bundle.get("r5_calculation") or bundle.get("passive_components_calculation"):
         raise ValueError("R5_FEE_PARTIAL_SNAPSHOT_REQUIRED")
     raw = deepcopy(request["inputs"])

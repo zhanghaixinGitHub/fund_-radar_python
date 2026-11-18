@@ -135,9 +135,15 @@ def foundation(source: Originals, inputs: dict) -> tuple[dict, dict]:
         inputs["fund_code"] != "016008"
         or primary != PRIMARY_SHA256
         or inputs["holding_date"] != "2026-06-30"
-        or inputs["as_of_date"] != "2026-09-30"
     ):
         raise ValueError("R5_CMF_HOLDER_PRODUCT_OR_PERIOD")
+    from app.services.fund_rating_period import validate_period
+
+    class SourceBody:
+        def body(self, reference):
+            return "\n".join(source.pages(reference))
+
+    validate_period(inputs, SourceBody())
     review = inputs.get("holder_condition_review")
     if not review or review.get("actual_effect_review_complete") is not True:
         raise ValueError("R5_CMF_HOLDER_EFFECT_REVIEW_UNKNOWN")

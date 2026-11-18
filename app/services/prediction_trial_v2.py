@@ -149,11 +149,19 @@ def prepare_trial(directory, selection, *, holdings=None, clock=None):
                         or dates.get("startDate") != target
                     ):
                         raise ValueError("V2_PERIOD_ORIGINAL_MISMATCH")
+                    if (horizon == "M6_V1" and ready and dates.get("calendarId")
+                            and dates.get("calendarHash") and dates.get("endDateBasis") != "CALENDAR_MONTH"):
+                        from app.services.prediction_natural_month import natural_month_target
+
+                        # 新审阅可复用旧来源，但日期按新冻结规则计算；不修改原输入或旧正式结果。
+                        dates = {**dates, **natural_month_target(base, target)}
                     periods[horizon].update(
                         status=dates["endDateStatus"],
                         end_date=dates["endDate"],
                         # 名义六个月日期可确定；保留它不代表已核实最终估值日。
                         nominal_end_date=dates.get("nominalEndDate"),
+                        end_date_basis=dates.get("endDateBasis"),
+                        outcome_rule=dates.get("outcomeRule"),
                         calendar_id=dates.get("calendarId"),
                         calendar_hash=dates.get("calendarHash"),
                         source_path=str(sibling),

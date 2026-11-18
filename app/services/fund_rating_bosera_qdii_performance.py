@@ -132,12 +132,21 @@ class Originals:
             or inputs.get("fund_code") != "018853"
             or inputs.get("share_class") != "C"
             or inputs.get("currency") != "CNY"
-            or inputs.get("as_of_date") != "2026-09-30"
-            or inputs.get("holding_date") != "2026-06-30"
             or compact(inputs.get("legal_name", "")) != compact(LEGAL_NAME)
             or inputs.get("manager_name") != "博时基金管理有限公司"
         ):
             raise ValueError("BOSERA_QDII_COMPONENT_SCOPE")
+        self.as_of = str(date.fromisoformat(inputs["as_of_date"]))
+        self.holding_date = str(date.fromisoformat(inputs["holding_date"]))
+        self.window_start = inputs.get("window_start")
+        if not self.window_start and self.as_of == "2026-09-30":
+            self.window_start = "2023-09-28"
+        if not self.window_start:
+            raise ValueError("BOSERA_QDII_ROLLING_WINDOW_REQUIRED")
+        start = date.fromisoformat(self.window_start)
+        end = date.fromisoformat(self.as_of)
+        if (end.year * 12 + end.month) - (start.year * 12 + start.month) != 36 or self.holding_date > self.as_of:
+            raise ValueError("BOSERA_QDII_ROLLING_WINDOW_REQUIRED")
         self.sources, self.roles, self.originals = inputs["sources"], inputs["roles"], {}
         for digest, reference in self.sources.items():
             path = (self.root / reference["file"]).resolve()
@@ -207,7 +216,7 @@ class Originals:
             raise ValueError("BOSERA_QDII_MATERIAL_EVENT_REVIEW_REQUIRED")
         if (
             review.get("fund_code") != "018853"
-            or review.get("as_of_date") != "2026-09-30"
+            or review.get("as_of_date") != self.as_of
             or compact(review.get("legal_name", "")) != compact(LEGAL_NAME)
             or review.get("known_manager_matters_reviewed") is not True
             or len(review.get("review_scope", "")) < 40
@@ -285,7 +294,9 @@ class Originals:
         """独立核本份额C人民币原概要与本期完整报告，不沿用旧Y标记。"""
         raw = self.raw(self.roles["primary-report"]["source_hash"])
         text = compact(docx_text(raw))
-        if not all(s in text[:18000] for s in [compact(LEGAL_NAME), "018853", "2026年6月30日"]):
+        holding = date.fromisoformat(self.holding_date)
+        label = f"{holding.year}年{holding.month}月{holding.day}日"
+        if not all(s in text[:18000] for s in [compact(LEGAL_NAME), "018853", label]):
             raise ValueError("BOSERA_QDII_PRIMARY_REPORT_IDENTITY")
         role = self.roles["share-identity-summary"]
         summary = compact(
@@ -309,14 +320,39 @@ def iso_day(value: str) -> str:
     return str(date.fromisoformat(value))
 
 
+def verify_empty_events(source, prefix, code):
+    """单位/累计净值相同还不够；缺复权值时另核实际分红及拆分完整空表。"""
+    from bs4 import BeautifulSoup
+
+    ref, raw = checked_receipt(source, prefix + "-div")
+    dividend = json.loads(raw)
+    data = dividend.get("data", {})
+    if (ref.get("params", {}).get("ts_code") != code + ".OF"
+            or dividend.get("code") != 0 or data.get("has_more") is not False
+            or data.get("count") != 0 or data.get("items") != []):
+        raise ValueError("BOSERA_QDII_UNADJUSTED_DIVIDEND_PROOF_REQUIRED")
+    ref, raw = checked_receipt(source, prefix + "-split")
+    if ref.get("url") != f"https://fundf10.eastmoney.com/fhsp_{code}.html":
+        raise ValueError("BOSERA_QDII_UNADJUSTED_SPLIT_IDENTITY")
+    soup = BeautifulSoup(raw, "html.parser")
+    if not soup.title or f"({code})基金分红送配" not in compact(soup.title.get_text()):
+        raise ValueError("BOSERA_QDII_UNADJUSTED_SPLIT_IDENTITY")
+    tables = [t for t in soup.find_all("table") if "拆分折算日" in t.get_text()]
+    rows = [[compact(c.get_text()) for c in r.find_all(["th", "td"])]
+            for t in tables for r in t.find_all("tr")]
+    if len(tables) != 1 or rows != [["年份", "拆分折算日", "拆分类型", "拆分折算比例"], ["暂无拆分信息!"]]:
+        raise ValueError("BOSERA_QDII_UNADJUSTED_SPLIT_PROOF_REQUIRED")
+
+
 def series_from_bosera(source, label, expected_title):
     """官网年区间正常接口，不插值缺日；每条日期和净值都保留原始披露。"""
     result, receipts = {}, []
-    for year in ["2023", "2024", "2025", "2026"]:
+    first, last = date.fromisoformat(source.window_start), date.fromisoformat(source.as_of)
+    for year in [str(y) for y in range(first.year, last.year + 1)]:
         receipt, raw = checked_receipt(source, label + "-" + year)
         response = json.loads(raw, parse_float=D)
-        expected_start = "20230901" if year == "2023" else year + "0101"
-        expected_end = "20260930" if year == "2026" else year + "1231"
+        expected_start = f"{first.year:04d}{first.month:02d}01" if year == str(first.year) else year + "0101"
+        expected_end = source.as_of.replace("-", "") if year == str(last.year) else year + "1231"
         if (
             receipt["params"]["fundCode"] != "018853"
             or receipt["params"].get("startDate") != expected_start
@@ -331,7 +367,7 @@ def series_from_bosera(source, label, expected_title):
             day, value = next(iter(row.items()))
             if not re.fullmatch(r"\d{8}", day):
                 raise ValueError("BOSERA_DATE_ROW_SHAPE")
-            if day > "20260930":
+            if day > source.as_of.replace("-", ""):
                 raise ValueError("BOSERA_QDII_FUTURE_NAV_VALUATION")
             if not expected_start <= day <= expected_end:
                 raise ValueError("BOSERA_QDII_NAV_RESPONSE_OUTSIDE_REQUEST")
@@ -369,13 +405,16 @@ def _compile(source: Originals):
     if (
         len(reports) != 4
         or len({ref.get("sha256") for ref in reports}) != 4
-        or {ref.get("report_period") for ref in reports} != {"2023-12-31", "2024-12-31", "2025-12-31", "2026-06-30"}
+        or {ref.get("report_period") for ref in reports} != {
+            *{f"{year}-12-31" for year in range(int(source.holding_date[:4]) - 3, int(source.holding_date[:4]))},
+            source.holding_date,
+        }
     ):
         raise ValueError("BOSERA_QDII_FIXED_HISTORICAL_CONTRACT_SET")
     report_checks = []
     for ref in reports:
         raw = source.raw(ref["sha256"])
-        if content_digest(raw) != ref["sha256"] or ref["published_on"] > "2026-09-30":
+        if content_digest(raw) != ref["sha256"] or ref["published_on"] > source.as_of:
             raise ValueError("PEER_HISTORICAL_REPORT_HASH_OR_CUTOFF")
         reader = PdfReader(raw)
         cover = report_cover_identity(reader.pages[0].extract_text() or "", ref["report_period"])
@@ -431,7 +470,7 @@ def _compile(source: Originals):
     cumulative, cumulative_receipts = series_from_bosera(source, "bosera-nav8", "累计净值")
     if own != cumulative:
         raise ValueError("OWN_DIVIDEND_OR_SPLIT_RECONCILIATION_REQUIRED")
-    own = {day: value for day, value in own.items() if "2023-09-28" <= day <= "2026-09-30"}
+    own = {day: value for day, value in own.items() if source.window_start <= day <= source.as_of}
     provider_ref = source.reference("target-provider")
     provider_path = Path(provider_ref["path"])
     prior = source.json_role("target-provider")
@@ -451,9 +490,15 @@ def _compile(source: Originals):
         raise ValueError("BOSERA_QDII_DUPLICATE_TARGET_PROVIDER_DATE")
     if any(day > source.inputs["as_of_date"] for day in target_provider):
         raise ValueError("BOSERA_QDII_FUTURE_NAV_VALUATION")
+    missing_adjusted = [day for day, row in target_provider.items() if row.get("adjusted_nav") is None]
+    if missing_adjusted:
+        verify_empty_events(source, "target", "018853")
     for day, value in own.items():
         if day not in target_provider or any(
-            D(target_provider[day][key]) != value for key in ["unit_nav", "accumulated_nav", "adjusted_nav"]
+            target_provider[day].get(key) is None or D(target_provider[day][key]) != value
+            for key in ["unit_nav", "accumulated_nav"]
+        ) or (target_provider[day].get("adjusted_nav") is not None
+              and D(target_provider[day]["adjusted_nav"]) != value
         ):
             raise ValueError("OWN_OFFICIAL_AND_AUTHORIZED_NAV_CONFLICT:" + day)
     peer_ref, raw = checked_receipt(source, "peer-official-nav")
@@ -480,11 +525,16 @@ def _compile(source: Originals):
         raise ValueError("BOSERA_QDII_DUPLICATE_PEER_PROVIDER_DATE")
     if any(day > source.inputs["as_of_date"] for day in p_by_day):
         raise ValueError("BOSERA_QDII_FUTURE_NAV_VALUATION")
+    peer_missing_adjusted = [day for day, row in p_by_day.items() if row.get("adj_nav") is None]
+    if peer_missing_adjusted:
+        verify_empty_events(source, "peer", "007844")
     for day in own:
         if day not in peer or day not in p_by_day:
             raise ValueError("PEER_COMMON_WINDOW_DATE_MISSING:" + day)
         if p_by_day[day]["ts_code"] != "007844.OF" or any(
-            D(p_by_day[day][key]) != peer[day] for key in ["unit_nav", "accum_nav", "adj_nav"]
+            p_by_day[day].get(key) is None or D(p_by_day[day][key]) != peer[day]
+            for key in ["unit_nav", "accum_nav"]
+        ) or (p_by_day[day].get("adj_nav") is not None and D(p_by_day[day]["adj_nav"]) != peer[day]
         ):
             raise ValueError("PEER_ORIGINAL_NAV_CONFLICT_OR_EVENT:" + day)
     div_ref, raw = checked_receipt(source, "peer-div")
@@ -500,7 +550,8 @@ def _compile(source: Originals):
     # 不以境内交易所模板强迫填造未公开日；正常估值日须与授权原序列完整一致。
     dates = sorted(day for day in own if date.fromisoformat(day).weekday() < 5)
     expected_dates = sorted(
-        day for day in target_provider if "2023-09-28" <= day <= "2026-09-30" and date.fromisoformat(day).weekday() < 5
+        day for day in target_provider if source.window_start <= day <= source.as_of
+        and date.fromisoformat(day).weekday() < 5
     )
     if dates != expected_dates:
         raise ValueError("BOSERA_QDII_NORMAL_NAV_DATE_UNIVERSE_NOT_COMPLETE")
@@ -523,10 +574,10 @@ def _compile(source: Originals):
         raise ValueError("BOSERA_QDII_MONTH_ENDS_NOT_ACTUAL_LAST_DISCLOSURE")
     if (
         len(months) != 37
-        or months[0] != "2023-09-28"
-        or months[-1] != "2026-09-30"
+        or months[0] != source.window_start
+        or months[-1] != source.as_of
         or not set(months) <= set(dates)
-        or dates[-1] != "2026-09-30"
+        or dates[-1] != source.as_of
     ):
         raise ValueError("EXACT_THREE_YEAR_37_MONTH_END_WINDOW")
     receipts = own_receipts + cumulative_receipts + [peer_ref, p_ref, div_ref, summary_ref]
@@ -570,7 +621,7 @@ def _compile(source: Originals):
             }
     packet = {
         "fund_code": "018853",
-        "as_of_date": "2026-09-30",
+        "as_of_date": source.as_of,
         "basis": PASSIVE_BASIS,
         "unit_contract": "RATIO_RANKS_RATIO_WINDOWS",
         "r4_evidence_registry": registry,
@@ -579,7 +630,7 @@ def _compile(source: Originals):
             "target_product_aliases": frozen["target_aliases"],
             "material_event_pending": source.material_event_pending,
         },
-        "quality_public": {"dataDates": {"nav": "2026-09-30", "holdings": "2026-06-30"}},
+        "quality_public": {"dataDates": {"nav": source.as_of, "holdings": source.holding_date}},
         "raw_archive": [{"kind": "ORIGINAL", "sha256": digest} for digest in all_refs],
     }
     result = _calculate_frozen(
@@ -592,6 +643,11 @@ def _compile(source: Originals):
         "anchors": deepcopy(source.material_event_anchors),
         "result": result,
         "audit": {
+            "missing_adjusted_nav_preserved": {"018853": missing_adjusted, "007844": peer_missing_adjusted},
+            "missing_adjusted_method": (
+                "OFFICIAL_UNIT_EQUALS_CUMULATIVE_WITH_ACTUAL_EMPTY_DIVIDEND_AND_SPLIT_PROOFS_NO_DB_FILL"
+                if missing_adjusted or peer_missing_adjusted else "ORIGINAL_ADJUSTED_CROSS_CHECK"
+            ),
             "own_original_date_count": len(own),
             "valuation_date_count": len(dates),
             "common_month_ends": months,

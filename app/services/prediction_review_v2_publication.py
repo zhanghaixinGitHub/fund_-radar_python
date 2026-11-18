@@ -91,6 +91,8 @@ def _public_period(row, assessment, original, source, reviewed_at):
     )
     if row["decision"] == "BLOCKED":
         limitations += _strings(period.get("reason")) or ["本周期日期或资料尚未核齐，暂不判断。"]
+    if period.get("end_date_basis") == "CALENDAR_MONTH":
+        limitations.append("目标日按六个自然月计算，不要求当天交易；到期按目标日或之前最近估值日的真实净值核对，缺该日净值时等待。")
     if not primary or not counter or not conditions:
         raise ValueError("V2_PUBLICATION_REASON_OR_CONDITIONS_MISSING")
     source_cutoff = (
@@ -122,6 +124,8 @@ def _public_period(row, assessment, original, source, reviewed_at):
         "startDate": period["start_date"],
         "endDate": period.get("end_date"),
         "nominalEndDate": nominal,
+        "endDateBasis": period.get("end_date_basis"),
+        "outcomeRule": period.get("outcome_rule"),
         "analysisAt": reviewed_at,
         "sourceCutoff": source_cutoff,
         "summary": assessment.get("summary") or primary,
@@ -671,6 +675,10 @@ def daily_records(owner, codes, target):
             )
             if stored is None or stored["archive"].get("publication_type") != "STRICT_V2_TRIAL":
                 continue
+            from app.services.fund_prediction_nav_identity import nav_identity
+
+            frozen = stored["archive"].get("source_packets", {}).get(code, {}).get("canonical_json")
+            frozen_nav = json.loads(frozen).get("data", {}).get("nav", []) if frozen else None
             for item in stored["archive"]["cases"]:
                 row, identity = item["case"], item.get("workflow_identity", {})
                 if (
@@ -685,7 +693,7 @@ def daily_records(owner, codes, target):
                 expired = db_clock >= cutoff
                 kind = (
                     "CONDITIONAL_OUTLOOK"
-                    if row["horizon"] == "M6_V1"
+                    if row["horizon"] == "M6_V1" and not identity.get("end_date")
                     else "DATED_FORECAST"
                     if eligible and not expired
                     else "RETROSPECTIVE"
@@ -696,6 +704,9 @@ def daily_records(owner, codes, target):
                         "fund_code": code,
                         "horizon": row["horizon"],
                         "decision": "ABSTAIN" if row["decision"] == "BLOCKED" else row["decision"],
+                        "source_decision": row["decision"],
+                        "source_reason": item["analysis"].get("summary") or row.get("period", {}).get("reason"),
+                        "adopted_at": stored["adopted_at"].isoformat(),
                         "base_date": identity["base_date"],
                         "target_date": identity["target_date"],
                         "end_date": identity.get("end_date"),
@@ -703,6 +714,8 @@ def daily_records(owner, codes, target):
                         "snapshot_verified": identity.get("snapshot_verified") is True,
                         "materials_input_hash": identity.get("materials_input_hash"),
                         "materials_hash": identity.get("materials_hash"),
+                        "nav_input_hash": nav_identity(frozen_nav, identity["base_date"])
+                        if frozen_nav is not None else None,
                         "analysis_version": VERSION,
                         "record_kind": kind,
                         "ex_ante_eligible": bool(eligible and not expired),

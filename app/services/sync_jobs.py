@@ -346,6 +346,7 @@ class LocalSyncJobManager:
             result = (self._manager_synchronizer or synchronize)(
                 manager_ids,
                 fetch=True,
+                **self._material_scope_options(job_id),
                 progress=lambda index, total, code, message: self._replace_job(
                     job_id,
                     progress_current=index,
@@ -490,6 +491,19 @@ class LocalSyncJobManager:
         )
         try:
             workflow = (self._market_workflow_factory or MarketSyncWorkflow)(owner_user_id=options.get("owner_user_id"))
+            if options.get("owner_user_id"):
+                # 每轮只读取一次当前正份额持仓，所有采集步骤共用，失败绝不回退市场范围。
+                codes = tuple(row["fund_code"] for row in workflow.scope())
+                if not codes:
+                    for child_id in self._batch_child_ids[job_id]:
+                        self._skip_generation(child_id, "本人当前无正份额持仓，无需采集")
+                    self._replace_job(job_id, status="SUCCEEDED", progress_current=len(runners),
+                                      finished_at=datetime.now(UTC), progress_message="当前无持仓，无需更新资料")
+                    return
+                with self._lock:
+                    for child_id in self._batch_child_ids[job_id]:
+                        self._prediction_scopes[child_id] = {"material_codes": codes}
+                    self._persist()
             child_ids = self._batch_child_ids[job_id]
             for index, (child_id, runner) in enumerate(zip(child_ids, runners, strict=True)):
                 logger.info("sync_jobs._run_all >>> stage started, job_id=%s, child_job_id=%s", job_id, child_id)
@@ -658,6 +672,10 @@ class LocalSyncJobManager:
             error_code="FUND_DATA_INCOMPLETE" if result["status"] != "SUCCEEDED" else None,
             error_message="部分基金资料仍需补充或复核" if result["status"] != "SUCCEEDED" else None,
         )
+
+    def _material_scope_options(self, job_id):
+        scope = self._prediction_scopes.get(job_id, {})
+        return {"fund_codes": tuple(scope["material_codes"])} if "material_codes" in scope else {}
 
     def _configure_prediction_scope(self, job_id, service):
         scope = self._prediction_scopes.get(job_id)
@@ -931,6 +949,7 @@ class LocalSyncJobManager:
         try:
             service = self._service_factory()
             outcome = service.sync_market_nav_incremental(
+                **self._material_scope_options(job_id),
                 progress_reporter=lambda current, total, fund_code, message: self._update_progress(
                     job_id, current, total, fund_code, message
                 ),
@@ -1101,6 +1120,7 @@ class LocalSyncJobManager:
         try:
             service = self._free_data_completion_service_factory()
             result: FreeDataCompletionResult = service.sync(
+                **self._material_scope_options(job_id),
                 progress_reporter=lambda current, total, fund_code, message: self._update_progress(
                     job_id, current, total, fund_code, message
                 )
@@ -1315,6 +1335,7 @@ class LocalSyncJobManager:
             service = self._fee_service_factory()
             result = service.sync(
                 fund_code,
+                **self._material_scope_options(job_id),
                 progress_reporter=lambda current, total, code, message: self._update_progress(
                     job_id, current, total, code, message
                 ),
@@ -1367,6 +1388,7 @@ class LocalSyncJobManager:
     def _build_feature_snapshots(self, job_id: UUID) -> StockFeatureBuildSummary:
         """以当前成功来源为唯一输入构建特征，并将逐基金进度映射到同步快照。"""
         return self._feature_service_factory().build(
+            **self._material_scope_options(job_id),
             progress_reporter=lambda current, total, fund_code, message: self._update_progress(
                 job_id, current, total, fund_code, message
             )

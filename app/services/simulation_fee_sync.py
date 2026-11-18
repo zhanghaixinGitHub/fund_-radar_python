@@ -43,9 +43,15 @@ class SimulationFeeSyncService:
     def close(self) -> None:
         self._client.close()
 
-    def sync(self, fund_code: str | None = None, *, progress_reporter: ProgressReporter) -> FeeSyncResult:
+    def sync(
+        self, fund_code: str | None = None, *, progress_reporter: ProgressReporter, fund_codes=None
+    ) -> FeeSyncResult:
         """单只指定代码；全量只请求 Java 返回去重代码，不读取用户和持仓金额。"""
-        if fund_code is None:
+        if fund_codes is not None:
+            if fund_code is not None:
+                raise ValueError("费率范围不能同时指定单只和多只")
+            codes = list(fund_codes)
+        elif fund_code is None:
             response = self._client.get("/internal/v1/simulation/fee-sync/fund-codes")
             response.raise_for_status()
             codes = response.json()

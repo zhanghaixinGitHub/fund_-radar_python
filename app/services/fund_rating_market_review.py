@@ -101,6 +101,12 @@ def fee_profile(
             r"在投资者认购或申购时不收取认购费或申购费[，,]?"
             r"而从本类别基金资产中计提销售服务费的[，,]?称为C类基金份额", combined
         )
+        # 德邦本C招募书明确写“C类基金份额的申购费为0”。这是零的明文，
+        # 与“不收取”同义；仍要求本类标签及完整零值边界，不能截取0.5%。
+        explicit = explicit or re.search(
+            rf"(?:{qualified}C类(?:基金)?份额)的?申购费(?:用)?(?:为|是|[:：])?"
+            r"0(?:\.0+)?(?:%|(?=[，,。；;]|$))", combined
+        )
         individual = re.search(r"\(C类(?:人民币|美元)?份额\)|\(C份额\)", value[:160])
         foreign_currency = currency and any(v != currency[1] for v in re.findall(r'C类(人民币|美元)份额', selling))
         if not explicit and not (individual and not foreign_currency and re.search(r"不收取申购费|无申购费", selling)):
@@ -125,7 +131,7 @@ def fee_profile(
             selling = selling[own.start() : end]
     # 原费用表可将真正的零写作“0”，零值不依赖百分号；必须在表格结束或
     # 明确注释边界结束，不能把0.5%或后续另一份额数字截成0。
-    zero_rate = r"0(?:\.0+)?(?:%|(?=注[:：]|$|[，；。]))"
+    zero_rate = r"0(?:\.0+)?(?:%|(?=注[:：]|$|[，；。])|[-－—](?=注[:：]|$))"
     zero = re.search(r"[NYT](?:≥|>=)(?:7|30|180|365)(?:天|日)[-—]?" + zero_rate, selling)
     zero = zero or re.search(r"(?:7|30|180|365)(?:天|日)≤[NYT][-—]?" + zero_rate, selling)
     redemption = Decimal(0)

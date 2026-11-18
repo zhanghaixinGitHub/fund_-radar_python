@@ -54,6 +54,30 @@ def resolution():
     }
 
 
+def test_changed_upstream_refresh_does_not_reuse_approval_or_resolution(material):
+    from app.services.fund_workflow_materials import refresh_changed_handoff
+
+    root, path, collected, _ = material
+    inspect_materials(CODE, path, root=root, clock=lambda: NOW, resolutions=[resolution()])
+    save(root / "materials" / (CODE + ".json"), {**collected, "source_hash": "b" * 64}, replace=True)
+    result = refresh_changed_handoff(CODE, root=root, clock=lambda: NOW)
+    assert result["status"] == "REFRESHED_UNREVIEWED"
+    assert result["receipt"]["reviewed"] is False
+    assert result["receipt"]["resolutions"] == []
+    assert GAP in result["receipt"]["gaps"]
+    assert registered_materials(CODE, root=root, at=NOW)
+
+
+def test_candidate_changed_on_disk_is_not_silently_reapproved(material):
+    from app.services.fund_workflow_materials import refresh_changed_handoff
+
+    root, path, _, _ = material
+    inspect_materials(CODE, path, root=root, clock=lambda: NOW)
+    save(path, {"fund_code": CODE, "documents": ["changed"]}, replace=True)
+    with pytest.raises(ValueError, match="CANDIDATE_CONTENT_CHANGED"):
+        refresh_changed_handoff(CODE, root=root, clock=lambda: NOW)
+
+
 def test_registered_path_keeps_original_gap_and_cannot_approve_without_evidence(material):
     from app.services.fund_market_review import approve_comprehensive
 

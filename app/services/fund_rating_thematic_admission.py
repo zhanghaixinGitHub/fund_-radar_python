@@ -135,7 +135,8 @@ def raw_admission(source, inputs, theme):
         if row["state"] == "TERMINATED_BEFORE_WINDOW":
             original = a["termination_originals"].get(code)
             need(
-                original and original["published_on"] < "2023-09-28" and original["liquidation_start"] < "2023-09-28",
+                original and original["published_on"] < inputs["performance"]["dates"][0]
+                and original["liquidation_start"] < inputs["performance"]["dates"][0],
                 "TERMINATION_BEFORE_WINDOW:" + code,
             )
             digest = original["source"]["sha256"]

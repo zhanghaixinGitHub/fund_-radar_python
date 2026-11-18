@@ -57,12 +57,17 @@ def _calendar(inputs, root):
 
     if normalize(calendar["rows"]) != normalize(originals):
         raise ValueError("ACTIVE_CALENDAR_DERIVED_ROWS_CONFLICT")
+    cutoff = _day(inputs["as_of_date"], "ACTIVE_VALUATION_CUTOFF_REQUIRED")
+    end = date.fromisoformat(inputs["as_of_date"])
+    start_month = f"{end.year - 3:04d}{end.month:02d}"
+    candidates = [r["cal_date"] for r in originals if str(r["is_open"]) == "1" and r["cal_date"][:6] == start_month]
+    if not candidates:
+        raise ValueError("ACTIVE_COMMON_CALENDAR_START_MONTH_MISSING")
+    start = max(candidates)
     days = sorted(
-        row["cal_date"]
-        for row in originals
-        if str(row["is_open"]) == "1" and "20230928" <= row["cal_date"] <= "20260930"
+        row["cal_date"] for row in originals if str(row["is_open"]) == "1" and start <= row["cal_date"] <= cutoff
     )
-    if len(days) != 727 or len(set(days)) != 727 or days[0] != "20230928" or days[-1] != "20260930":
+    if len(days) < 600 or len(set(days)) != len(days) or days[0] != start or days[-1] != cutoff:
         raise ValueError("ACTIVE_COMMON_CALENDAR")
     return days
 
@@ -516,8 +521,9 @@ def compile_observations(inputs, *, root):
     from app.services.fund_rating_r5 import exposure_factor, peer_gap_score, signed_gap_score, window_frequency_score
 
     root = Path(root).resolve()
-    if inputs.get("version") != VERSION or inputs["as_of_date"] != "2026-09-30":
+    if inputs.get("version") != VERSION:
         raise ValueError("ACTIVE_INPUT_VERSION_OR_PERIOD")
+    _day(inputs["as_of_date"], "ACTIVE_VALUATION_CUTOFF_REQUIRED")
     if inputs.get("return_estimand") != RETURN_ESTIMAND:
         raise ValueError("ACTIVE_EXPLICIT_RETURN_ESTIMAND_REQUIRED")
     if inputs.get("statistic_protocol_ref") != PROTOCOL_SHA256:
@@ -654,11 +660,15 @@ def compile_observations(inputs, *, root):
         )
         if "return" in selected:
             values = {}
-            years = D("365.25") / D((date(2026, 9, 30) - date(2023, 9, 28)).days)
+            years = D("365.25") / D((date.fromisoformat(days[-1]) - date.fromisoformat(days[0])).days)
+            one_year_month = f"{int(days[-1][:4]) - 1:04d}{days[-1][4:6]}"
+            one_year_start = max((d for d in days if d[:6] == one_year_month), default=None)
+            if one_year_start is None:
+                raise ValueError("ACTIVE_ONE_YEAR_CALENDAR_ENDPOINT_MISSING")
             for p in products:
                 points, events = raw[p["fund_code"]]
                 values[p["fund_code"]] = [
-                    _growth(points, events, days, "20250930", "20260930") - 1,
+                    _growth(points, events, days, one_year_start, days[-1]) - 1,
                     _growth(points, events, days, days[0], days[-1]) ** years - 1,
                 ]
             subs = []

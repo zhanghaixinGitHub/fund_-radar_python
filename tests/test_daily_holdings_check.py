@@ -55,6 +55,28 @@ def test_complete_receipts_and_fresh_owner_readback():
     )
 
 
+def test_end_to_end_requires_current_month_and_saved_advice():
+    state, guard, codes = completed()
+    state["workflow_version"] = "HOLDINGS_END_TO_END_V1"
+    state["advice"] = {"status": "SUCCEEDED", "scope": codes}
+    ratings = [{"fundCode": c, "status": "SCORED", "score": "70", "asOfDate": "2026-09-30"} for c in codes]
+    live = dict(total=4, completed=4, pending=0, failed=0, remaining=0)
+    saved = [{"fund_code": c, "read_back": True, "inputs_current": True} for c in codes]
+    result = assess(state, guard, codes, ratings, "2026-11-11T09:00:00+08:00",
+                    one_day_readback=live, advice_readback=saved)
+    assert "MONTHLY_RATINGS_OUTDATED" in result["issues"]
+    for row in ratings:
+        row["asOfDate"] = "2026-10-30"
+    saved[0]["read_back"] = False
+    result = assess(state, guard, codes, ratings, "2026-11-11T09:00:00+08:00",
+                    one_day_readback=live, advice_readback=saved)
+    assert result["issues"] == ["ADVICE_REPORTS_NOT_COMPLETE"]
+    saved[0]["read_back"] = True
+    result = assess(state, guard, codes, ratings, "2026-11-11T09:00:00+08:00",
+                    one_day_readback=live, advice_readback=saved)
+    assert result["status"] == "SUCCEEDED"
+
+
 def test_changed_holdings_and_yesterdays_run_are_not_success():
     state, guard, codes = completed()
     result = assess(state, guard, codes[:1], [{}], "2026-11-12T09:00:00+08:00")

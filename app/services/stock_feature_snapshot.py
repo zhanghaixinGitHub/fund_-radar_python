@@ -81,14 +81,16 @@ class StockFeatureBuildSummary:
 class StockFeatureSnapshotService:
     """使用已登记来源构建股票型基金的只读输入特征并幂等落库。"""
 
-    def build(self, *, progress_reporter: FeatureProgressReporter | None = None) -> StockFeatureBuildSummary:
+    def build(
+        self, *, progress_reporter: FeatureProgressReporter | None = None, fund_codes=None
+    ) -> StockFeatureBuildSummary:
         """构建试点特征快照；来源未就绪时拒绝写库，不访问外部系统。"""
         engine = get_engine()
         with _stock_feature_snapshot_lock(engine):
-            return self._build_with_engine(engine, progress_reporter=progress_reporter)
+            return self._build_with_engine(engine, progress_reporter=progress_reporter, fund_codes=fund_codes)
 
     def _build_with_engine(
-        self, engine: Engine, *, progress_reporter: FeatureProgressReporter | None = None
+        self, engine: Engine, *, progress_reporter: FeatureProgressReporter | None = None, fund_codes=None
     ) -> StockFeatureBuildSummary:
         """在已持有跨进程互斥锁时完成读取、计算与幂等写入。"""
         with Session(engine) as session:
@@ -118,6 +120,7 @@ class StockFeatureSnapshotService:
                 source_sync_run_id=source.source_sync_run_id,
                 source_sync_finished_at=source.source_sync_finished_at,
                 history_limit=MIN_NAV_OBSERVATIONS,
+                **({"scope_codes": fund_codes} if fund_codes is not None else {}),
             )
         # 读取会话先关闭；每只基金重新开事务，不让任何失败回滚已保存基金。
         snapshots, issues = [], []

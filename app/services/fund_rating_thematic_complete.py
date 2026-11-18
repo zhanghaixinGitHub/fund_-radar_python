@@ -231,12 +231,12 @@ def _compile_observations_uncached(inputs, *, source, root, diagnostics):
                 "share_class": "C",
                 "family": "ACTIVE_EQUITY",
                 "basis": "PUBLIC_REVIEWED_ACTIVE_QUALITY_V2",
-                "as_of_date": "2026-09-30",
                 "holding_date": "2026-06-30",
             }.items()
         ),
         "COMPLETE_LEGAL_SCOPE",
     )
+    require(inputs["holding_date"] <= inputs["as_of_date"] <= inputs["research_on"], "COMPLETE_ACTUAL_PERIOD_SCOPE")
     require(
         not set(inputs) & {"score", "dimensions", "K", "HHI", "Q", "material_event_pending"},
         "COMPLETE_RAW_INPUT_REQUIRED",
@@ -280,7 +280,9 @@ def _compile_observations_uncached(inputs, *, source, root, diagnostics):
                 published_on=summary["published_on"],
             )
             return {
-                "cost_365": {"kind": "standard_cost", "fee_inputs": profile["fees"], "source_refs": list(refs.values())}
+                # 来源是集合语义。JSON归档/JSONB可重排对象键，不能让fee字典
+                # 插入顺序改变原始观察，造成发布冷启动与prepare结果冲突。
+                "cost_365": {"kind": "standard_cost", "fee_inputs": profile["fees"], "source_refs": sorted(refs.values())}
             }, profile
 
         stage("fees", fees)
@@ -394,7 +396,7 @@ def build_packet(inputs, compiled):
                 "currency": "CNY",
                 "productCount": 7,
                 "scope": "收益7个独立产品；风险、持续性、结构和容量5个严格适配产品。",
-                "period": "2023-09-28至2026-09-30",
+                "period": inputs["performance"]["dates"][0] + "至" + inputs["as_of_date"],
             },
             "dimensions": [
                 {"key": key, "name": labels[key], "score": None, "explanation": explanations[key]} for key in DIMENSIONS
@@ -433,7 +435,18 @@ def check_compiled_binding(packet, anchors, compiled):
         "ORIGINAL_OBSERVATION_DATE_CONFLICT",
     )
     require(packet["classification"] == expected["classification"], "ORIGINAL_PRODUCT_CLASSIFICATION_CONFLICT")
-    require(expected["quality_metrics"] == packet["quality_metrics"], "ORIGINAL_OBSERVATIONS_CONFLICT")
+    def comparable_metrics(value):
+        copied = deepcopy(value)
+        # 旧合法包可能按summary/prospectus角色顺序存储同一集合；兼容仅限
+        # 费用来源hash列表。金额、费率、日期及其余观察仍逐字段严格比较。
+        refs = copied.get("observations", {}).get("cost_365", {}).get("source_refs")
+        if refs is not None:
+            require(isinstance(refs, list) and all(isinstance(ref, str) for ref in refs), "COST_SOURCE_REF_SCHEMA")
+            copied["observations"]["cost_365"]["source_refs"] = sorted(refs)
+        return copied
+
+    require(comparable_metrics(expected["quality_metrics"]) == comparable_metrics(packet["quality_metrics"]),
+            "ORIGINAL_OBSERVATIONS_CONFLICT")
     require(expected_anchors == anchors, "MATERIAL_ANCHORS_CONFLICT")
     return compiled
 

@@ -372,6 +372,14 @@ def validate_review_v2(packet, data, value, *, at=None):
         raise ValueError("V2_SENSITIVITY_FLAG_CONFLICT")
     if r.output_kind == "CONDITIONAL_OUTLOOK" and r.horizon != "M6_V1":
         raise ValueError("V2_CONDITIONAL_OUTLOOK_ONLY_M6")
+    period = packet["periods"][r.horizon]
+    if r.horizon == "M6_V1" and period.get("end_date_basis") == "CALENDAR_MONTH":
+        from app.services.prediction_natural_month import RULE, natural_month_target
+
+        expected = natural_month_target(period["base_date"], period["start_date"])
+        if (period.get("end_date") != expected["endDate"] or period.get("outcome_rule") != RULE
+                or period.get("status") != "RESOLVED" or r.output_kind != "DATED_ANALYSIS"):
+            raise ValueError("V2_M6_NATURAL_MONTH_TARGET_INVALID")
     if r.horizon == "M6_V1" and (
         len(r.scenarios) != 3 or {s.kind for s in r.scenarios} != {"BASE", "FAVORABLE", "ADVERSE"}
     ):

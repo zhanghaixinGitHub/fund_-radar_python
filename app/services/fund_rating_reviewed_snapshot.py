@@ -242,6 +242,10 @@ def validate_sources(bundle: dict, frozen: datetime, *, root: Path | None = None
         raw = bundle["fee_calculation"]
         if _read(raw["input_archive"], root) != raw["inputs"]:
             raise ValueError("R5_FEE_INPUT_ARCHIVE")
+    if bundle.get("active_r5_partial_calculation"):
+        from app.services.fund_rating_active_r5_partial import validate_bundle
+
+        validate_bundle(bundle, root=root)
     if bundle.get("r5_calculation"):
         # 完整评分从冻结的原始观察重新计算；不能把研究分数表直接改成完整状态。
         raw = bundle["r5_calculation"]
@@ -429,6 +433,10 @@ def calculate(bundle: dict, *, root: Path | None = None) -> dict:
                 for bound in ["lower", "upper"]:
                     if abs(_number(value[bound]) - _number(dimensions[key][bound])) > Decimal("1e-60"):
                         raise ValueError("RATING_SNAPSHOT_MONEY_RECALCULATION")
+        if bundle.get("active_r5_partial_calculation"):
+            from app.services.fund_rating_active_r5_partial import replay_snapshot
+
+            replay_snapshot(bundle, dimensions, root=root or archive_root())
         if bundle.get("money_aggregate_components_calculation"):
             from app.services.fund_rating_money_aggregate_components import replay_snapshot as replay_money_aggregate
 
@@ -869,7 +877,9 @@ def calculate(bundle: dict, *, root: Path | None = None) -> dict:
             if _read(raw["input_archive"], root or archive_root()) != raw["inputs"]:
                 raise ValueError("R5_YYHR_INPUT_ARCHIVE")
             replay_snapshot_points(bundle, dimensions, root=root or archive_root())
-        if bundle.get("huaan_qdii_disclosure_calculation"):
+        if bundle.get("huaan_qdii_disclosure_calculation") and all(
+            point.get("candidate") is not None for point in dimensions.values()
+        ):
             from app.services.fund_rating_huaan_qdii_disclosure import completed_total
 
             full = completed_total(bundle, dimensions, weights, root=root or archive_root())
@@ -896,7 +906,8 @@ def calculate(bundle: dict, *, root: Path | None = None) -> dict:
             "missing_weight": str(100 - point_weight - range_weight),
             "point_dimensions": len(points),
             "interval_dimensions": len(ranges),
-            "partial_score": str(known * 100 / point_weight) if point_weight else None,
+            "partial_score": (str(known * 100 / point_weight) if point_weight else None)
+            if not bundle.get("active_r5_partial_calculation") else None,
             "lower": str(lower),
             "upper": str(upper),
             "has_full_informative_interval": point_weight + range_weight == 100,

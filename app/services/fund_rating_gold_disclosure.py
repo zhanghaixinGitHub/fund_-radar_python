@@ -484,16 +484,20 @@ def calculate(inputs, *, root):
     ]:
         if not inputs.get(field):
             raise ValueError("GOLD_DISCLOSURE_REQUIRED_BINDING:" + field)
-    if (
-        inputs["as_of_date"] != "2026-09-30"
-        or inputs["holding_date"] != "2026-06-30"
-        or inputs["window_start"] != "2025-09-30"
-    ):
-        raise ValueError("GOLD_DISCLOSURE_FROZEN_WINDOW")
     expected_share = {"021740": "C", "000216": "A"}[inputs["fund_code"]]
     if inputs["share_class"] != expected_share:
         raise ValueError("GOLD_DISCLOSURE_SHARE_BINDING")
     src = Originals(inputs, root, lazy=True)
+    from app.services.fund_rating_period import validate_period
+
+    class SourceBody:
+        def body(self, reference):
+            return "\n".join(src.pages(reference))
+
+    validate_period(inputs, SourceBody())
+    start, end = date.fromisoformat(inputs["window_start"]), date.fromisoformat(inputs["as_of_date"])
+    if (end.year * 12 + end.month) - (start.year * 12 + start.month) != 12:
+        raise ValueError("GOLD_DISCLOSURE_ROLLING_YEAR_WINDOW")
     if inputs.get("protocol_ref") != PROTOCOL_SHA256 or src.json(PROTOCOL_SHA256).get("version") != VERSION:
         raise ValueError("GOLD_DISCLOSURE_FROZEN_PROTOCOL")
     expected_legal = {

@@ -18,6 +18,7 @@ from app.services.fund_exposure_features import select_report
 from app.services.fund_exposure_quotes import reports, safe_error
 from app.services.fund_exposure_supplement import SUPPLEMENT, plan, verified_bytes
 from app.services.fund_materials_store import LIVE, merge_catalog, source_path, versioned_save
+from app.services.material_content import source_exists
 
 ORIGIN = "https://www.cninfo.com.cn"
 QUERY = ORIGIN + "/new/hisAnnouncement/query"
@@ -296,7 +297,7 @@ def acquire_attachments(*, live=False, progress=None, announcement_ids=None, req
                 # 已核验的历史 PDF 只复用索引，避免每次同步重读或下载两万份原文。
                 if not live:
                     verified_bytes(value["receipt"])
-                elif not (SUPPLEMENT.parent / value["receipt"]["file"]).exists():
+                elif not source_exists(SUPPLEMENT.parent / value["receipt"]["file"]):
                     raise ValueError("EXPOSURE_RAW_FILE_MISSING")
                 return value["text_status"], "skipped"
         if not urlparse(url).path.lower().endswith(".pdf"):

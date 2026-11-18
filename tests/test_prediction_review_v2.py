@@ -430,14 +430,15 @@ def test_trial_current_scope_immutable_readback_and_repeat_time(tmp_path, monkey
     assert manifest["policy_snapshot"] == policy_v2()
     frozen = memory[str(run / "inputs/001234.json")]
     assert frozen["periods"]["M6_V1"]["nominal_end_date"] == "2027-05-11"
-    assert frozen["periods"]["M6_V1"]["end_date"] is None
-    assert frozen["periods"]["M6_V1"]["status"] == "PENDING_OFFICIAL_CALENDAR"
+    assert frozen["periods"]["M6_V1"]["end_date"] == "2027-05-11"
+    assert frozen["periods"]["M6_V1"]["status"] == "RESOLVED"
+    assert memory[str(source_path.parent.parent / "M6_V1/input.json")]["input"]["dates"]["endDate"] is None
     reviews = []
     for h in trial.HORIZONS:
         _, _, r = sample(h)
         r["packet_hash"] = digest(frozen)
         if h == "M6_V1" and with_outlook:
-            r["output_kind"] = "CONDITIONAL_OUTLOOK"
+            r["output_kind"] = "DATED_ANALYSIS"
         else:
             r.update(
                 decision="ABSTAIN", dominant_factors=[], abstention_reasons=["DATA_MISSING"], recovery_conditions=[NOTE]
@@ -447,8 +448,8 @@ def test_trial_current_scope_immutable_readback_and_repeat_time(tmp_path, monkey
     path.write_text(json.dumps(reviews), encoding="utf-8")
     result = trial.evaluate_trial(run, path, holdings_provider=lambda: inventory, clock=AT)
     assert result["counts"]["ABSTAIN"] == (3 if with_outlook else 4)
-    assert result["dated_direction_count"] == 0
-    assert result["conditional_direction_count"] == (1 if with_outlook else 0)
+    assert result["dated_direction_count"] == (1 if with_outlook else 0)
+    assert result["conditional_direction_count"] == 0
     repeated = trial.evaluate_trial(
         run, path, holdings_provider=lambda: inventory, clock=datetime.fromisoformat("2026-11-12T12:00:00+08:00")
     )

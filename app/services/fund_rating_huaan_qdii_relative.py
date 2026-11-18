@@ -12,7 +12,7 @@ import re
 import unicodedata
 from collections import OrderedDict
 from copy import deepcopy
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, localcontext
 from itertools import product as combinations
 from pathlib import Path
@@ -398,7 +398,7 @@ def _cohort(source: Originals, inputs: dict) -> dict:
                     raise ValueError("QDII_ORDINARY_SHARE_PRIORITY_ORIGINAL_REQUIRED")
                 if proof["kind"] == "ORDINARY_NO_SALES_SERVICE_FEE":
                     if not (
-                        any(q in quote for q in ["不收取销售服务费", "不计提销售服务费"])
+                        any(q in quote for q in ["不收取销售服务费", "不计提销售服务费", "免收销售服务费"])
                         and any(q in quote for q in ["A类", "人民币A"])
                     ):
                         raise ValueError("QDII_ORDINARY_SHARE_PRIORITY_ORIGINAL_REQUIRED")
@@ -484,14 +484,12 @@ def _cohort(source: Originals, inputs: dict) -> dict:
     if set(peer_codes) != set(cohort["candidate_codes"]) or inputs["fund_code"] in peer_codes:
         raise ValueError("QDII_COHORT_SELECTED_PEERS_NOT_DERIVED_FROM_ALL_PRODUCTS")
     preselected = source.json(cohort["preselection_record_ref"])
-    if (
-        set(preselected["preselected_peer_shares"]) != {inputs["members"][c]["ts_code"] for c in peer_codes}
-        or preselected["target_exact_share"] != inputs["members"][inputs["fund_code"]]["ts_code"]
-    ):
-        raise ValueError("QDII_PRESELECTED_LEGAL_REPRESENTATIVE_RECORD_REQUIRED")
+    times = _preselection_times(source, inputs, cohort, preselected, peer_codes)
     for code in peer_codes:
         receipt = _request_identity(source, inputs, code, "fund_nav")
-        if datetime.fromisoformat(preselected["fixed_at"]) > datetime.fromisoformat(receipt["received_at"]):
+        if datetime.fromisoformat(times[inputs["members"][code]["ts_code"]]) > datetime.fromisoformat(
+            receipt["received_at"]
+        ):
             raise ValueError("QDII_REPRESENTATIVE_FIXED_AFTER_NEW_NAV_FETCH")
     return {
         "peers": cohort["candidate_codes"],
@@ -505,6 +503,32 @@ def _cohort(source: Originals, inputs: dict) -> dict:
         "historical_survivorship_bias_closed": False,
         "scope": cohort["boundary"],
     }
+
+
+def _preselection_times(source, inputs, cohort, previous, peers):
+    """滚动月新准入须独立先固定代表；旧选择及其真实时间不可追改。"""
+    target = inputs["members"][inputs["fund_code"]]["ts_code"]
+    if previous["target_exact_share"] != target:
+        raise ValueError("QDII_PRESELECTED_LEGAL_REPRESENTATIVE_RECORD_REQUIRED")
+    times = {share: previous["fixed_at"] for share in previous["preselected_peer_shares"]}
+    addition_ref = cohort.get("preselection_additions_ref")
+    if addition_ref:
+        addition = source.json(addition_ref)
+        shares = addition["additional_peer_shares"]
+        if (
+            addition["previous_preselection_ref"] != cohort["preselection_record_ref"]
+            or addition["target_exact_share"] != target
+            or not shares
+            or len(shares) != len(set(shares))
+            or set(shares) & times.keys()
+            or datetime.fromisoformat(addition["fixed_at"]) < datetime.fromisoformat(previous["fixed_at"])
+            or datetime.fromisoformat(addition["fixed_at"]) > datetime.fromisoformat(inputs["research_on"])
+        ):
+            raise ValueError("QDII_PRESELECTION_ADDITION_MUST_BE_DISJOINT_ACTUAL_NEW_SELECTION")
+        times.update({share: addition["fixed_at"] for share in shares})
+    if set(times) != {inputs["members"][c]["ts_code"] for c in peers}:
+        raise ValueError("QDII_PRESELECTED_LEGAL_REPRESENTATIVE_RECORD_REQUIRED")
+    return times
 
 
 def _contracts(source: Originals, inputs: dict) -> dict:
@@ -579,6 +603,85 @@ def _table(raw: dict, *, require_empty_count=False) -> list[dict]:
     return [dict(zip(data["fields"], row, strict=True)) for row in data["items"]]
 
 
+def validate_performance_period(inputs, source):
+    """新期保留三年同窗及原文复核；旧期照原冻结输入重放。"""
+    first, last = date.fromisoformat(inputs["window_start"]), date.fromisoformat(inputs["as_of_date"])
+    if last.year * 12 + last.month - first.year * 12 - first.month != 36 or first >= last:
+        raise ValueError("QDII_THREE_YEAR_WINDOW_REQUIRED")
+    if str(last) == "2026-09-30" and str(first) == "2023-09-28":
+        return
+    from app.services.fund_rating_period import validate_period
+
+    class OriginalText:
+        def body(self, ref):
+            return source.text(ref)
+
+    validate_period(inputs, OriginalText())
+
+
+def _closed_nav_price(row, *, allow_unit):
+    """原值不改写；缺复权时仅在外层已闭合零分红/拆分后另算单位价格序列。"""
+    if row.get("unit_nav") is None or row.get("accum_nav") is None:
+        raise ValueError("QDII_UNIT_OR_ACCUMULATED_NAV_MISSING")
+    unit, cumulative = D(str(row["unit_nav"])), D(str(row["accum_nav"]))
+    if not unit.is_finite() or unit <= 0 or unit != cumulative:
+        raise ValueError("QDII_ADJUSTMENT_NOT_CLOSED")
+    adjusted = row.get("adj_nav")
+    if adjusted is None:
+        if not allow_unit:
+            raise ValueError("QDII_ADJUSTED_NAV_MISSING_UNRECONCILED")
+        return unit
+    if not D(str(adjusted)).is_finite() or D(str(adjusted)) != unit:
+        raise ValueError("QDII_ADJUSTMENT_NOT_CLOSED")
+    return unit
+
+
+def _independent_unit_curve(source, inputs, member, rows, days):
+    """只核算法实际使用的共同日；额外披露原行保留，不制造复权值。"""
+    digest = inputs["members"][member].get("independent_unit_curve_ref")
+    if not digest:
+        return None
+    ref = source.refs[digest]
+    if ref.get("url") != f"https://fund.eastmoney.com/pingzhongdata/{member}.js" or ref.get("kind") != "ORIGINAL":
+        raise ValueError("QDII_INDEPENDENT_CURVE_SOURCE_IDENTITY")
+    raw = source.raw[digest].decode("utf-8-sig")
+    if not re.search(r'fS_code\s*=\s*["\x27]' + re.escape(member) + r'["\x27]', raw):
+        raise ValueError("QDII_INDEPENDENT_CURVE_SHARE_IDENTITY")
+
+    def points(name):
+        match = re.search(r"var\s+" + name + r"\s*=\s*(\[.*?\]);", raw)
+        if not match:
+            raise ValueError("QDII_INDEPENDENT_CURVE_SERIES_REQUIRED")
+        values = {}
+        for row in json.loads(match[1]):
+            stamp = row["x"] if isinstance(row, dict) else row[0]
+            actual = datetime.fromtimestamp(stamp / 1000, UTC) + timedelta(hours=8)
+            day = actual.date().isoformat()
+            if actual.hour or actual.minute or actual.second or day in values:
+                raise ValueError("QDII_INDEPENDENT_CURVE_DATE_DUPLICATE")
+            values[day] = row
+        return values
+
+    units, accumulated = points("Data_netWorthTrend"), points("Data_ACWorthTrend")
+    native = {date.fromisoformat(r["nav_date"]).isoformat(): r for r in rows}
+    for day in days:
+        if day not in units or day not in accumulated or day not in native:
+            raise ValueError("QDII_INDEPENDENT_CURVE_REQUIRED_DAY_MISSING")
+        row, point = native[day], units[day]
+        vals = [D(str(v)) for v in (row["unit_nav"], row["accum_nav"], point["y"], accumulated[day][1])]
+        if any(not v.is_finite() or v <= 0 for v in vals) or len(set(vals)) != 1:
+            raise ValueError("QDII_INDEPENDENT_CURVE_UNIT_CUMULATIVE_CONFLICT")
+        if point.get("unitMoney"):
+            raise ValueError("QDII_INDEPENDENT_CURVE_CASH_OR_SPLIT")
+    return {
+        "source_ref": digest,
+        "required_points": len(days),
+        "all_required_unit_and_cumulative_equal": True,
+        "unused_original_dates": sorted(set(native) - set(days)),
+        "adjusted_nav_imputed": False,
+    }
+
+
 def _history(source: Originals, inputs: dict, peers: list[str]) -> dict:
     code = inputs["fund_code"]
     calendar = source.json(inputs["calendar_ref"])
@@ -589,7 +692,7 @@ def _history(source: Originals, inputs: dict, peers: list[str]) -> dict:
     days, months = h["dates"], h["month_ends"]
     if (
         days != sorted(set(days))
-        or len(days) != 727
+        or len(days) < 600
         or days[0] != inputs["window_start"]
         or days[-1] != inputs["as_of_date"]
         or len(months) != 37
@@ -604,7 +707,7 @@ def _history(source: Originals, inputs: dict, peers: list[str]) -> dict:
     actual_months = [date.fromisoformat(day).year * 12 + date.fromisoformat(day).month for day in months]
     if actual_months != list(range(actual_months[0], actual_months[0] + 37)):
         raise ValueError("QDII_MONTH_WINDOW_GAP")
-    values, availability, event_proofs = {}, {}, {}
+    values, availability, event_proofs, null_adjusted = {}, {}, {}, {}
     for member in [code, *peers]:
         meta = inputs["members"][member]
         div_receipt = _request_identity(source, inputs, member, "fund_div")
@@ -616,10 +719,12 @@ def _history(source: Originals, inputs: dict, peers: list[str]) -> dict:
         rows = _table(source.json(meta["nav_ref"]))
         if nav_receipt.get("row_count") != len(rows):
             raise ValueError("QDII_ACTUAL_NAV_REQUEST_ROW_COUNT_MISMATCH")
+        independent = _independent_unit_curve(source, inputs, member, rows, days)
         event_proofs[member] = {
             "fund_div_request_ref": meta["dividend_ref_request_ref"],
             "fund_div_response_ref": meta["dividend_ref"],
             "split": split,
+            "independent_unit_curve": independent,
         }
         mapped, dates = {}, {}
         for row in rows:
@@ -627,22 +732,31 @@ def _history(source: Originals, inputs: dict, peers: list[str]) -> dict:
             announced = date.fromisoformat(row["ann_date"]).isoformat()
             if (
                 row["ts_code"] != meta["ts_code"]
-                or day in mapped
+                or day in dates
                 or day > inputs["as_of_date"]
                 or announced < day
                 or announced > inputs["research_on"][:10]
             ):
                 raise ValueError("QDII_NAV_IDENTITY_DUPLICATE_OR_FUTURE")
-            triple = [D(str(row[k])) for k in ["unit_nav", "accum_nav", "adj_nav"]]
-            if min(triple) <= 0 or len(set(triple)) != 1:
-                raise ValueError("QDII_ADJUSTMENT_NOT_CLOSED")
-            mapped[day], dates[day] = triple[0], announced
+            # 分红、拆分均先核准。同行另须独立曲线逐个核实际用途点；
+            # 本份额仍须在后续核对发行人收益曲线。额外披露不进入计算。
+            if day in days:
+                mapped[day] = _closed_nav_price(row, allow_unit=member == code or independent is not None)
+            dates[day] = announced
+            if row.get("adj_nav") is None:
+                null_adjusted.setdefault(member, []).append(day)
         if not set(days) <= mapped.keys():
             raise ValueError("QDII_COMMON_NAV_DAY_MISSING")
         values[member] = [mapped[d] for d in days]
         availability[member] = {d: dates[d] for d in days}
         if member == code:
-            prior = {r["nav_date"]: D(str(r["adjusted_nav"])) for r in h["rows"]}
+            prior = {
+                r["nav_date"]: _closed_nav_price(
+                    {"unit_nav": r["unit_nav"], "accum_nav": r["accumulated_nav"], "adj_nav": r["adjusted_nav"]},
+                    allow_unit=True,
+                )
+                for r in h["rows"]
+            }
             if any(prior[d] != mapped[d] for d in days):
                 raise ValueError("QDII_TARGET_SNAPSHOT_NAV_REVISION_REVIEW_REQUIRED")
     published = source.json(inputs["own_publisher_ref"])
@@ -668,6 +782,13 @@ def _history(source: Originals, inputs: dict, peers: list[str]) -> dict:
         "publisher_max_error_percentage_point": str(max(errors)),
         "dividend_statistic": "CSRC_STANDARD_GROWTH_NO_CASH_EVENTS_ALGEBRAICALLY_IDENTICAL",
         "actual_event_request_identities": event_proofs,
+        "unit_total_return_reconciliation": {
+            "method": "DUAL_SOURCE_UNIT_NAV_NO_DISTRIBUTION_OR_SPLIT",
+            "original_adjusted_nav_null_dates": null_adjusted,
+            "adjusted_nav_imputed": False,
+            "database_modified": False,
+            "publisher_growth_crosscheck_required": True,
+        },
     }
 
 
@@ -699,8 +820,6 @@ def calculate(inputs: dict, *, root: Path) -> dict:
         or inputs.get("fund_code") != "014978"
         or inputs.get("share_class") != "C"
         or inputs.get("currency") != "CNY"
-        or inputs.get("as_of_date") != "2026-09-30"
-        or inputs.get("window_start") != "2023-09-28"
         or inputs.get("basis") != PASSIVE_BASIS
         or set(inputs["requested_dimensions"]) != DIMENSIONS
     ):
@@ -710,6 +829,7 @@ def calculate(inputs: dict, *, root: Path) -> dict:
     ):
         raise ValueError("QDII_RAW_ORIGINAL_INPUTS_ONLY")
     source = Originals(inputs, root)
+    validate_performance_period(inputs, source)
     event_review = _events(source, inputs)
     if event_review["material_event_pending"]:
         raise ValueError("QDII_MATERIAL_EVENT_REVIEW_PENDING:" + ",".join(event_review["pending_ids"]))
@@ -909,8 +1029,7 @@ def check_binding(bundle: dict, inputs: dict) -> None:
         or bundle.get("share_class") != "C"
         or inputs.get("share_class") != "C"
         or inputs.get("currency") != "CNY"
-        or str(bundle.get("as_of_date")) != "2026-09-30"
-        or inputs.get("as_of_date") != "2026-09-30"
+        or str(bundle.get("as_of_date")) != inputs.get("as_of_date")
         or str(bundle.get("holding_date")) != "2026-06-30"
         or bundle["identity"]["legal_name"] != inputs["members"]["014978"]["legal_name"] + "(QDII)"
         or bundle["identity"]["manager_name"] != "华安基金管理有限公司"
@@ -921,7 +1040,15 @@ def check_binding(bundle: dict, inputs: dict) -> None:
     ):
         raise ValueError("HUAAN_QDII_RELATIVE_CURRENT_BINDING")
     document = bundle["reviewed_document"]
-    for name, point in {"management": "55", "fee": "75"}.items():
+    expected = {"management": "55", "fee": "75"}
+    disclosure = bundle.get("huaan_qdii_disclosure_calculation", {}).get("inputs", {})
+    from app.services.fund_rating_huaan_qdii_disclosure import MONTHLY_COMPLETE_VERSION
+
+    if disclosure.get("version") == MONTHLY_COMPLETE_VERSION:
+        # V3由独立管理/费用原件重放检查，不把旧55/75当永久量尺。
+        # 数字一致性由disclosure.replay_snapshot按实际来源核验。
+        expected = {}
+    for name, point in expected.items():
         node = document["dimensions"][name]
         values = [node.get(key) for key in ("lower", "upper", "candidate")] if isinstance(node, dict) else [node]
         if any(value is None or D(str(value)) != D(point) for value in values):

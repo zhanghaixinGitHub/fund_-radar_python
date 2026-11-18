@@ -188,6 +188,18 @@ class TushareFundSyncService:
             nav_max_rows_per_query=settings.tushare_market_nav_max_rows_per_query,
         )
 
+    @staticmethod
+    def _held_targets(targets, fund_codes):
+        """显式空持仓绝不回退市场；缺少份额映射时明确失败。"""
+        if fund_codes is None:
+            return targets
+        from app.services.fund_market_preparation import validate_codes
+
+        codes = set(validate_codes(fund_codes))
+        if codes - {target.fund_code for target in targets}:
+            raise ValueError("HELD_FUND_SOURCE_MAPPING_MISSING")
+        return [target for target in targets if target.fund_code in codes]
+
     def close(self) -> None:
         """关闭本服务创建的外部 HTTP 客户端。"""
         if self._owns_provider and isinstance(self._provider, TushareFundClient):
@@ -382,6 +394,7 @@ class TushareFundSyncService:
         history_start_date: date = _MARKET_DETAIL_HISTORY_START_DATE,
         history_end_date: date | None = None,
         progress_reporter: MarketDetailProgressReporter | None = None,
+        fund_codes: tuple[str, ...] | None = None,
     ) -> MarketDetailSyncResult:
         """手工补齐当前基金市场的完整详情基线并回传真实阶段进度。
 
@@ -398,6 +411,7 @@ class TushareFundSyncService:
                 _report_market_nav_progress(progress_reporter, 0, 0, None, "正在读取基金市场同步范围")
                 with Session(self._engine) as session:
                     targets = list_active_market_sync_targets(session)
+                targets = self._held_targets(targets, fund_codes)
                 ts_codes, mapping_issues = self._resolve_detail_source_codes(targets)
                 total_steps = 3 + 3 * len(ts_codes)
                 _report_market_nav_progress(progress_reporter, 0, total_steps, None, "正在读取基金基础资料")
@@ -672,6 +686,7 @@ class TushareFundSyncService:
         as_of_date: date | None = None,
         progress_reporter: MarketNavProgressReporter | None = None,
         automatic: bool = False,
+        fund_codes: tuple[str, ...] | None = None,
     ) -> SyncOutcome:
         """补齐基金市场中所有启用份额的缺失净值日期。
 
@@ -681,7 +696,7 @@ class TushareFundSyncService:
         target_date = as_of_date or datetime.now(ZoneInfo("Asia/Shanghai")).date()
         with _market_nav_incremental_lock(self._engine):
             return self._run_market_nav_incremental(
-                target_date=target_date, progress_reporter=progress_reporter, automatic=automatic
+                target_date=target_date, progress_reporter=progress_reporter, automatic=automatic, fund_codes=fund_codes
             )
 
     def _run_market_nav_incremental(
@@ -690,6 +705,7 @@ class TushareFundSyncService:
         target_date: date,
         progress_reporter: MarketNavProgressReporter | None,
         automatic: bool = False,
+        fund_codes: tuple[str, ...] | None = None,
     ) -> SyncOutcome:
         """按基金独立取数、校验和提交；持久缺口驱动后续补拉，单只错误不影响其余基金。"""
         from app.repositories.nav_repair import read_inputs, save_state
@@ -700,6 +716,7 @@ class TushareFundSyncService:
         try:
             with Session(self._engine) as session:
                 targets = list_active_market_sync_targets(session)
+            targets = self._held_targets(targets, fund_codes)
             if not targets:
                 raise MarketNavIncrementalPreconditionError("fund market has no active Tushare fund shares")
             sessions, _ = calendar()

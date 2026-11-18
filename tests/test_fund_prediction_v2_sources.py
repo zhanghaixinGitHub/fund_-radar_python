@@ -82,8 +82,9 @@ def test_freeze_selection_can_directly_prepare_without_v1_review(tmp_path, isola
     trial.prepare_trial(tmp_path / "trial", Path(result["selection_path"]), holdings=inventory, clock=AT)
     packet = read(tmp_path / "trial/inputs/002112.json")
     assert packet["periods"]["T5_V1"]["status"] == "RESOLVED"
-    assert packet["periods"]["M6_V1"]["status"] == "PENDING_OFFICIAL_CALENDAR"
-    assert packet["periods"]["M6_V1"]["end_date"] is None
+    assert packet["periods"]["M6_V1"]["status"] == "RESOLVED"
+    assert packet["periods"]["M6_V1"]["end_date"] == "2027-05-12"
+    assert packet["periods"]["M6_V1"]["end_date_basis"] == "CALENDAR_MONTH"
     assert packet["periods"]["M6_V1"]["nominal_end_date"] == "2027-05-12"
     assert "decision" not in source
 

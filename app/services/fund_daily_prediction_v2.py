@@ -22,7 +22,7 @@ def saved_records(owner, codes, target):
     return daily_records(owner, codes, target)
 
 
-def matches(row, code, horizon, window, materials_input_hash):
+def matches(row, code, horizon, window, materials_input_hash, nav_input_hash=None):
     """身份和资料版本必须全部相同；缺任一证明就继续等待。"""
     return (
         row.get("analysis_version") == "COMPREHENSIVE_REVIEW_V2"
@@ -35,13 +35,14 @@ def matches(row, code, horizon, window, materials_input_hash):
         and row.get("snapshot_verified") is True
         and materials_input_hash is not None
         and row.get("materials_input_hash") == materials_input_hash
+        and (nav_input_hash is None or row.get("nav_input_hash") == nav_input_hash)
     )
 
 
-def verify_outputs(code, window, records, *, materials_input_hash=None, materials_ready=False):
+def verify_outputs(code, window, records, *, materials_input_hash=None, materials_ready=False, nav_input_hash=None):
     rows = []
     for horizon in ("T1", "T5_V1", "T20_V1", "M6_V1"):
-        candidates = [r for r in records if matches(r, code, horizon, window, materials_input_hash)]
+        candidates = [r for r in records if matches(r, code, horizon, window, materials_input_hash, nav_input_hash)]
         dated = [
             r
             for r in candidates
@@ -66,6 +67,7 @@ def verify_outputs(code, window, records, *, materials_input_hash=None, material
             status, selected = "REVIEWED_ABSTAIN", abstain
         else:
             status, selected = "ACTION_REQUIRED", []
+        data_blocked = bool(selected) and all(r.get("source_decision") == "BLOCKED" for r in selected)
         rows.append(
             {
                 "horizon": horizon,
@@ -75,16 +77,19 @@ def verify_outputs(code, window, records, *, materials_input_hash=None, material
                 if dated
                 else "CONDITIONAL"
                 if conditional
-                else "ABSTAIN"
+                else "BLOCKED" if data_blocked else "ABSTAIN"
                 if abstain
                 else "WAITING_ANALYSIS"
                 if materials_ready
                 else "WAITING_MATERIALS",
                 "counts_as_dated_forecast": bool(dated),
                 "review_complete": bool(selected),
+                "data_blocked": data_blocked,
+                "source_reasons": [r["source_reason"] for r in selected if r.get("source_reason")],
                 "direction_available": bool(dated or conditional),
                 "review_status": (
-                    "REVIEWED_ABSTAIN" if abstain else "REVIEWED_DIRECTION" if selected else "NOT_REVIEWED"
+                    "REVIEWED_BLOCKED" if data_blocked else "REVIEWED_ABSTAIN" if abstain
+                    else "REVIEWED_DIRECTION" if selected else "NOT_REVIEWED"
                 ),
                 # 正式第二版尚未接入旧准确率计算，保存方向不等于已验证准确率。
                 "eligible_for_accuracy": False,
@@ -117,7 +122,10 @@ def followthrough_report(owner, codes, window, records, *, at):
         except (OSError, ValueError, KeyError) as error:
             failure = type(error).__name__ + ":" + str(error)
         ready = bool(handoff and not failure)
-        result = verify_outputs(code, window, records, materials_input_hash=identity, materials_ready=ready)
+        from app.services.fund_prediction_nav_identity import current_nav_identity
+
+        result = verify_outputs(code, window, records, materials_input_hash=identity, materials_ready=ready,
+                                nav_input_hash=current_nav_identity(code, window["base_nav_date"]))
         result["prepare_failure"] = failure
         if not ready:
             result["actions"] = [
@@ -145,7 +153,8 @@ def followthrough_report(owner, codes, window, records, *, at):
         "all_reviews_saved": not pending,
         "dated_prediction_count": sum(p["counts_as_dated_forecast"] for p in periods),
         "conditional_saved_count": sum(p["status"] == "CONDITIONAL_SAVED" for p in periods),
-        "abstain_saved_count": sum(p["status"] == "REVIEWED_ABSTAIN" for p in periods),
+        "abstain_saved_count": sum(p["status"] == "REVIEWED_ABSTAIN" and not p["data_blocked"] for p in periods),
+        "blocked_saved_count": sum(p["data_blocked"] for p in periods),
         "reviewed_period_count": sum(p["review_complete"] for p in periods),
         "unreviewed_period_count": sum(not p["review_complete"] for p in periods),
         "reassessment_watch": watch,
@@ -155,7 +164,7 @@ def followthrough_report(owner, codes, window, records, *, at):
     }
 
 
-def freeze_request(folder, owner, code, horizon, window, handoff):
+def freeze_request(folder, owner, code, horizon, window, handoff, *, nav_input_hash=None):
     """只登记分析请求和真实资料身份，不把请求说明伪装为已审阅输入。"""
     from app.services.fund_prediction_snapshot_compat import materials_input_identity
     from app.services.prediction_review_v2_requests import request_batch
@@ -180,6 +189,7 @@ def freeze_request(folder, owner, code, horizon, window, handoff):
         "policy_hash": digest(rules),
         "materials_input_hash": materials_input_identity(material),
         "materials_hash": handoff.get("materials_hash"),
+        "nav_input_hash": nav_input_hash,
     }
     if current["policyHash"] != identity["policy_hash"]:
         raise ValueError("V2_DAILY_RULES_DIFFER_FROM_ADOPTED_POLICY")

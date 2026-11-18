@@ -69,15 +69,17 @@ def payment_domain_score(node):
 
 
 def compile_payment_from_primary(inputs, *, root):
-    """从018590本C份额的2026H1完整原PDF编译域节点，不接受派生金额或正常state。"""
+    """从已适配本C份额的2026H1完整原PDF编译域节点，不接受派生金额或正常state。"""
     from app.services.fund_quality_v2_disclosures import report_period
     from app.services.fund_rating_active_execution import MONEY, Originals, _plain, _section, _share_binding
 
     require(
-        inputs.get("fund_code") == "018590"
+        inputs.get("fund_code") in {"018590", "002112"}
         and inputs.get("share_class") == "C"
-        and inputs.get("holding_date") == "2026-06-30"
-        and inputs.get("as_of_date") == "2026-09-30",
+        and isinstance(inputs.get("holding_date"), str)
+        and inputs["holding_date"][5:] in {"06-30", "12-31"}
+        and isinstance(inputs.get("as_of_date"), str)
+        and inputs["holding_date"] <= inputs["as_of_date"],
         "COMPONENT_SCOPE",
     )
     require(
@@ -94,22 +96,33 @@ def compile_payment_from_primary(inputs, *, root):
         "PRIMARY_IDENTITY_OR_ECONOMIC_PERIOD",
     )
     _share_binding(source, inputs)
-    balance = _section(text, r"6\.1\s*资产负债表", r"6\.2\s*利润表")
-    note = _section(text, r"6\.4\.7\.1\s*货币资金", r"6\.4\.7\.2\s*交易性金融资产")
+    prefix = "6" if inputs["holding_date"].endswith("06-30") else "7"
+    balance = _section(text, prefix + r"\.1\s*资产负债表", prefix + r"\.2\s*利润表")
+    note = _section(text, prefix + r"\.4\.7\.1\s*货币资金", prefix + r"\.4\.7\.2\s*交易性金融资产")
     liabilities = re.search(r"负债合计\s+(" + MONEY + r")", balance)
     bank = re.search(r"等于[：:]本金\s+(" + MONEY + r")", note)
     require(liabilities is not None and bank is not None, "ORIGINAL_BALANCE_ROWS")
-    restricted = _section(text, r"6\.4\.12\s*期末", r"6\.4\.13\s*金融工具")
-    headings = ["6.4.12.1", "6.4.12.2", "6.4.12.3.1", "6.4.12.3.2", "6.4.12.4"]
+    restricted = _section(text, prefix + r"\.4\.12\s*期末", prefix + r"\.4\.13\s*金融工具")
+    headings = [prefix + suffix for suffix in [".4.12.1", ".4.12.2", ".4.12.3.1", ".4.12.3.2", ".4.12.4"]]
     offsets = [restricted.rfind(heading) for heading in headings]
     require(all(i >= 0 for i in offsets) and offsets == sorted(set(offsets)), "RESTRICTION_SECTIONS")
+    explicit_zero_002112 = [
+        "本基金本报告期无因认购新发/增发证券而于期末持有的流通受限证券",
+        "本基金本报告期末未持有暂时停牌等流通受限股票",
+        "本基金未持有银行间市场债券正回购交易中作为质押的债券",
+        "本基金未持有交易所市场债券正回购交易中作为质押的债券",
+        "本基金无参与转融通证券出借业务的证券",
+    ]
     for i, start in enumerate(offsets):
         end = offsets[i + 1] if i + 1 < len(offsets) else len(restricted)
         section = _plain(restricted[start:end])
         # “6.4.12.3”等章节编号不是金额；保留所有真实金额再检查非零受限表。
         section = re.sub(r"\d+(?:\.\d+){2,}", "", section)
-        require("无。" in section and re.search(MONEY, section) is None, "ACTUAL_RESTRICTIONS_REQUIRE_ADAPTER")
-    whole_asset_clause = "除在附注6.4.12中列示的部分基金资产流通暂时受限制外(如有),在正常市场条件下其余均能及时变现"
+        zero = (explicit_zero_002112[i] in section if inputs["fund_code"] == "002112" else "无。" in section)
+        require(zero and re.search(MONEY, section) is None, "ACTUAL_RESTRICTIONS_REQUIRE_ADAPTER")
+    whole_asset_clause = "除在附注" + prefix + ".4.12中列示的部分基金资产流通暂时受限制外(如有),在正常市场条件下其余均能及时变现"
+    if inputs["fund_code"] == "002112":
+        whole_asset_clause = "本基金所持证券均在证券交易所或银行间交易;因此,本期末本基金的其他资产均能及时变现"
     require(whole_asset_clause in plain, "WHOLE_ASSET_RESTRICTION_SCOPE")
     node = {
         "kind": "purpose_covered_payment",

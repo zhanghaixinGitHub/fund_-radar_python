@@ -19,7 +19,9 @@ def _source_text(root: Path, reference: dict) -> str:
     from app.services.fund_rating_reviewed_snapshot import _read
 
     parsed = _read(reference, root)
-    if reference["kind"] == "pdf":
+    # 早期原件把kind记为summary/prospectus等业务用途；实际PDF格式仍由
+    # 来源路径和同版本内容读取器核准，不能把已核PDF误读成空JSON正文。
+    if reference["kind"] == "pdf" or Path(reference["file"]).suffix.lower() == ".pdf":
         from app.services.fund_rating_pdf import text_pages
 
         return _plain("".join(text_pages(root / reference["file"])))
@@ -44,6 +46,20 @@ def _source_text(root: Path, reference: dict) -> str:
         return []
 
     return _plain("\n".join(strings(parsed)))
+
+
+def _guotai_completed_table_remediation(manager_name: str, quote: str) -> bool:
+    """国泰原表跨列把标签插入“整改”；只识别该已核过去时和监管验收。"""
+    text = _plain(quote)
+    return bool(
+        manager_name == "国泰基金管理有限公司"
+        and "受到调查或处罚等措施的主体国泰基金管理有限公司" in text
+        and re.search(
+            r"公司已采取完善管控机制、加强管理等整改措施[,，]现已完成整出整改意见[)）]改"
+            r"[,，]并经中国证监会上海监管局验收通过[。.]?",
+            text,
+        )
+    )
 
 
 def calculate(
@@ -154,6 +170,7 @@ def calculate(
                 and "截止本报告期末,公司已主动补缴税款、缴纳罚款," in quote
                 and re.search(r"并完成(?:提出整改意见\)整改工作|整出整改意见\)改工作)[。.]", quote)
             )
+            completed = completed or _guotai_completed_table_remediation(manager_name, quote)
             if (
                 quote not in text[event["source_hash"]]
                 or event["date"] > as_of

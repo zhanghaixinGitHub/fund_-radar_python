@@ -14,7 +14,7 @@ from app.commands.fund_prediction_followthrough import owner_scope
 from app.commands.holding_advice_inventory import PROJECT, core_engine
 from app.core.config import get_settings
 
-VERSION = "HOLDING_ADVICE_V4_EVIDENCE"
+VERSION = "HOLDING_ADVICE_V5_PERSONAL"
 DISPLAY_FIELDS = (
     "reportId",
     "fundCode",

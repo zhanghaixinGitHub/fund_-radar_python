@@ -28,7 +28,61 @@ SCOPES = {
     "MANAGER_CONDITIONAL_VALUATION",
     "MANAGER_CONDITIONAL_CONVERSION",
     "MANAGER_ADVISORY_SERVICE",
+    "MANAGER_CONDITIONAL_MARKET_ACCESS",
 }
+
+
+def _conditional_market_access(code, product, proof, document, material, body, title, manager):
+    """博道北交所条件风险说明：绑定本份额合同，不确认实际持仓或放宽投资范围。"""
+    access = (proof or {}).get("market_access_review", {})
+    contract = next(
+        (d for d in (material or {}).get("documents", []) if d.get("id") == access.get("contract_document_id")), None
+    )
+    clause = access.get("contract_quote", "")
+    if (
+        manager != "博道基金管理有限公司"
+        or _compact(title) != manager + "关于旗下部分基金投资北交所股票及相关风险提示的公告"
+        or not all(
+            term in _compact(body)
+            for term in (
+                "按照各自基金合同的约定",
+                "选择不将基金资产投资于北交所股票",
+                "基金资产并非必然投资北交所股票",
+                "流动性风险",
+                "退市风险",
+            )
+        )
+        or not document
+        or document.get("kind") != "REPORT"
+        or len(product) < 12
+        or _compact(product) not in _compact((proof or {}).get("quote", ""))
+        or code not in _compact((proof or {}).get("quote", ""))
+        or not contract
+        or contract.get("kind") not in {"ANNOUNCEMENT", "PROSPECTUS"}
+        or code not in contract.get("codes", [])
+        or "基金合同" not in contract.get("title", "")
+        or digest(contract.get("body", "")) != contract.get("body_hash")
+        or _compact(product) not in _compact(contract.get("body", ""))
+        or manager not in _compact(contract.get("body", ""))
+        or len(clause) < 100
+        or clause not in contract.get("body", "")
+        or "股票" not in _compact(clause)
+        or "投资范围" not in _compact(clause)
+        or access.get("venue") != "BSE"
+        or access.get("state") not in {"ALLOWED", "EXCLUDED", "UNRESOLVED"}
+        or len(access.get("interpretation", "")) < 60
+    ):
+        return False
+    text = _compact(clause)
+    venue = r"(?:北交所|北京证券交易所)"
+    negative = re.search(r"(?:不投资|不得投资|禁止投资).{0,8}" + venue, text)
+    positive = re.search(r"(?:包括|可投资|投资于).{0,12}" + venue, text)
+    if access["state"] == "ALLOWED":
+        return bool(positive and not negative)
+    if access["state"] == "EXCLUDED":
+        return bool(negative)
+    # “国内依法发行上市股票”不是逐市场准入证据，原样留不确定，不冒充可投。
+    return not (positive or negative) and "不确定" in access["interpretation"]
 
 
 def _compact(value):
@@ -385,6 +439,7 @@ def _validate(root, code, entry, source, value):
     manager = _compact(profile["management_company_name"])
     proof = value.get("identity_proof")
     document = None
+    material = None
     if proof:
         material = read(Path(proof["materials_path"]))
         document = next((d for d in material["documents"] if d["id"] == proof["document_id"]), None)
@@ -471,6 +526,24 @@ def _validate(root, code, entry, source, value):
             )
         ):
             raise ValueError("MARKET_NEWS_CONDITIONAL_VALUATION_UNPROVEN")
+    if value["scope"] == "MANAGER_CONDITIONAL_MARKET_ACCESS":
+        if value.get("does_not_confirm_current_portfolio_application") is not True or not _conditional_market_access(
+            code,
+            value.get("product_name", ""),
+            proof,
+            document,
+            material,
+            body,
+            entry["title"],
+            manager,
+        ):
+            raise ValueError("MARKET_NEWS_CONDITIONAL_MARKET_ACCESS_UNPROVEN")
+        contract = next(
+            d for d in material["documents"] if d["id"] == proof["market_access_review"]["contract_document_id"]
+        )
+        available = datetime.fromisoformat(contract["available_at"])
+        if available.tzinfo is None or available > reviewed or contract["published_date"] > str(current.date()):
+            raise ValueError("MARKET_NEWS_IDENTITY_SOURCE_TIME")
     if value["scope"] == "MANAGER_CONDITIONAL_CONVERSION":
         # “除所列基金及ETF外、处于正常开放期”的转换公告只是条件式业务背景。
         # 独立报告须证明本份额及管理人；并不由目录归类推断当前开放状态、收费或可转换对象。
@@ -584,6 +657,26 @@ def _validate(root, code, entry, source, value):
             )
             and not re.search(r"基金经理|(?:修改|修订|变更)基金合同|调整.{0,8}费率|本基金.{0,8}估值", _compact(body))
         )
+        # 已阅读全文的博道适当性方法说明只解释全公司分级方法；具体基金的
+        # 风险等级变更仍必须另按真实基金代码逐篇登记，不能借此自动放行。
+        manager_suitability_explanation = (
+            value["scope"] == "MANAGER_SERVICE"
+            and manager == "博道基金管理有限公司"
+            and title == manager + "旗下产品适当性风险等级评价说明"
+            and all(
+                term in _compact(body)
+                for term in (
+                    "对公司旗下产品进行风险等级划分",
+                    "风险承受能力",
+                    "适当性匹配",
+                    "低风险(R1)",
+                    "高风险(R5)",
+                    "保守型(C1)",
+                    "积极型(C5)",
+                )
+            )
+            and not re.search(r"(?:修订|变更)基金合同|调整后的风险等级自|基金经理变更|调整.{0,8}费率", _compact(body))
+        )
         if (
             re.search(r"旗下部分基金|关联交易|估值方法|基金经理|获配|承销证券", title)
             or not re.search(terms, title + _compact(body[:400]))
@@ -592,6 +685,7 @@ def _validate(root, code, entry, source, value):
             and not privacy_update
             and not product_impersonation_warning
             and not manager_risk_classification_guide
+            and not manager_suitability_explanation
         ):
             raise ValueError("MARKET_NEWS_MANAGER_SCOPE_UNPROVEN")
     return value
@@ -630,7 +724,11 @@ def record_applicability_review(
         "reviewed_at": now().isoformat(),
         "does_not_determine_direction": True,
     }
-    if scope in {"MANAGER_CONDITIONAL_VALUATION", "MANAGER_CONDITIONAL_CONVERSION"}:
+    if scope in {
+        "MANAGER_CONDITIONAL_VALUATION",
+        "MANAGER_CONDITIONAL_CONVERSION",
+        "MANAGER_CONDITIONAL_MARKET_ACCESS",
+    }:
         value["does_not_confirm_current_portfolio_application"] = True
     _validate(root, code, entry, source, value)
     versioned_save(root / "identity-reviews" / code / (source["sha256"] + ".json"), value)

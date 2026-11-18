@@ -411,7 +411,7 @@ PROTOCOL = {
 }
 
 
-def calculate(packet: dict, anchors: dict, *, root: Path) -> dict:
+def calculate(packet: dict, anchors: dict, *, root: Path, selected_dimensions: set[str] | None = None) -> dict:
     """从已归档原始观察复算完整八维；所有文件仅允许位于正式来源目录。
 
     单位、参照成员、窗口和状态证据沿原冻结契约核验。原始取得/核验日期
@@ -420,6 +420,36 @@ def calculate(packet: dict, anchors: dict, *, root: Path) -> dict:
     root = root.resolve()
     packet = deepcopy(packet)
     anchors = deepcopy(anchors)
+
+    if selected_dimensions is not None or packet.get("active_r5_partial_compilation"):
+        from app.services.fund_rating_active_r5_partial import compile_observations
+
+        inputs = packet.get("active_r5_partial_compilation")
+        if not inputs or selected_dimensions is None or set(inputs["selected_dimensions"]) != set(selected_dimensions):
+            raise ValueError("R5_ACTIVE_PARTIAL_ORIGINAL_SCOPE_REQUIRED")
+        if set(selected_dimensions) == set(policy(packet["basis"])["terms"]):
+            raise ValueError("R5_ACTIVE_PARTIAL_CANNOT_CLAIM_COMPLETE")
+        if any(inputs[key] != packet[key] for key in ["fund_code", "as_of_date", "verified_at"]):
+            raise ValueError("R5_ACTIVE_PARTIAL_PACKET_SCOPE")
+        compiled = compile_observations(inputs, root=root)
+        if compiled["observations"] != packet["quality_metrics"]["observations"] or compiled["anchors"] != anchors:
+            raise ValueError("R5_ACTIVE_PARTIAL_ORIGINAL_OBSERVATIONS_CONFLICT")
+
+    if packet.get("monthly_r5_compilation"):
+        from app.services.fund_rating_monthly_r5 import compile_same_index_monthly
+
+        if any(packet.get(key) for key in ["direct_index_compilation", "passive_index_compilation", "thematic_complete_compilation"]):
+            raise ValueError("R5_MONTHLY_SINGLE_ORIGINAL_COMPILATION_REQUIRED")
+        inputs = packet["monthly_r5_compilation"]
+        if any(inputs[key] != packet[key] for key in ["fund_code", "as_of_date", "verified_at"]):
+            raise ValueError("R5_MONTHLY_PACKET_SCOPE_CONFLICT")
+        compiled = compile_same_index_monthly(inputs, root=root)
+        if packet.get("unit_contract") != "RATIO_RANKS_RATIO_WINDOWS" or compiled["observations"] != packet["quality_metrics"]["observations"]:
+            raise ValueError("R5_MONTHLY_ORIGINAL_OBSERVATIONS_CONFLICT")
+        anchor = anchors.get(packet["fund_code"], {})
+        if any(anchor.get(key) != compiled["anchor"].get(key) for key in
+               ["sha256", "annual_tracking_error_limit_ratio", "published_on", "actual_clause"]):
+            raise ValueError("R5_MONTHLY_CURRENT_C_CONTRACT_ANCHOR_CONFLICT")
 
     if packet.get("direct_index_compilation") or packet.get("passive_index_compilation"):
         from app.services.fund_rating_direct_index import compile_observations
@@ -457,14 +487,14 @@ def calculate(packet: dict, anchors: dict, *, root: Path) -> dict:
     for code, anchor in anchors.items():
         if code != "material_events":
             anchor["path"] = source_path(anchor["path"])
-    result = _calculate_frozen(packet, PROTOCOL, anchors)
-    if result["score"] is None:
+    result = _calculate_frozen(packet, PROTOCOL, anchors, selected_dimensions=selected_dimensions)
+    if result["score"] is None and selected_dimensions is None:
         raise ValueError("R5_MATERIAL_EVENT_WITHHOLDS_COMPLETE_SCORE")
     return {
         **result,
-        "status": "SCORED",
+        "status": "PARTIAL" if selected_dimensions is not None else "SCORED",
         "grade": None,
-        "publishable": True,
+        "publishable": selected_dimensions is None,
         "calculation_revision": PROTOCOL["revision"],
     }
 

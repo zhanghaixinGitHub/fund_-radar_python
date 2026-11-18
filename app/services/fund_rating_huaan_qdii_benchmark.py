@@ -23,6 +23,7 @@ from app.services.fund_rating_huaan_qdii_relative import (
     _history,
     check_binding as check_relative_binding,
     compact,
+    validate_performance_period,
 )
 from app.services.fund_rating_r5 import PROTOCOL, _calculate_frozen
 from app.services.fund_rating_reviewed_quality import PASSIVE_BASIS
@@ -133,7 +134,10 @@ def _benchmark(source: Originals, inputs: dict, days: list[str]) -> dict:
     if (
         protocol.get("fund_code") != inputs["fund_code"]
         or protocol.get("as_of") != inputs["as_of_date"]
-        or protocol.get("common_days") != "OWN_727_ISSUER_CROSS_CHECKED_VALUATION_DATES"
+        or protocol.get("common_days") not in {
+            "OWN_727_ISSUER_CROSS_CHECKED_VALUATION_DATES",
+            "OWN_ISSUER_CROSS_CHECKED_VALUATION_DATES",
+        }
         or protocol.get("index") != "NDX_OFFICIAL_EOD"
         or protocol.get("fx") != "SAFE_PBOC_USD_CNY_MIDPOINT_LATEST_PUBLICATION"
         or protocol.get("annual_cash_rate") != ".0035"
@@ -183,13 +187,12 @@ def calculate(inputs: dict, *, root: Path) -> dict:
     if (
         inputs.get("version") != RELATIVE_VERSION
         or inputs.get("fund_code") != "014978"
-        or inputs.get("as_of_date") != "2026-09-30"
-        or inputs.get("window_start") != "2023-09-28"
         or inputs.get("basis") != PASSIVE_BASIS
         or set(inputs.get("requested_dimensions", [])) != {"return", "stability"}
     ):
         raise ValueError("HUAAN_QDII_BENCHMARK_SCOPE")
     source = Originals(inputs, root)
+    validate_performance_period(inputs, source)
     event_review = _events(source, inputs)
     if event_review["material_event_pending"]:
         raise ValueError("HUAAN_QDII_BENCHMARK_MATERIAL_EVENT_PENDING")
@@ -281,7 +284,7 @@ def prepare(session, request: dict, *, root: Path) -> dict:
     from app.services.fund_rating_reviewed_snapshot import BASIS, calculate as snapshot_calculate, validate_sources
 
     code = request.get("fund_code")
-    if code != "014978" or request.get("as_of_date") != "2026-09-30":
+    if code != "014978" or not request.get("as_of_date"):
         raise ValueError("HUAAN_QDII_BENCHMARK_REQUEST_SCOPE")
     previous = current_inputs(session, [code]).get(code)
     if not previous or str(previous["as_of_date"]) != request["as_of_date"]:

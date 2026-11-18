@@ -25,8 +25,16 @@ class MarketSyncWorkflow:
     def scope(self):
         if self.funds is None:
             rows = self.scope_provider()
+            if self.owner_user_id:
+                from app.commands.fund_prediction_followthrough import owner_scope
+                from app.core.config import get_settings
+
+                held = set(owner_scope(get_settings(), self.owner_user_id))
+                if held - {r["fund_code"] for r in rows}:
+                    raise ValueError("HELD_FUND_NOT_IN_ACTIVE_CATALOG")
+                rows = [r for r in rows if r["fund_code"] in held]
             codes = validate_codes([r["fund_code"] for r in rows])
-            if not codes or len(codes) != len(rows):
+            if (not codes and not self.owner_user_id) or len(codes) != len(rows):
                 raise ValueError("MARKET_WORKFLOW_SCOPE_EMPTY_OR_DUPLICATE")
             self.funds = rows
         return self.funds

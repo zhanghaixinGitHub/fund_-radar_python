@@ -26,6 +26,7 @@ def record(horizon="T1", **updates):
         "owner_verified": True,
         "snapshot_verified": True,
         "materials_input_hash": "current-material",
+        "nav_input_hash": "nav",
         "record_kind": "DATED_FORECAST",
         "ex_ante_eligible": True,
         "decision": "UP",
@@ -63,12 +64,31 @@ def test_conditional_and_abstain_save_are_not_dated_direction_success():
     ]
     result = v2.verify_outputs("002112", WINDOW, rows, materials_input_hash="current-material")
     assert [r["status"] for r in result["horizons"]] == [
-        "SAVED_AND_READ_BACK",
-        "REVIEWED_ABSTAIN",
-        "ACTION_REQUIRED",
-        "CONDITIONAL_SAVED",
+        "SAVED_AND_READ_BACK", "REVIEWED_ABSTAIN", "ACTION_REQUIRED", "CONDITIONAL_SAVED",
     ]
     assert [r["counts_as_dated_forecast"] for r in result["horizons"]] == [True, False, False, False]
+
+
+def test_reviewed_source_block_is_kept_separate_from_economic_abstention():
+    rows = [record(decision="ABSTAIN", source_decision="BLOCKED", source_reason="真实基准净值尚未披露")]
+    result = v2.verify_outputs("002112", WINDOW, rows, materials_input_hash="current-material")
+    first = result["horizons"][0]
+    assert first["review_complete"] is True and first["data_blocked"] is True
+    assert first["generationStatus"] == "BLOCKED"
+    assert first["review_status"] == "REVIEWED_BLOCKED"
+    assert first["source_reasons"] == ["真实基准净值尚未披露"]
+
+
+def test_late_nav_reopens_already_reviewed_block_before_freeze_can_be_skipped():
+    saved = record(decision="ABSTAIN", source_decision="BLOCKED", nav_input_hash="missing-nav")
+    old = v2.verify_outputs("002112", WINDOW, [saved], materials_input_hash="current-material",
+                            nav_input_hash="missing-nav", materials_ready=True)
+    assert old["horizons"][0]["review_status"] == "REVIEWED_BLOCKED"
+    new = v2.verify_outputs("002112", WINDOW, [saved], materials_input_hash="current-material",
+                            nav_input_hash="arrived-real-nav", materials_ready=True)
+    assert new["horizons"][0]["status"] == "ACTION_REQUIRED"
+    assert new["horizons"][0]["generationStatus"] == "WAITING_ANALYSIS"
+    assert new["horizons"][0]["review_complete"] is False
 
 
 def test_active_v2_saved_records_never_reads_old_tables_or_env(monkeypatch):
@@ -88,7 +108,11 @@ def test_active_runtime_freeze_skips_old_v1_even_with_legacy_long_term_gap(tmp_p
     monkeypatch.setattr(v2, "adoption", lambda: {"version": "COMPREHENSIVE_REVIEW_V2"})
     monkeypatch.setattr(runtime, "registered_materials", lambda *a, **k: handoff)
     calls = []
-    monkeypatch.setattr(v2, "freeze_request", lambda *a: calls.append(a) or {"generationStatus": "WAITING_ANALYSIS"})
+    monkeypatch.setattr(v2, "freeze_request",
+                        lambda *a, **k: calls.append(a) or {"generationStatus": "WAITING_ANALYSIS"})
+    backend.nav_input_hash = lambda code: "actual-nav-version"
+    backend.directory = tmp_path
+    monkeypatch.setattr("app.services.fund_daily_review.prepare_daily_review", lambda directory, packet: packet)
     assert backend.freeze("002112", "T1", tmp_path)["generationStatus"] == "WAITING_ANALYSIS"
     assert calls[0] == (tmp_path, "owner", "002112", "T1", WINDOW, handoff)
 
@@ -171,6 +195,7 @@ def test_report_does_not_count_conditional_as_all_predictions_generated(tmp_path
     versioned_save(source, material)
     monkeypatch.setattr(workflow, "registered_materials", lambda *a, **k: {"materials_path": str(source)})
     monkeypatch.setattr(watch, "watch_report", lambda *a, **k: {"reassessment_pending_count": 0, "failure_count": 0})
+    monkeypatch.setattr("app.services.fund_prediction_nav_identity.current_nav_identity", lambda *a: "nav")
     rows = [record(h, materials_input_hash=materials_input_identity(material)) for h in ("T1", "T5_V1", "T20_V1")]
     rows.append(
         record(

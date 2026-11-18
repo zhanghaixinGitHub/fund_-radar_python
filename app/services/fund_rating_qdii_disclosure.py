@@ -108,19 +108,80 @@ def month_ends(nav, as_of):
     return ends
 
 
+def verified_unit_total_return(source, inputs, snapshot, nav):
+    """保留缺失复权原值；仅在全窗无分配/折算且双源单位=累计时另算等价序列。"""
+    proof = snapshot.get("unit_return_reconciliation", {})
+    require(proof.get("method") == "DUAL_SOURCE_UNIT_NAV_NO_DISTRIBUTION_OR_SPLIT", "UNIT_RETURN_METHOD")
+    code, first, last = inputs["fund_code"], min(nav), inputs["as_of_date"]
+    from bs4 import BeautifulSoup
+
+    split_ref = proof["split_source_ref"]
+    split_meta = source.sources[split_ref]
+    require(split_meta.get("url") == "https://fundf10.eastmoney.com/fhsp_" + code + ".html"
+            and split_meta.get("method") == "GET" and split_meta.get("status") == 200
+            and split_meta.get("params") is None and split_meta.get("received_at"), "UNIT_RETURN_SPLIT_QUERY_BINDING")
+    page = BeautifulSoup(source.raw[split_ref], "html.parser")
+    require(page.title and "(" + code + ")基金分红送配" in plain(page.title.get_text()),
+            "UNIT_RETURN_SPLIT_SHARE_IDENTITY")
+    tables = [table for table in page.find_all("table") if "拆分折算日" in table.get_text()]
+    require(len(tables) == 1, "UNIT_RETURN_SPLIT_TABLE_REQUIRED")
+    split_rows = [[plain(cell.get_text(" ", strip=True)) for cell in row.find_all(["th", "td"])]
+                  for row in tables[0].find_all("tr")]
+    require(split_rows == [["年份", "拆分折算日", "拆分类型", "拆分折算比例"], ["暂无拆分信息!"]],
+            "UNIT_RETURN_SPLIT_EVENT_PRESENT")
+    chart = source.raw[inputs["nav_chart_ref"]].decode("utf-8-sig")
+    match = re.search(r"var\s+Data_netWorthTrend\s*=\s*(\[.*?\]);", chart)
+    require(match, "UNIT_RETURN_CHART_ROWS")
+    points = json.loads(match[1])
+    require(not any(point.get("unitMoney") for point in points if datetime.fromtimestamp(
+        point["x"] / 1000, timezone(timedelta(hours=8))).date().isoformat() in nav),
+        "UNIT_RETURN_CHART_EVENT_PRESENT")
+    for field, api in [("dividend_source_ref", "fund_div"), ("adjustment_source_ref", "fund_adj")]:
+        digest = proof[field]
+        meta, raw = source.sources[digest], source.json(digest)
+        params = meta.get("params", {})
+        require(meta.get("url") in {"https://api.tushare.pro", "http://api.tushare.pro"}
+                and params.get("api_name") == api and params.get("ts_code") == code + ".OF"
+                and raw.get("code") == 0 and isinstance(raw.get("data", {}).get("items"), list)
+                and raw["data"].get("has_more", False) is False, "UNIT_RETURN_EVENT_QUERY_BINDING")
+        if api == "fund_div":
+            require(set(params) == {"api_name", "ts_code"} and not raw["data"]["items"],
+                    "UNIT_RETURN_CASH_EVENT_PRESENT")
+        else:
+            require(str(date.fromisoformat(params["start_date"])) <= first
+                    and str(date.fromisoformat(params["end_date"])) >= last, "UNIT_RETURN_FACTOR_WINDOW")
+            require(raw["data"]["fields"] == ["ts_code", "trade_date", "adj_factor"], "UNIT_RETURN_FACTOR_SCHEMA")
+            factors = raw["data"]["items"]
+            require(all(row[0] == code + ".OF" and money(row[2]) == 1 for row in factors),
+                    "UNIT_RETURN_ADJUSTMENT_EVENT_PRESENT")
+    rows = {row["nav_date"]: row for row in snapshot["rows"]}
+    require(all(day in rows and money(rows[day]["unit_nav"]) == money(rows[day]["accumulated_nav"]) == value
+                for day, value in nav.items()), "UNIT_RETURN_DUAL_SOURCE_OR_CUMULATIVE_CONFLICT")
+    return {"method": proof["method"], "original_adjusted_nav_null_dates": sorted(
+        day for day in nav if rows[day].get("adjusted_nav") is None),
+        "adjusted_nav_imputed": False, "database_modified": False,
+        "event_original_refs": [proof["dividend_source_ref"], proof["adjustment_source_ref"], split_ref]}
+
+
 def own_history(source, inputs):
     if inputs["adapter"] == "CIFM_JAPAN":
         from app.services.fund_rating_public_japan import issuer_history
 
+        # 新滚动规范净值是派生数据库观察，不能冒充官网ORIGINAL原件。
+        # 仅走独立辅助档案，随后仍由官方同份额完整序列逐日核值和日期。
+        provider = (
+            auxiliary_json(inputs, source.root, "provider_crosscheck")
+            if "provider_crosscheck" in inputs.get("auxiliary_archives", {})
+            else source.json(inputs["provider_ref"])
+        )
         h = issuer_history(
-            source.json(inputs["provider_ref"]),
+            provider,
             source.json(inputs["issuer_detail_ref"]),
             source.json(inputs["issuer_nav_ref"]),
             date.fromisoformat(inputs["as_of_date"]),
         )
         rows = {r["nav_date"]: r for r in h["rows"]}
         nav = {d: money(rows[d]["adjusted_nav"]) for d in h["dates"]}
-        provider = source.json(inputs["provider_ref"])
         year_start = month_ends(nav, inputs["as_of_date"])[0]
         licensed = {r["nav_date"] for r in provider["history"]["rows"] if year_start <= r["nav_date"] <= max(nav)}
         require(licensed == {d for d in nav if year_start <= d}, "NAV_CALENDAR_PROVIDER_DISAGREEMENT")
@@ -156,9 +217,16 @@ def own_history(source, inputs):
         {d for d in nav if year_start <= d} == {d for d in db if year_start <= d <= inputs["as_of_date"]},
         "NAV_CALENDAR_PROVIDER_DISAGREEMENT",
     )
+    unit_audit = None
+    if any(db[day].get("adjusted_nav") is None for day in nav if day in db):
+        unit_audit = verified_unit_total_return(source, inputs, snapshot, nav)
     for d, v in nav.items():
         require(d in db and db[d]["fund_code"] == inputs["fund_code"], "NAV_PROVIDER_DATE_OR_SHARE")
-        require(v == money(db[d]["unit_nav"]) == money(db[d]["adjusted_nav"]), "NAV_PROVIDER_VALUE_CONFLICT")
+        require(v == money(db[d]["unit_nav"]), "NAV_PROVIDER_VALUE_CONFLICT")
+        if db[d].get("adjusted_nav") is not None:
+            require(v == money(db[d]["adjusted_nav"]), "NAV_PROVIDER_VALUE_CONFLICT")
+        else:
+            require(unit_audit is not None, "NAV_ADJUSTED_MISSING_UNRECONCILED")
     return nav, {
         "currency": "CNY",
         "actual_published_dates": len(nav),
@@ -166,6 +234,7 @@ def own_history(source, inputs):
         "late_announcements": [
             {"date": d, "ann_date": db[d]["ann_date"]} for d in nav if db[d]["ann_date"] > inputs["as_of_date"]
         ],
+        "unit_total_return_reconciliation": unit_audit,
     }
 
 
@@ -493,7 +562,9 @@ def calculate(inputs: dict, *, root: Path) -> dict:
     source = Originals(inputs, root)
     report = source.body(inputs["primary_ref"])
     require(code in plain(report[:18000]) and plain(name) in plain(report[:18000]), "PRIMARY_IDENTITY")
-    require(inputs["holding_date"] == "2026-06-30" and inputs["as_of_date"] == "2026-09-30", "VERIFIED_PERIOD_SCOPE")
+    from app.services.fund_rating_period import validate_period
+
+    validate_period(inputs, source)
     binding = primary_binding(report, inputs)
     dimensions = {k: None for k in KEYS}
     facts = {

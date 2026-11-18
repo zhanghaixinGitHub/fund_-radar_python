@@ -388,11 +388,31 @@ def _period_covered(bundle: dict, observed: date, requested: date) -> bool:
     """
     if observed >= requested:
         return True
+    foreign = bundle.get("family") == "QDII_EQUITY" or re.search(
+        r"QDII|海外|日本|越南|纳斯达克|原油", bundle.get("identity", {}).get("legal_name", ""), re.I
+    )
+    if foreign:
+        from app.services.fund_rating_month_end import official_month_end
+        from app.services.fund_rating_reviewed_snapshot import archive_root
+
+        try:
+            return official_month_end(bundle, observed, requested, root=archive_root())
+        except (ValueError, ArithmeticError, KeyError, TypeError, FileNotFoundError):
+            return False
+    from app.services.fund_rating_typed_disclosure import PROFILES
+
+    typed = bundle.get("typed_disclosure_calculation", {})
+    profile = PROFILES.get(typed.get("profile"), {})
+    domestic_type = bundle.get("family") in {"INDEX", "ACTIVE_EQUITY"} or (
+        profile.get("family") == bundle.get("family")
+        and (profile.get("enabled") or profile.get("partial_enabled"))
+        and typed.get("inputs", {}).get("currency") == "CNY"
+    )
     if (
         (requested + timedelta(days=1)).day != 1
         or observed.month != requested.month
         or observed.year != requested.year
-        or bundle.get("family") not in {"INDEX", "ACTIVE_EQUITY"}
+        or not domestic_type
         or re.search(r"QDII|海外|日本|越南|纳斯达克|原油", bundle.get("identity", {}).get("legal_name", ""), re.I)
     ):
         return False

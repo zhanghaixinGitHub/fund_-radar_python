@@ -24,7 +24,7 @@ class DailyPredictionRun:
         self.backend = backend
         self.path = self.directory / "run.json"
 
-    def advance(self, *, reviews=None, blocked_file=None):
+    def advance(self, *, reviews=None, blocked_file=None, publish_prepared=False):
         """推进一次有界工作；未完成明确返回下一步，重试不重交同步或覆盖旧输入。"""
         b, root = self.backend, self.directory
         at, owner, scope, current_window = b.context()
@@ -60,6 +60,9 @@ class DailyPredictionRun:
                 return state
             return state
         state.update(checked_at=at, scope=scope, scope_hash=digest(scope), status="CHECKING")
+        state["workflow_version"] = "HOLDINGS_END_TO_END_V1"
+        if hasattr(b, "repair_handoffs"):
+            state["handoff_recovery"] = b.repair_handoffs(scope)
         versioned_save(self.path, state)
         # 首次提交资料前仍须建立本人完成台账；等待同一作业时不重复展开全部原文。
         # 同步尚未终态时资料还会变化，重型守卫既不能据此生成结论，也会与采集争用内存。
@@ -109,13 +112,19 @@ class DailyPredictionRun:
         state["prediction_outcomes"] = terminal.get("prediction_outcomes")
         state["prediction_outcomes_recovery"] = terminal.get("prediction_outcomes_recovery")
         state["materials_terminal"] = terminal
+        if hasattr(b, "prepare_monthly"):
+            state["monthly_compilation"] = b.prepare_monthly(scope)
+            versioned_save(self.path, state)
         for code in scope:
             state["current_fund_code"] = code
             item = state["funds"].setdefault(code, {"fund_code": code})
             item.pop("failure", None)
             try:
                 # 已保存仍须读回本人范围；本次有新增资料时会由来源摘要重新触发审阅。
-                item.update(b.recover_materials(code, root / "funds" / code, state["window"]))
+                if not publish_prepared or not item.get("materials_path"):
+                    item.update(b.recover_materials(code, root / "funds" / code, state["window"]))
+                if hasattr(b, "refresh_nav"):
+                    item["base_nav_refresh"] = b.refresh_nav(code, root / "funds" / code, state["window"])
                 review = (reviews or {}).get(code)
                 if review:
                     if (
@@ -142,9 +151,14 @@ class DailyPredictionRun:
                         review_path = Path(packet.get("review_path", folder / "review.json"))
                         if not review_path.exists():
                             item["periods"].append(
-                                {**period, "status": "WAITING_ANALYSIS" if packet.get("generationStatus") ==
-                                 "WAITING_ANALYSIS" else "READ_AND_JUDGE", "input": packet,
-                                 "review_path": str(review_path)}
+                                {
+                                    **period,
+                                    "status": "WAITING_ANALYSIS"
+                                    if packet.get("generationStatus") == "WAITING_ANALYSIS"
+                                    else "READ_AND_JUDGE",
+                                    "input": packet,
+                                    "review_path": str(review_path),
+                                }
                             )
                             continue
                         receipt = b.import_and_archive(code, horizon, folder, owner, state["window"])
@@ -177,9 +191,24 @@ class DailyPredictionRun:
             except Exception as error:
                 state["ratings"] = {"status": "FAILED", "reason": type(error).__name__ + ":" + str(error)[:300]}
             versioned_save(root / "ratings-status.json", state["ratings"])
+        # 建议必须在本轮评分、四周期处理后生成；原有结果不能代替本期依赖。
+        if hasattr(b, "advice"):
+            try:
+                state["advice"] = b.advice(state, final)
+            except Exception as error:
+                state["advice"] = {"status": "FAILED", "failure": type(error).__name__}
+            versioned_save(root / "advice-status.json", state["advice"])
         versioned_save(
             root / "work-items.json",
-            {"owner_user_id": owner, "window": state["window"], "funds": final["funds"], "execution": state["funds"]},
+            {
+                "owner_user_id": owner, "window": state["window"], "funds": final["funds"],
+                "execution": state["funds"], "monthly_compilation": state.get("monthly_compilation"),
+                "ratings": state.get("ratings"), "advice": state.get("advice"),
+                "remaining_funds": sorted(set(final["pending_funds"]) | {
+                    row["fund_code"] for row in state.get("advice", {}).get("items", [])
+                    if row.get("status") in {"WAITING_INPUTS", "INSUFFICIENT", "FAILED"}
+                }),
+            },
         )
         # 守卫是唯一结束判据。同步摘要不完整时仍不能报告整轮完成。
         state.update(
@@ -189,9 +218,18 @@ class DailyPredictionRun:
             current_fund_code=None,
         )
         # 审阅完成、方向数量和旧区间的变化观察分别汇总，互不冒充完成。
-        for key in ("all_reviews_saved", "reviewed_period_count", "unreviewed_period_count",
-                    "dated_prediction_count", "conditional_saved_count", "abstain_saved_count",
-                    "reassessment_watch", "reassessment_pending_count", "reassessment_check_failure_count"):
+        for key in (
+            "all_reviews_saved",
+            "reviewed_period_count",
+            "unreviewed_period_count",
+            "dated_prediction_count",
+            "conditional_saved_count",
+            "abstain_saved_count",
+            "blocked_saved_count",
+            "reassessment_watch",
+            "reassessment_pending_count",
+            "reassessment_check_failure_count",
+        ):
             if key in final:
                 state[key] = final[key]
         if state["prediction_outcomes"] is None and state["status"] == "CLOSED":
@@ -200,5 +238,7 @@ class DailyPredictionRun:
             state["status"] = "ONE_DAY_OUTCOMES_PENDING"
         if state.get("ratings", {}).get("status") != "SUCCEEDED" and "ratings" in state and state["status"] == "CLOSED":
             state["status"] = "RATINGS_PENDING"
+        if state.get("advice", {}).get("status") != "SUCCEEDED" and "advice" in state and state["status"] == "CLOSED":
+            state["status"] = "ADVICE_PENDING"
         versioned_save(self.path, state)
         return state

@@ -17,14 +17,23 @@ from app.services.fund_materials_store import versioned_save
 from app.services.material_content import content_digest
 
 
-def fetch(url, base, root):
+def fetch(url, base, root, *, validator=None):
     cache = Path(root) / "overseas-receipts" / base / (digest(url) + ".json")
     if cache.exists():
         receipt = read(cache)
         raw = Path(receipt["raw_path"]).read_bytes()
         if content_digest(raw) != receipt["raw_sha256"]:
             raise ValueError("OVERSEAS_RAW_CHANGED")
-        return raw, receipt
+        # 凌晨可能只拿到上一个交易日的响应。目录名是目标基准日，并不能
+        # 证明原文已经包含该日收盘；无效旧响应保留，但允许本轮再取一次。
+        if validator is None:
+            return raw, receipt
+        try:
+            validator(raw)
+        except (ValueError, ArithmeticError):
+            pass
+        else:
+            return raw, receipt
     with httpx.Client(
         timeout=httpx.Timeout(20, connect=5),
         trust_env=False,
@@ -49,6 +58,10 @@ def fetch(url, base, root):
     }
     versioned_save(Path(root) / "overseas-attempts" / (digest(receipt) + ".json"), receipt)
     response.raise_for_status()
+    # 新响应也先核真实日期和字段；过早、缺日或格式不符的原始响应只留
+    # 取得记录，不锁成该基准日的可复用缓存，不覆盖已有有效来源。
+    if validator is not None:
+        validator(raw)
     versioned_save(cache, receipt)
     return raw, receipt
 
@@ -213,7 +226,9 @@ def refresh(material, base, root):
                 and parsed.hostname == "hq.sinajs.cn"
                 and url == "https://hq.sinajs.cn/list=gb_" + security[:-3].lower()
             ):
-                raw, receipt = fetch(url, base, root)
+                raw, receipt = fetch(
+                    url, base, root, validator=lambda body, security=security: us_close(body, security, base)
+                )
                 current = us_close(raw, security, base)
                 body = json.dumps(
                     {"regular_close": current, "after_hours_excluded": True}, ensure_ascii=False, sort_keys=True
@@ -224,7 +239,9 @@ def refresh(material, base, root):
                 and parsed.path
                 == "/quote/" + ("998405.T" if security == "TOPIX" else security[:-3] + ".T") + "/history"
             ):
-                raw, receipt = fetch(url, base, root)
+                raw, receipt = fetch(
+                    url, base, root, validator=lambda body, security=security: jp_close(body, security, base)
+                )
                 current, history = jp_close(raw, security, base)
                 body = json.dumps(history, ensure_ascii=False, sort_keys=True)
             else:
@@ -245,7 +262,7 @@ def refresh(material, base, root):
         if urlparse(prior["url"]).hostname != "www.safe.gov.cn":
             raise ValueError("OFFICIAL_FX_SOURCE_REVIEW_REQUIRED")
         url = "https://www.safe.gov.cn/AppStructured/hlw/RMBQuery.do?startDate=" + base + "&endDate=" + base
-        raw, receipt = fetch(url, base, root)
+        raw, receipt = fetch(url, base, root, validator=lambda body: official_fx(body, base))
         data = official_fx(raw, base)
         ref = "official-fx:" + receipt["raw_sha256"]
         append(

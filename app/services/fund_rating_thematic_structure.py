@@ -119,7 +119,7 @@ def market_history(source, spec, securities):
         all_dates.update(rows_by_day)
     days = sorted(all_dates)[-60:]
     require(
-        len(days) == 60 and days == spec["market_dates"] and days[-1] == "2026-09-30", "ACTUAL_LAST60_MARKET_CALENDAR"
+        len(days) == 60 and days == spec["market_dates"] and days[-1] == source.asof, "ACTUAL_LAST60_MARKET_CALENDAR"
     )
     zeros = []
     for full, rows in market.items():

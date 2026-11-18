@@ -217,7 +217,9 @@ def article_text(raw, pdf):
             for page in reader:
                 textpage = page.get_textpage()
                 try:
-                    pages.append(textpage.get_text_bounded())
+                    # 同版本D盘历史提取页保留完整文本范围，兼容原生PDFium的整页接口。
+                    extract = getattr(textpage, "get_text_bounded", None) or textpage.get_text_range
+                    pages.append(extract())
                 finally:
                     textpage.close()
                     page.close()

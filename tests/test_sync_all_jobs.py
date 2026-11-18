@@ -47,7 +47,8 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
             self.stage = "MARKET_DETAIL"
             return MarketDetailSyncResult(run(self.stage, progress_reporter), ())
 
-        def sync_market_nav_incremental(self, *, progress_reporter):
+        def sync_market_nav_incremental(self, *, progress_reporter, fund_codes=None):
+            assert fund_codes is None or fund_codes == ("008888",)
             self.stage = "MARKET_NAV_INCREMENTAL"
             return run(self.stage, progress_reporter)
 
@@ -55,14 +56,16 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
             close_hook(self.stage)
 
     class FreeService:
-        def sync(self, *, progress_reporter):
+        def sync(self, *, progress_reporter, fund_codes=None):
+            assert fund_codes is None or fund_codes == ("008888",)
             return FreeDataCompletionResult(run("MARKET_FREE_DATA_COMPLETION", progress_reporter), ())
 
         def close(self):
             close_hook("MARKET_FREE_DATA_COMPLETION")
 
     class FeatureService:
-        def build(self, *, progress_reporter):
+        def build(self, *, progress_reporter, fund_codes=None):
+            assert fund_codes is None or fund_codes == ("008888",)
             run("STOCK_FEATURE_SNAPSHOT", progress_reporter)
             return StockFeatureBuildSummary(
                 status="COMPLETED",
@@ -88,7 +91,8 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
         }
 
     class FeeService:
-        def sync(self, fund_code=None, *, progress_reporter):
+        def sync(self, fund_code=None, *, progress_reporter, fund_codes=None):
+            assert fund_codes is None or fund_codes == ("008888",)
             run("SIMULATION_FEES", progress_reporter)
             return FeeSyncResult(2, 2, ())
 
@@ -137,8 +141,9 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
         return {"total": 2, "checked": 2, "completed": 2, "created": 1,
                 "pending": 0, "failed": 0, "remaining": 0, "batches": 1, "dueBefore": "2026-09-24"}
 
-    def manager_sync(manager_ids, *, fetch, progress):
+    def manager_sync(manager_ids, *, fetch, progress, fund_codes=None):
         assert fetch and not manager_ids
+        assert fund_codes is None or fund_codes == ("008888",)
         run("FUND_MANAGERS", progress)
         return {"status": "SUCCEEDED", "managerCount": 2, "completed": 2, "failed": 0}
 
@@ -147,6 +152,9 @@ def make_manager(calls, failures=(), stage_hook=lambda _: None, close_hook=lambd
 
         def __init__(self, **kwargs):
             pass
+
+        def scope(self):
+            return [{"fund_code": "008888"}]
 
         def close(self):
             pass

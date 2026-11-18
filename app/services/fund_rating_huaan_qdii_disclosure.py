@@ -1,6 +1,7 @@
 """014978持仓/流动性补项：复用已启用披露规则，保留三年业绩组件。"""
 
 import re
+from copy import deepcopy
 from decimal import Decimal, localcontext
 
 from app.services.fund_quality_v2_disclosures import report_period
@@ -8,8 +9,112 @@ from app.services.fund_rating_direct_index import Originals, _flows
 from app.services.fund_rating_market_review import normalized_text
 
 VERSION = "HUAN_QDII_DISCLOSURE_COMPLETION_20261111_V1"
+MONTHLY_VERSION = "HUAN_QDII_MONTHLY_DISCLOSURE_ONLY_20261117_V1"
+MONTHLY_EXTENDED_VERSION = "HUAN_QDII_MONTHLY_DISCLOSURE_COMPONENTS_20261117_V2"
+MONTHLY_COMPLETE_VERSION = "HUAN_QDII_MONTHLY_EIGHT_COMPONENTS_20261117_V3"
 LEGAL = "华安纳斯达克100交易型开放式指数证券投资基金联接基金(QDII)"
 TARGET = "华安纳斯达克100交易型开放式指数证券投资基金(QDII)"
+
+
+def prepare_monthly_disclosure_only(bundle, *, root, period_review, notice_reviews, missing_input_facts):
+    """生成明确两维新期候选；旧成功文案、指标和点值均不带入本期缺项。"""
+    from app.services.fund_rating_pipeline import archive_json
+    from app.services.fund_rating_reviewed_quality import PASSIVE_BASIS, policy
+    from app.services.fund_rating_reviewed_snapshot import KEYS
+
+    candidate = deepcopy(bundle)
+    inputs = candidate["huaan_qdii_disclosure_calculation"]["inputs"]
+    if (
+        period_review.get("fund_code") != candidate["fund_code"]
+        or period_review.get("as_of_date") != candidate["as_of_date"]
+        or period_review.get("holding_date") != candidate["holding_date"]
+        or len(period_review.get("reason", "")) < 60
+        or not period_review.get("evidence")
+        or not notice_reviews
+        or not missing_input_facts
+        or any(len(str(missing_input_facts.get(key, ""))) < 8 for key in ("cohort", "publisher", "peer_adjusted_nav"))
+        or any(item.get("source_ref") not in inputs["sources"] for item in notice_reviews)
+    ):
+        raise ValueError("QDII_MONTHLY_ACTUAL_REVIEW_AND_CAUSES_REQUIRED")
+    for key in ("huaan_qdii_relative_calculation", "huaan_qdii_benchmark_calculation"):
+        candidate.pop(key, None)
+    candidate["monthly_disclosure_only"] = True
+    extended = bool(inputs.get("management_inputs") or inputs.get("monthly_fee_inputs"))
+    inputs.update(
+        version=MONTHLY_EXTENDED_VERSION if extended else MONTHLY_VERSION,
+        monthly_disclosure_only=True,
+        as_of_date=candidate["as_of_date"],
+        monthly_period_review=deepcopy(period_review),
+    )
+    inputs["monthly_notice_reviews"] = deepcopy(notice_reviews)
+    candidate["monthly_missing_input_facts"] = deepcopy(missing_input_facts)
+    candidate["monthly_notice_reviews"] = deepcopy(notice_reviews)
+    result = calculate(inputs, root=root)
+    candidate["public_explanations"] = {
+        "return": "本期未生成收益评分。"
+        + missing_input_facts["cohort"]
+        + missing_input_facts["peer_adjusted_nav"]
+        + missing_input_facts["publisher"],
+        "risk": "本期未生成风险评分。" + missing_input_facts["publisher"] + missing_input_facts["peer_adjusted_nav"],
+        "execution": "本期未生成目标执行评分。"
+        + missing_input_facts["publisher"]
+        + "本期合同参照及跟踪误差尚未完成重放。",
+        "stability": "本期未生成稳定性评分。"
+        + missing_input_facts["cohort"]
+        + missing_input_facts["publisher"]
+        + "本期月度和滚动年度比较尚未完成。",
+        "management": missing_input_facts.get("management", "本期管理原件仍须通过实际评分核验。")
+        + "历史整改事实与旧评分仅保留为历史，不作为本期管理评分。",
+        "fee": missing_input_facts.get("fee", "本期费用原件仍须通过实际评分核验。")
+        + "旧期持有情景估计不直接作为本期费用分数。",
+        "holdings": (
+            "按最新完整报告期重新核对联接与唯一目标ETF投资金额、目标ETF完整权益明细"
+            "及主要股票的同日指数成分匹配。完整持仓日期仍为"
+        )
+        + candidate["holding_date"]
+        + "，本期新披露不被当作实时全仓。",
+        "liquidity": (
+            "按最新完整报告的公开申赎对账、巨额赎回安排及托管履职重新计算，"
+            "并核对本期新公告的实际适用范围。只评价公开履职，不承诺未来实际到账。"
+        ),
+    }
+    # 数值为空但沿用旧成功指标/来源说明同样会误导；缺六维一并清除旧展示投影。
+    for key in ("return", "risk", "execution", "stability", "management", "fee"):
+        candidate.get("public_metrics", {}).pop(key, None)
+        candidate.get("dimension_sources", {}).pop(key, None)
+    for outer, internal in [("management", "management"), ("fee", "cost")]:
+        if result["dimensions"].get(internal) is not None:
+            candidate["monthly_missing_input_facts"].pop(outer, None)
+            candidate["public_explanations"][outer] = (
+                "本期已按实际经理职责、连续任职及六个半年度治理原件独立重算；已披露整改按既有观察档评价。"
+                if outer == "management"
+                else "本期已按本C份额当前公开收费原件及一万元持有365天、净值不变的既有情景独立重算。"
+                "运作综合费率不重复叠加基础费率；这是公开费用估计。"
+            )
+    count = len([point for point in result["dimensions"].values() if point is not None])
+    candidate["public_limitations"] = [
+        "本期资料截止"
+        + candidate["as_of_date"]
+        + "，已有"
+        + str(count)
+        + "项按实际原件重新复算，"
+        + "其余"
+        + str(8 - count)
+        + "项及总分为空。",
+        "缺项原因和真实补取失败另有记录；本版本不表示自然月末官方估值证明已经齐全。",
+    ]
+    raw = candidate["huaan_qdii_disclosure_calculation"]
+    raw["input_archive"] = archive_json(root, inputs)
+    weights = policy(PASSIVE_BASIS)["weights"]
+    document = {
+        "code": candidate["fund_code"],
+        "as_of": candidate["as_of_date"],
+        "outer_weights_percent": {key: weights[value] for key, value in KEYS.items()},
+        "dimensions": {key: result["dimensions"].get(value) for key, value in KEYS.items()},
+    }
+    candidate.update(research_format="single", research_archive=archive_json(root, document))
+    candidate.pop("reviewed_document", None)
+    return candidate
 
 
 def check_binding(bundle, inputs):
@@ -21,6 +126,22 @@ def check_binding(bundle, inputs):
         or bundle.get("family") != "INDEX"
     ):
         raise ValueError("QDII_COMPLETION_BINDING")
+    if bundle.get("monthly_disclosure_only") is True:
+        if (
+            inputs.get("version") not in {MONTHLY_VERSION, MONTHLY_EXTENDED_VERSION}
+            or inputs.get("monthly_disclosure_only") is not True
+            or any(
+                bundle.get(key)
+                for key in (
+                    "huaan_qdii_relative_calculation",
+                    "huaan_qdii_benchmark_calculation",
+                    "evidence_v1_calculation",
+                    "r5_calculation",
+                )
+            )
+        ):
+            raise ValueError("QDII_MONTHLY_DISCLOSURE_ONLY_BINDING")
+        return
     if (
         not bundle.get("huaan_qdii_relative_calculation")
         or not bundle.get("huaan_qdii_benchmark_calculation")
@@ -28,6 +149,12 @@ def check_binding(bundle, inputs):
         or bundle.get("r5_calculation")
     ):
         raise ValueError("QDII_COMPLETION_EXISTING_REPLAY_REQUIRED")
+    if inputs.get("version") == MONTHLY_COMPLETE_VERSION and (
+        inputs.get("monthly_disclosure_only") is not False
+        or not inputs.get("management_inputs")
+        or not inputs.get("monthly_fee_inputs")
+    ):
+        raise ValueError("QDII_MONTHLY_COMPLETE_REQUIRES_INDEPENDENT_MANAGEMENT_AND_FEES")
 
 
 def _pages(source, digest, code, legal, period):
@@ -44,14 +171,26 @@ def _pages(source, digest, code, legal, period):
 
 def calculate(inputs, *, root):
     if (
-        inputs.get("version") != VERSION
+        inputs.get("version") not in {VERSION, MONTHLY_VERSION, MONTHLY_EXTENDED_VERSION, MONTHLY_COMPLETE_VERSION}
         or inputs.get("fund_code") != "014978"
         or inputs.get("share_class") != "C"
-        or inputs.get("as_of_date") != "2026-09-30"
-        or inputs.get("holding_date") != "2026-06-30"
     ):
         raise ValueError("QDII_COMPLETION_SCOPE")
+    if (
+        inputs.get("version") in {MONTHLY_VERSION, MONTHLY_EXTENDED_VERSION}
+        and inputs.get("monthly_disclosure_only") is not True
+    ):
+        raise ValueError("QDII_MONTHLY_DISCLOSURE_ONLY_MARKER_REQUIRED")
+    if inputs.get("version") == MONTHLY_COMPLETE_VERSION and inputs.get("monthly_disclosure_only") is not False:
+        raise ValueError("QDII_MONTHLY_COMPLETE_MARKER_REQUIRED")
     source = Originals(inputs, root, lazy=True)
+    from app.services.fund_rating_period import validate_period
+
+    class SourceBody:
+        def body(self, reference):
+            return "\n".join(source.pages(reference))
+
+    validate_period(inputs, SourceBody())
     pages, own = _pages(source, inputs["primary_ref"], "014978", LEGAL, inputs["holding_date"])
     target_pages, target = _pages(source, inputs["target_ref"], "159632", TARGET, inputs["holding_date"])
     relation = re.search(r"2\.1\.1目标基金基本情况(.+?)2\.2基金产品说明", own)
@@ -131,7 +270,7 @@ def calculate(inputs, *, root):
             raise ValueError("QDII_COMPLETION_PUBLIC_REDEMPTION_EXECUTION")
     if inputs.get("actual_effect_review_complete") is not True or inputs.get("confirmed_pressure_effects") is not False:
         raise ValueError("QDII_COMPLETION_ACTUAL_REVIEW_REQUIRED")
-    return {
+    result = {
         "dimensions": {"holdings": str(holding_score), "liquidity": "75"},
         "facts": {
             "target_code": "159632",
@@ -149,15 +288,83 @@ def calculate(inputs, *, root):
             "source_sha256": sorted(source.raw),
         },
     }
+    if inputs["version"] in {MONTHLY_EXTENDED_VERSION, MONTHLY_COMPLETE_VERSION}:
+        independent = _independent_monthly_components(inputs, source, root=root)
+        result["dimensions"].update(independent["dimensions"])
+        result["facts"].update(independent["facts"])
+        if inputs["version"] == MONTHLY_COMPLETE_VERSION and any(
+            result["dimensions"].get(key) is None for key in ("management", "cost")
+        ):
+            raise ValueError("QDII_MONTHLY_COMPLETE_INDEPENDENT_COMPONENT_NOT_READY")
+    return result
+
+
+def _independent_monthly_components(inputs, source, *, root):
+    """只从已验收管理原始输入/当前费用原件复算；不消费旧标量。"""
+    result = {"dimensions": {}, "facts": {}}
+    from app.services.fund_rating_management_inputs import calculate as management_calculate
+    from app.services.fund_rating_market_review import annual_fee_score, fee_profile
+
+    errors = result["facts"].setdefault("evidence_errors", {})
+    result["dimensions"].update(management=None, cost=None)
+    if inputs.get("management_inputs"):
+        try:
+            observed = management_calculate(
+                inputs["management_inputs"],
+                root=root,
+                manager_name=inputs["manager_name"],
+                as_of=inputs["as_of_date"],
+                fund_code=inputs["fund_code"],
+                legal_name=inputs["legal_name"],
+                primary_report_hash=inputs["primary_ref"],
+            )
+            result["dimensions"]["management"] = observed["score"]
+            result["facts"]["management"] = observed
+        except (ValueError, KeyError, FileNotFoundError) as error:
+            errors["management"] = str(error)
+    if inputs.get("monthly_fee_inputs"):
+        try:
+            fee = inputs["monthly_fee_inputs"]
+            if set(fee) != {"summary_ref", "prospectus_ref"}:
+                raise ValueError("QDII_MONTHLY_FEE_ORIGINAL_REFS_REQUIRED")
+            profile = fee_profile(
+                "\n".join(source.pages(fee["summary_ref"])),
+                code=inputs["fund_code"],
+                share_class=inputs["share_class"],
+                legal_name=inputs["legal_name"],
+                supporting_text="\n".join(source.pages(fee["prospectus_ref"])),
+                published_on=source.sources[fee["summary_ref"]]["published_on"],
+            )
+            observed = annual_fee_score(profile["fees"])
+            result["dimensions"]["cost"] = str(observed["score"])
+            result["facts"]["cost"] = {"profile": profile, **observed}
+        except (ValueError, KeyError, FileNotFoundError) as error:
+            errors["cost"] = str(error)
+    return result
 
 
 def replay_snapshot(bundle, dimensions, *, root):
     inputs = bundle["huaan_qdii_disclosure_calculation"]["inputs"]
     check_binding(bundle, inputs)
     points = calculate(inputs, root=root)["dimensions"]
-    for key in ("holdings", "liquidity"):
+    if bundle.get("monthly_disclosure_only") is True:
+        for key in ("return", "risk", "execution", "stability", "management", "fee"):
+            internal = "cost" if key == "fee" else key
+            if inputs["version"] == MONTHLY_EXTENDED_VERSION and points.get(internal) is not None:
+                continue
+            point = dimensions[key]
+            if (
+                point.get("candidate") is not None
+                or Decimal(str(point["lower"])) != 0
+                or Decimal(str(point["upper"])) != 100
+            ):
+                raise ValueError("QDII_MONTHLY_UNOBSERVED_DIMENSION_BECAME_POINT:" + key)
+    for key in ("holdings", "liquidity", "management", "fee"):
+        internal = "cost" if key == "fee" else key
+        if points.get(internal) is None:
+            continue
         if any(
-            dimensions[key].get(bound) is None or Decimal(str(dimensions[key][bound])) != Decimal(points[key])
+            dimensions[key].get(bound) is None or Decimal(str(dimensions[key][bound])) != Decimal(points[internal])
             for bound in ("lower", "upper", "candidate")
         ):
             raise ValueError("QDII_COMPLETION_DIMENSION_REPLAY:" + key)
@@ -167,7 +374,7 @@ def replay_snapshot(bundle, dimensions, *, root):
             if isinstance(reviewed, dict)
             else [reviewed]
         )
-        if any(value is None or Decimal(str(value)) != Decimal(points[key]) for value in values):
+        if any(value is None or Decimal(str(value)) != Decimal(points[internal]) for value in values):
             raise ValueError("QDII_COMPLETION_REVIEWED_DOCUMENT_REPLAY:" + key)
 
 

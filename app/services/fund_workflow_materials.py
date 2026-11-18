@@ -45,6 +45,30 @@ def registered_materials(code: str, *, root=None, at=None, reader=None):
     return receipt
 
 
+def refresh_changed_handoff(code: str, *, root=None, clock=None):
+    """上游正常更新后重建未批准交接；原候选被篡改时仍拒绝。
+
+    仅更新采集台账的身份绑定，不继承旧的批准或用途豁免。原材料、旧审阅及
+    正式预测保持原样；新的来源版本仍由四周期独立审阅。
+    """
+    from app.services.fund_exposure_common import now
+
+    current = (clock or now)()
+    base = workflow_root(root)
+    try:
+        registered_materials(code, root=base, at=current)
+        return {"fund_code": code, "status": "UNCHANGED"}
+    except ValueError as error:
+        if str(error) != "MARKET_COMPREHENSIVE_HANDOFF_CHANGED":
+            raise
+    receipt = read(receipt_path(code, base))
+    payload = read(Path(receipt["materials_path"]))
+    if payload.get("fund_code") != code or digest(payload) != receipt.get("materials_hash"):
+        raise ValueError("HANDOFF_CANDIDATE_CONTENT_CHANGED_REQUIRES_RECOVERY")
+    inspected = inspect_materials(code, receipt["materials_path"], root=base, clock=lambda: current)
+    return {"fund_code": code, "status": "REFRESHED_UNREVIEWED", "receipt": inspected}
+
+
 def input_gaps(packet: dict) -> list[str]:
     """复核原综合政策的必需维度和实际基准日，不把 prepare 成功当成可以预测。"""
     from app.services.comprehensive_prediction_policy import policy
