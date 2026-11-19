@@ -245,7 +245,8 @@ def refresh(material, base, root):
                 current, history = jp_close(raw, security, base)
                 body = json.dumps(history, ensure_ascii=False, sort_keys=True)
             else:
-                results.append({"security": security, "status": "OVERSEAS_SOURCE_IDENTITY_REVIEW_REQUIRED"})
+                results.append({"security": security, "status": "OVERSEAS_SOURCE_IDENTITY_REVIEW_REQUIRED",
+                                "prior_source": url})
                 continue
             ref = "overseas-close:" + security + ":" + receipt["raw_sha256"]
             append(ref, "MARKET_DATA", "本证券实际普通交易时段收盘 " + security, body, receipt)
@@ -256,12 +257,13 @@ def refresh(material, base, root):
                 material["market"][security] = current
             results.append({"security": security, "status": "SUCCEEDED", "source": receipt})
         except Exception as error:
-            results.append({"security": security, "status": "ACTION_REQUIRED", "failure": str(error)[:250]})
+            results.append({"security": security, "status": "ACTION_REQUIRED", "url": url,
+                            "checked_at": now().isoformat(), "failure": str(error)[:250]})
+    url = "https://www.safe.gov.cn/AppStructured/hlw/RMBQuery.do?startDate=" + base + "&endDate=" + base
     try:
         prior = documents[evidence["fx_ref"]]
         if urlparse(prior["url"]).hostname != "www.safe.gov.cn":
             raise ValueError("OFFICIAL_FX_SOURCE_REVIEW_REQUIRED")
-        url = "https://www.safe.gov.cn/AppStructured/hlw/RMBQuery.do?startDate=" + base + "&endDate=" + base
         raw, receipt = fetch(url, base, root, validator=lambda body: official_fx(body, base))
         data = official_fx(raw, base)
         ref = "official-fx:" + receipt["raw_sha256"]
@@ -275,7 +277,8 @@ def refresh(material, base, root):
         evidence["fx_ref"] = ref
         results.append({"kind": "OFFICIAL_FX", "status": "SUCCEEDED", "source": receipt})
     except Exception as error:
-        results.append({"kind": "OFFICIAL_FX", "status": "ACTION_REQUIRED", "failure": str(error)[:250]})
+        results.append({"kind": "OFFICIAL_FX", "status": "ACTION_REQUIRED", "planned_url": url,
+                        "checked_at": now().isoformat(), "failure": str(error)[:250]})
     for security, quote in [(c["code"], c.get("quote") or {}) for c in material.get("companies", [])] + list(
         material.get("market", {}).items()
     ):

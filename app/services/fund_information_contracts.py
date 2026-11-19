@@ -78,6 +78,13 @@ def time_context(data: dict, sessions: list[str] | None = None) -> dict:
             if proof:
                 markets[code].update(status="READY_LAST_SESSION", valuation_reference=proof)
     nav_state = state(latest_nav)
+    reference = data.get("reference_nav_date")
+    if reference is not None:
+        from app.services.fund_prediction_nav_identity import previous_qdii_nav_date
+
+        if nav_state != "STALE" or reference != previous_qdii_nav_date(data["nav"], base, data):
+            raise ValueError("ANALYSIS_NAV_REFERENCE_INVALID")
+        nav_state = "READY_PREVIOUS_SESSION"
     latest_quote = max((q["date"] for q in stocks.values() if q["date"]), default=None)
     from app.services.fund_corporate_actions import verified_security_quote_exception
 
@@ -99,7 +106,7 @@ def time_context(data: dict, sessions: list[str] | None = None) -> dict:
     missing_markets = [code for code, q in markets.items() if q["status"] not in {"READY", "READY_LAST_SESSION"}]
     stock_applicable = data.get("stock_market_applicable", True)
     ready = (
-        nav_state == "READY"
+        nav_state in {"READY", "READY_PREVIOUS_SESSION"}
         and (bool(stocks) or not stock_applicable)
         and not missing_stocks
         and not missing_markets
@@ -107,10 +114,17 @@ def time_context(data: dict, sessions: list[str] | None = None) -> dict:
     )
     statements = [f"目标日{target}，比较基准日{base}；资料截止北京时间{stamp:%Y-%m-%d %H:%M}。"]
     statements.append(f"已取得净值截至{latest_nav or '暂缺'}，持仓行情最新日期{latest_quote or '暂缺'}。")
+    if reference:
+        statements.append(f"{base}正式净值尚未披露，采用{reference}已公布净值作参考。")
     if ready:
-        statements.append("比较基准日净值、所列持仓股票及对照指数行情已齐备。")
+        statements.append(
+            "比较基准日的适用行情已核验。" if reference else "比较基准日净值、所列持仓股票及对照指数行情已齐备。"
+        )
         if any(q["status"] == "READY_DOCUMENTED_NON_TRADING" for q in stocks.values()):
-            statements[-1] = "比较基准日净值、适用的持仓行情、终止交易事项及对照指数已核验。"
+            statements[-1] = (
+                "比较基准日的适用行情及终止交易事项已核验。"
+                if reference else "比较基准日净值、适用的持仓行情、终止交易事项及对照指数已核验。"
+            )
             statements.append(
                 "已核验合并或现金收购后原证券普通成交价不再适用；保留事项原文，"
                 "没有生成替代报价、换股股数，也未推算本基金实际收款或当前持仓公允价值。"
@@ -120,7 +134,7 @@ def time_context(data: dict, sessions: list[str] | None = None) -> dict:
                 "相关境外市场比较基准日休市，保留最近有效交易日参考报价；未推算休市日涨跌或本基金持仓正式估值。"
             )
     else:
-        if nav_state != "READY":
+        if nav_state != "READY" and not reference:
             statements.append("比较基准日净值尚未取得。")
         if stock_applicable and (missing_stocks or not stocks):
             statements.append("部分所列持仓股票的比较基准日行情尚未取得。")

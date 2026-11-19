@@ -189,6 +189,17 @@ def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_pr
                 raise ValueError("V2_SOURCE_PREPARED_WINDOW_OR_FUND_MISMATCH")
             if data.get("materials_hash") != digest(material):
                 raise ValueError("V2_SOURCE_PREPARED_MATERIAL_HASH_MISMATCH")
+            from app.services.fund_information_contracts import time_context
+            from app.services.fund_prediction_nav_identity import previous_qdii_nav_date
+            from app.services.vietnam_reference_fx_review import apply_reference_review
+
+            apply_reference_review(data, material)
+            # 仅第二版采用前一估值日参考。共用准备器已核验本基金估值条款和窗口。
+            reference = previous_qdii_nav_date(data.get("nav", []), current["base_nav_date"], data)
+            if reference:
+                data["reference_nav_date"] = reference
+            if reference or (data.get("valuation_status") or {}).get("prediction_reference_fx"):
+                data["time_context"] = time_context(data)
             packet = {"format": "CODEX_FUND_INPUT_V1", "input_hash": digest(data), "input": data}
             source = directory / "funds" / code / "T1" / "input.json"
             save_once(source, packet)
@@ -198,6 +209,8 @@ def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_pr
                 source_ready=baseline_ready(data),
                 time_context=data.get("time_context", {}),
             )
+            if reference:
+                row["reference_nav_date"] = reference
             try:
                 calendar, calendar_failure = review_calendar(data, code, at), None
             except (ValueError, KeyError) as error:
@@ -207,7 +220,9 @@ def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_pr
                 if horizon == "M6_V1" and calendar is not None:
                     from app.services.prediction_natural_month import natural_month_target
 
-                    dates = natural_month_target(current["base_nav_date"], current["target_nav_date"])
+                    dates = natural_month_target(reference or current["base_nav_date"], current["target_nav_date"])
+                    # 冻结时保留行情窗口身份。到期日按真实使用的净值日期计算。
+                    dates["baseNavDate"] = current["base_nav_date"]
                     # 这里只确定日期；source_ready仍独立阻止缺真实基准的方向发布。
                     reason = None
                 elif calendar is None:

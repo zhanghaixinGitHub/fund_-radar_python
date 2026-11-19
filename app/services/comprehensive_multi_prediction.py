@@ -90,20 +90,18 @@ def review_calendar(data: dict, code: str, at: datetime):
             mode, sessions, max(past.definition.coverage_start, date(at.year, 1, 1)), end, source_hash
         )
 
-    verified = (
-        verified_qdii_window
-        if mode in {"QDII_CNY_VERIFIED_SESSION_V1", multi_listed_policy}
-        else verified_domestic_window
-    )
     if (
         data.get("fund_code") != code
         or len(profiles) != 1
         or not data.get("time_context", {}).get("baseline_complete")
         or data["window"]["calendar_version"] != calendar_hash
-        or not verified(profiles[0], data, documents, data["window"])
-        or mode == "CN_GOLD_ETF_NAV_WINDOW_V1"
-        and not verified_gold_valuation_days(data, documents)
     ):
+        raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "本基金实际投向或估值条款仍待核验")
+    if mode in {"QDII_CNY_VERIFIED_SESSION_V1", multi_listed_policy}:
+        verified = verified_qdii_window(profiles[0], data, documents, data["window"], as_of=at)
+    else:
+        verified = verified_domestic_window(profiles[0], data, documents, data["window"])
+    if not verified or mode == "CN_GOLD_ETF_NAV_WINDOW_V1" and not verified_gold_valuation_days(data, documents):
         raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "本基金实际投向或估值条款仍待核验")
     sessions, end, source_hash = (
         tuple(day for item in calendars for day in item.sessions),
@@ -177,9 +175,14 @@ def _matched_future_sessions(data, documents, sessions, coverage_end, calendar_h
         if any(not c["code"].endswith((".HK", ".SH", ".SZ", ".BJ")) for c in data["companies"]):
             raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "实际投向包含尚未核验的交易市场")
     else:
+        exceptions = data.get("time_context", {}).get("stocks", {})
+        company_quotes = [
+            c.get("quote") or {} for c in data["companies"]
+            if exceptions.get(c["code"], {}).get("status") != "READY_DOCUMENTED_NON_TRADING"
+        ]
         markets = {
             q.get("valuation_market")
-            for q in [*(c.get("quote", {}) for c in data["companies"]), *data["market"].values()]
+            for q in [*company_quotes, *data["market"].values()]
         } - {"CN"}
         references = evidence.get("calendar_refs", {})
     if not markets or not markets <= ({"HK", "US", "JP", "UK", "CH"} if listed else {"HK", "US", "JP"}):
@@ -214,11 +217,20 @@ def _matched_future_sessions(data, documents, sessions, coverage_end, calendar_h
         calendars.append(closed)
         hashes.append(source["body_hash"])
     domestic = set(sessions)
+    from app.services.fund_daily_profiles import confirmed_us_exception
+
     day = target
     while day <= end:
         if any((day in domestic) != (day.weekday() < 5 and day not in closed) for closed in calendars):
-            end = day - timedelta(days=1)
-            break
+            proof = (
+                confirmed_us_exception(data["fund_code"], day, own)
+                if evidence["policy"] == "QDII_CNY_VERIFIED_SESSION_V1" and markets == {"US"} and day in domestic
+                else None
+            )
+            if proof is None:
+                end = day - timedelta(days=1)
+                break
+            hashes.append(digest([str(day), proof]))
         day += timedelta(days=1)
     return tuple(d for d in sessions if d <= end), end, digest(hashes)
 

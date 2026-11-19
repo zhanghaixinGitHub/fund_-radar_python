@@ -43,6 +43,7 @@ def main():
     parser.add_argument("--reviews-file", type=Path, help="当前聊天实际阅读后的逐基金综合用途审阅映射")
     parser.add_argument("--blocked-file", type=Path, help="按基金/周期/目标绑定的真实外部阻断证据")
     parser.add_argument("--resume-batch", help="首次接管已经提交的纯资料jobId；后续一律使用台账内原jobId")
+    parser.add_argument("--resume-only", action="store_true", help="上午续办，只允许使用已有窗口和资料作业")
     parser.add_argument("--publish-prepared", action="store_true",
                         help="实际阅读并写入审阅文件后续办；仍核当前资料版本，不重复采集已有候选")
     args = parser.parse_args()
@@ -51,6 +52,24 @@ def main():
     instant = now()
     storage_check(instant.replace(hour=0, minute=0, second=0, microsecond=0).isoformat())
     directory = args.run_dir or PROJECT / ".local-runs" / ("daily-prediction-" + now().strftime("%Y%m%d"))
+    resume_receipt = None
+    if args.resume_only:
+        from app.services.fund_exposure_common import read
+        from app.services.fund_materials_store import versioned_save
+
+        state_path = directory / "run.json"
+        original = read(state_path) if state_path.exists() else {}
+        if not (original.get("batch") or {}).get("job_id"):
+            parser.exit(2, "DAILY_RESUME_JOB_MISSING\n")
+        resume_receipt = {
+            "started_at": instant.isoformat(),
+            "window": original["window"],
+            "job_id": original["batch"]["job_id"],
+            "status_before": original.get("status"),
+            "reviewed_before": original.get("reviewed_period_count"),
+            "pending_before": original.get("pending_funds"),
+        }
+        versioned_save(directory / "morning-resume.json", resume_receipt)
     from app.services.fund_daily_services import ensure_services
 
     ensure_services(directory)
@@ -90,9 +109,18 @@ def main():
             reviews=json.loads(args.reviews_file.read_text(encoding="utf-8")) if args.reviews_file else None,
             blocked_file=args.blocked_file,
             publish_prepared=args.publish_prepared,
+            resume_only=args.resume_only,
         )
     finally:
         backend.close()
+    if resume_receipt is not None:
+        resume_receipt.update(
+            finished_at=now().isoformat(),
+            status_after=result["status"],
+            reviewed_after=result.get("reviewed_period_count"),
+            pending_after=result.get("pending_funds"),
+        )
+        versioned_save(directory / "morning-resume.json", resume_receipt)
     print(
         json.dumps(
             {

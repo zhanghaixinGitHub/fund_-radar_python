@@ -195,7 +195,9 @@ def test_report_does_not_count_conditional_as_all_predictions_generated(tmp_path
     versioned_save(source, material)
     monkeypatch.setattr(workflow, "registered_materials", lambda *a, **k: {"materials_path": str(source)})
     monkeypatch.setattr(watch, "watch_report", lambda *a, **k: {"reassessment_pending_count": 0, "failure_count": 0})
-    monkeypatch.setattr("app.services.fund_prediction_nav_identity.current_nav_identity", lambda *a: "nav")
+    monkeypatch.setattr(
+        "app.services.fund_prediction_nav_identity.current_prediction_nav_identity", lambda *a, **kw: "nav"
+    )
     rows = [record(h, materials_input_hash=materials_input_identity(material)) for h in ("T1", "T5_V1", "T20_V1")]
     rows.append(
         record(

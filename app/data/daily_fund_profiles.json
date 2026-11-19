@@ -1,0 +1,652 @@
+{
+  "001021": {
+    "template": "domestic",
+    "target_funds": [],
+    "market_references": {
+      "000012.SH": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": null,
+    "valuation_clause": null,
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "001632": {
+    "template": "domestic",
+    "target_funds": [
+      "159736"
+    ],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro",
+      "159736.SZ": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": null,
+    "valuation_clause": null,
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "002112": {
+    "template": "domestic",
+    "target_funds": [],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": null,
+    "valuation_clause": null,
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "005284": {
+    "template": "domestic",
+    "target_funds": [],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000832.CSI": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro",
+      "000906.SH": "https://api.tushare.pro",
+      "H11001.CSI": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": "https://np-cnotice-fund.eastmoney.com/api/content/ann?client_source=web_fund&show_all=1&art_code=AN202512031792981540",
+    "valuation_clause": "本基金的估值日为本基金相关的证券交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。",
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "https://fund.eastmoney.com/gonggao/005284,AN202608311828786632.html"
+  },
+  "006038": {
+    "template": "domestic",
+    "target_funds": [],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": null,
+    "valuation_clause": null,
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "006730": {
+    "template": "domestic",
+    "target_funds": [],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": "https://np-cnotice-fund.eastmoney.com/api/content/ann?client_source=web_fund&show_all=1&art_code=AN202608061827696279",
+    "valuation_clause": "本基金的估值日为本基金相关的证券交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。",
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "007045": {
+    "template": "domestic",
+    "target_funds": [],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": null,
+    "valuation_clause": null,
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "007832": {
+    "template": "domestic",
+    "target_funds": [],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": "https://np-cnotice-fund.eastmoney.com/api/content/ann?client_source=web_fund&show_all=1&art_code=AN202609241829835091",
+    "valuation_clause": "本基金的估值日为本基金相关的证券交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。",
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "008164": {
+    "template": "domestic",
+    "target_funds": [
+      "515450"
+    ],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro",
+      "515450.SH": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": null,
+    "valuation_clause": null,
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "008603": {
+    "template": "domestic",
+    "target_funds": [],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro"
+    },
+    "valuation_policy": "CN_NAV_DISCLOSED_DOMESTIC_ASSETS_V1",
+    "contract_source": "https://np-cnotice-fund.eastmoney.com/api/content/ann?client_source=web_fund&show_all=1&art_code=AN202605211822522546",
+    "valuation_clause": "本基金的估值日为本基金相关的证券/期货交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。",
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "008764": {
+    "template": "overseas",
+    "target_funds": [],
+    "market_references": {
+      "VN30": "https://api.dnse.com.vn/chart-api/v2/ohlcs/index?resolution=1D&symbol=VN30&from=1794502800&to=1794848399"
+    },
+    "valuation_policy": "QDII_CNY_VN_CONTRACT_SESSION_V1",
+    "contract_source": "https://fund.eastmoney.com/gonggao/008764,AN202610211830735173.html",
+    "valuation_clause": "（一）估值日\n\n  本基金的估值日为本基金相关的证券交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。",
+    "fx_clause": "11、估值中的汇率选取原则：估值计算中涉及中国人民银行或其授权机构公布人民币汇率中间价的货币，其对人民币汇率以估值日中国人民银行或其授权机构公布的人民币汇率中间价为准；涉及其他货币对人民币的汇率，采用彭博信息(Bloomberg)提供的估值日伦敦时间 16:00 各种货币与美元折算率并采用套算的方法进行折算。\n\n  若无法取得上述汇率价格信息时，以基金托管人或境外托管人所提供的合理公开外汇市场交易价格为准。",
+    "share_currency": "CNY",
+    "share_currency_evidence": "https://fund.eastmoney.com/gonggao/008764,AN202610211830735173.html"
+  },
+  "008888": {
+    "template": "domestic",
+    "target_funds": [
+      "159995"
+    ],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro",
+      "159995.SZ": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": null,
+    "valuation_clause": null,
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "008960": {
+    "template": "domestic",
+    "target_funds": [],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": null,
+    "valuation_clause": null,
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "010710": {
+    "template": "domestic",
+    "target_funds": [],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro"
+    },
+    "valuation_policy": "CN_NAV_HK_CONNECT_WINDOW_V1",
+    "contract_source": "https://np-cnotice-fund.eastmoney.com/api/content/ann",
+    "valuation_clause": "本基金的估值日为本基金相关的证券交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。",
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "011036": {
+    "template": "domestic",
+    "target_funds": [
+      "516150"
+    ],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro",
+      "516150.SH": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": null,
+    "valuation_clause": null,
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "011066": {
+    "template": "domestic",
+    "target_funds": [],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro"
+    },
+    "valuation_policy": "CN_NAV_HK_CONNECT_WINDOW_V1",
+    "contract_source": "https://vip.stock.finance.sina.com.cn/fund/go.php/vAkFundInfo_JJGKXX/q/5065587.phtml",
+    "valuation_clause": "本基金的估值日为本基金相关的证券交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。",
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "011103": {
+    "template": "domestic",
+    "target_funds": [],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": null,
+    "valuation_clause": null,
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "013180": {
+    "template": "domestic",
+    "target_funds": [
+      "159755"
+    ],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro",
+      "159755.SZ": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": null,
+    "valuation_clause": null,
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "013275": {
+    "template": "domestic",
+    "target_funds": [],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": null,
+    "valuation_clause": null,
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "013330": {
+    "template": "domestic",
+    "target_funds": [],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": null,
+    "valuation_clause": null,
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "013472": {
+    "template": "domestic",
+    "target_funds": [
+      "159275"
+    ],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro",
+      "159275.SZ": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": null,
+    "valuation_clause": null,
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "014978": {
+    "template": "overseas",
+    "target_funds": [
+      "159632"
+    ],
+    "market_references": {
+      "159632.SZ": "https://api.tushare.pro",
+      "QQQ.US": "https://hq.sinajs.cn/list=gb_qqq"
+    },
+    "valuation_policy": "QDII_CNY_VERIFIED_SESSION_V1",
+    "contract_source": "https://fund.eastmoney.com/gonggao/014978,AN202609181829589868.html",
+    "valuation_clause": "本基金的估值日为本基金相关的证券、期货交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。",
+    "fx_clause": "（1）人民币对主要外汇的汇率应当以中国人民银行或其授权机构最新公布的人民币汇率中间价为准。",
+    "verified_valuation_dates": {
+      "counted_sessions": [
+        "2026-11-19",
+        "2026-11-20",
+        "2026-11-23",
+        "2026-11-24",
+        "2026-11-25",
+        "2026-11-26",
+        "2026-11-27",
+        "2026-11-30",
+        "2026-12-01",
+        "2026-12-02",
+        "2026-12-03",
+        "2026-12-04",
+        "2026-12-07",
+        "2026-12-08",
+        "2026-12-09",
+        "2026-12-10",
+        "2026-12-11",
+        "2026-12-14",
+        "2026-12-15",
+        "2026-12-16"
+      ],
+      "fund_code": "014978",
+      "fund_contract": "https://fund.eastmoney.com/gonggao/014978,AN202609181829589868.html",
+      "holiday_nav": {
+        "2025-11-26": {
+          "disclosure_id": 31368375,
+          "label": "华安纳斯达克100ETF联接（QDII）C",
+          "nav": "7.2397"
+        },
+        "2025-11-27": {
+          "disclosure_id": 31379604,
+          "label": "华安纳斯达克100ETF联接（QDII）C",
+          "nav": "7.2380"
+        },
+        "2025-11-28": {
+          "disclosure_id": 31398126,
+          "label": "华安纳斯达克100ETF联接（QDII）C",
+          "nav": "7.2947"
+        },
+        "2026-07-03": {
+          "disclosure_id": 33818480,
+          "label": "华安纳斯达克100ETF联接（QDII）C",
+          "nav": "8.0600"
+        },
+        "2026-09-07": {
+          "disclosure_id": 34625669,
+          "label": "华安纳斯达克100ETF联接（QDII）C",
+          "nav": "8.0352"
+        }
+      },
+      "market_dates": {
+        "2026-11-26": "美国休市",
+        "2026-11-27": "美国提前收市"
+      },
+      "proof_refs": [
+        "prospectus:014978",
+        "nyse",
+        "calendar:thanksgiving-2026",
+        "calendar:thanksgiving-2025",
+        "calendar:fund-application-notice",
+        "calendar:fund-nav-disclosures"
+      ],
+      "scope": [
+        "2026-11-19",
+        "2026-12-16"
+      ],
+      "valuation_day_clause": "本基金的估值日为本基金相关的证券、期货交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。"
+    },
+    "share_currency": "CNY"
+  },
+  "015596": {
+    "template": "domestic",
+    "target_funds": [],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": null,
+    "valuation_clause": null,
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "016008": {
+    "template": "domestic",
+    "target_funds": [
+      "159779"
+    ],
+    "market_references": {
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro",
+      "159779.SZ": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": null,
+    "valuation_clause": null,
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "017437": {
+    "template": "overseas",
+    "target_funds": [],
+    "market_references": {
+      "QQQ.US": "https://hq.sinajs.cn/list=gb_qqq"
+    },
+    "valuation_policy": "QDII_CNY_VERIFIED_SESSION_V1",
+    "contract_source": "https://fund.eastmoney.com/gonggao/017437,AN202512091796782393.html",
+    "valuation_clause": "本基金的估值日为本基金相关的证券交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。",
+    "fx_clause": "9、估值中的汇率选取原则：估值计算中涉及中国人民银行或其授权机构公布人民币汇率中间价的货币，其对人民币汇率以估值日中国人民银行或其授权机构公布的人民币汇率中间价为准。",
+    "verified_valuation_dates": {
+      "counted_sessions": [
+        "2026-11-19",
+        "2026-11-20",
+        "2026-11-23",
+        "2026-11-24",
+        "2026-11-25",
+        "2026-11-26",
+        "2026-11-27",
+        "2026-11-30",
+        "2026-12-01",
+        "2026-12-02",
+        "2026-12-03",
+        "2026-12-04",
+        "2026-12-07",
+        "2026-12-08",
+        "2026-12-09",
+        "2026-12-10",
+        "2026-12-11",
+        "2026-12-14",
+        "2026-12-15",
+        "2026-12-16"
+      ],
+      "fund_code": "017437",
+      "fund_contract": "https://fund.eastmoney.com/gonggao/017437,AN202512091796782393.html",
+      "holiday_nav": {
+        "2025-11-26": {
+          "disclosure_id": 31353964,
+          "label": "华宝纳斯达克精选股票发起式（QDII） C",
+          "nav": "2.2214"
+        },
+        "2025-11-27": {
+          "disclosure_id": 31370290,
+          "label": "华宝纳斯达克精选股票发起式（QDII） C",
+          "nav": "2.2208"
+        },
+        "2025-11-28": {
+          "disclosure_id": 31387249,
+          "label": "华宝纳斯达克精选股票发起式（QDII） C",
+          "nav": "2.2388"
+        },
+        "2026-07-03": {
+          "disclosure_id": 33801382,
+          "label": "华宝纳斯达克精选股票发起式（QDII） C",
+          "nav": "2.2339"
+        },
+        "2026-09-07": {
+          "disclosure_id": 34612640,
+          "label": "华宝纳斯达克精选股票发起式（QDII） C",
+          "nav": "2.3372"
+        }
+      },
+      "market_dates": {
+        "2026-11-26": "美国休市",
+        "2026-11-27": "美国提前收市"
+      },
+      "proof_refs": [
+        "prospectus:017437",
+        "nyse",
+        "calendar:thanksgiving-2026",
+        "calendar:thanksgiving-2025",
+        "calendar:fund-application-notice",
+        "calendar:fund-nav-disclosures"
+      ],
+      "scope": [
+        "2026-11-19",
+        "2026-12-16"
+      ],
+      "valuation_day_clause": "本基金的估值日为本基金相关的证券交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。"
+    },
+    "share_currency": "CNY",
+    "share_currency_evidence": "https://fund.eastmoney.com/gonggao/017437,AN202512091796782393.html"
+  },
+  "018590": {
+    "template": "domestic",
+    "target_funds": [],
+    "market_references": {
+      "000906.SH": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": null,
+    "valuation_clause": null,
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "018853": {
+    "template": "overseas",
+    "target_funds": [],
+    "market_references": {
+      "XOP.US": "https://hq.sinajs.cn/list=gb_xop"
+    },
+    "valuation_policy": "QDII_CNY_VERIFIED_SESSION_V1",
+    "contract_source": "https://fund.eastmoney.com/gonggao/018853,AN202609301830018910.html",
+    "valuation_clause": "本基金的估值日为本基金相关的证券、期货交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。",
+    "fx_clause": "本基金外币资产价值计算中，涉及主要货币对人民币汇率的，应使用基金估值日中国人民银行或其授权机构公布的人民币汇率中间价或其他基金管理人与托管人协商一致的第三\n方数据服务商提供的汇率；涉及到其它币种与人民币之间的汇率，参照数据服务商提供的当日各种货币兑美元折算率采用套算的方法进行折算。",
+    "verified_valuation_dates": {
+      "counted_sessions": [
+        "2026-11-19",
+        "2026-11-20",
+        "2026-11-23",
+        "2026-11-24",
+        "2026-11-25",
+        "2026-11-26",
+        "2026-11-27",
+        "2026-11-30",
+        "2026-12-01",
+        "2026-12-02",
+        "2026-12-03",
+        "2026-12-04",
+        "2026-12-07",
+        "2026-12-08",
+        "2026-12-09",
+        "2026-12-10",
+        "2026-12-11",
+        "2026-12-14",
+        "2026-12-15",
+        "2026-12-16"
+      ],
+      "fund_code": "018853",
+      "fund_contract": "https://fund.eastmoney.com/gonggao/018853,AN202609301830018910.html",
+      "holiday_nav": {
+        "2025-11-26": {
+          "disclosure_id": 31361455,
+          "label": "博时标普石油天然气勘探及生产精选行业指数发起（QDII）C",
+          "nav": "0.8592"
+        },
+        "2025-11-27": {
+          "disclosure_id": 31382772,
+          "label": "博时标普石油天然气勘探及生产精选行业指数发起（QDII）C",
+          "nav": "0.8590"
+        },
+        "2025-11-28": {
+          "disclosure_id": 31395071,
+          "label": "博时标普石油天然气勘探及生产精选行业指数发起（QDII）C",
+          "nav": "0.8738"
+        },
+        "2026-07-03": {
+          "disclosure_id": 33812037,
+          "label": "博时标普石油天然气勘探及生产精选行业指数发起（QDII）C",
+          "nav": "0.9732"
+        },
+        "2026-09-07": {
+          "disclosure_id": 34619747,
+          "label": "博时标普石油天然气勘探及生产精选行业指数发起（QDII）C",
+          "nav": "1.1841"
+        }
+      },
+      "market_dates": {
+        "2026-11-26": "美国休市",
+        "2026-11-27": "美国提前收市"
+      },
+      "proof_refs": [
+        "prospectus:018853",
+        "nyse",
+        "calendar:thanksgiving-2026",
+        "calendar:thanksgiving-2025",
+        "calendar:fund-application-notice",
+        "calendar:fund-nav-disclosures"
+      ],
+      "scope": [
+        "2026-11-19",
+        "2026-12-16"
+      ],
+      "valuation_day_clause": "本基金的估值日为本基金相关的证券、期货交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。"
+    },
+    "share_currency": "CNY"
+  },
+  "019449": {
+    "template": "overseas",
+    "target_funds": [],
+    "market_references": {
+      "TOPIX": "https://finance.yahoo.co.jp/quote/998405.T/history"
+    },
+    "valuation_policy": "QDII_CNY_VERIFIED_SESSION_V1",
+    "contract_source": "https://www.cifm.com/Mobile/zxgd/disclosure/202509/P020250930310405876444.pdf",
+    "valuation_clause": "本基金的估值日为本基金相关的证券/期货交易场所的交易日以及国家法律法规规定需\n要对外披露基金净值的非交易日。",
+    "fx_clause": "采用当日中国人民银行或其授权机构公布的人民币汇率中间价； 中国人民银行或其授权\n机构未公布人民币汇率的币种， 采用指定数据服务商提供的估值日各种货币对美元折算率并\n采用套算的方法进行折算。",
+    "share_currency": "CNY",
+    "share_currency_evidence": "https://fund.eastmoney.com/gonggao/019449,AN202509301753246555.html"
+  },
+  "021740": {
+    "template": "domestic",
+    "target_funds": [
+      "159812"
+    ],
+    "market_references": {
+      "159812.SZ": "https://api.tushare.pro"
+    },
+    "valuation_policy": "CN_GOLD_ETF_NAV_WINDOW_V1",
+    "contract_source": "https://fund.eastmoney.com/gonggao/021740,AN202610301831233596.html",
+    "valuation_clause": null,
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  },
+  "160323": {
+    "template": "domestic",
+    "target_funds": [],
+    "market_references": {
+      "000012.SH": "https://api.tushare.pro",
+      "000300.SH": "https://api.tushare.pro",
+      "000905.SH": "https://api.tushare.pro"
+    },
+    "valuation_policy": null,
+    "contract_source": "https://np-cnotice-fund.eastmoney.com/api/content/ann?client_source=web_fund&show_all=1&art_code=AN202605281822949142",
+    "valuation_clause": "本基金的估值日为本基金相关的证券、期货交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。",
+    "fx_clause": null,
+    "share_currency": "CNY",
+    "share_currency_evidence": "fund_peer_classifications_v1.json"
+  }
+}

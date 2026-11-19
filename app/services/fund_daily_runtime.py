@@ -71,9 +71,9 @@ class LocalDailyBackend:
         return prepare_monthly(scope, self.directory)
 
     def nav_input_hash(self, code):
-        from app.services.fund_prediction_nav_identity import current_nav_identity
+        from app.services.fund_prediction_nav_identity import current_prediction_nav_identity
 
-        return current_nav_identity(code, self.window["base_nav_date"])
+        return current_prediction_nav_identity(code, self.window["base_nav_date"])
 
     def refresh_nav(self, code, output, current_window):
         from app.services.fund_daily_nav import refresh_missing_nav
@@ -429,6 +429,17 @@ class LocalDailyBackend:
 
             self.collector = MarketCompanyCollector(workflow_root())
         return recover(code, output, current_window, collector=self.collector)
+
+    def save_profiles(self, scope):
+        from app.db.session import get_engine
+        from app.repositories.direction_1d import profiles
+        from app.services.fund_daily_profiles import save_profiles
+
+        with get_engine().connect() as connection:
+            rows = profiles(connection, scope) if scope else []
+        if {row["fund_code"] for row in rows} != set(scope):
+            raise ValueError("DAILY_HOLDING_PROFILE_MISSING")
+        save_profiles(self.directory, rows)
 
     def approve(self, code, review):
         from app.services import fund_daily_prediction_v2 as v2

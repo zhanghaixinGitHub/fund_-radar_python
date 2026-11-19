@@ -24,7 +24,7 @@ class DailyPredictionRun:
         self.backend = backend
         self.path = self.directory / "run.json"
 
-    def advance(self, *, reviews=None, blocked_file=None, publish_prepared=False):
+    def advance(self, *, reviews=None, blocked_file=None, publish_prepared=False, resume_only=False):
         """推进一次有界工作；未完成明确返回下一步，重试不重交同步或覆盖旧输入。"""
         b, root = self.backend, self.directory
         at, owner, scope, current_window = b.context()
@@ -60,6 +60,10 @@ class DailyPredictionRun:
                 return state
             return state
         state.update(checked_at=at, scope=scope, scope_hash=digest(scope), status="CHECKING")
+        if hasattr(b, "save_profiles"):
+            from app.services.fund_daily_profiles import save_pending
+
+            b.save_profiles(scope)
         state["workflow_version"] = "HOLDINGS_END_TO_END_V1"
         if hasattr(b, "repair_handoffs"):
             state["handoff_recovery"] = b.repair_handoffs(scope)
@@ -81,6 +85,8 @@ class DailyPredictionRun:
             state["batch"] = batch
             versioned_save(self.path, state)
         terminal = b.batch_status(state["batch"])
+        if resume_only and terminal.get("existing_job_finished"):
+            raise ValueError("DAILY_RESUME_MATERIALS_JOB_MISSING")
         if terminal.get("existing_job_finished"):
             # 已运行的旧非纯资料/单项作业先等待；终态后另起本轮纯资料，绝不当成已同步。
             predecessor = state["batch"]
@@ -96,6 +102,8 @@ class DailyPredictionRun:
             terminal = b.batch_status(state["batch"])
         versioned_save(root / "materials-status.json", terminal)
         if not terminal["terminal"]:
+            if hasattr(b, "save_profiles"):
+                save_pending(root, state)
             state["status"] = "WAITING_MATERIALS"
             versioned_save(self.path, state)
             return state
@@ -184,6 +192,8 @@ class DailyPredictionRun:
                     state["first_failures"].append(failure)
                 item.update(status="ACTION_REQUIRED", failure=failure)
             versioned_save(self.path, state)
+        if hasattr(b, "save_profiles"):
+            save_pending(root, state)
         final = b.guard(root / "followthrough.json", blocked_file)
         if hasattr(b, "ratings"):
             try:

@@ -219,8 +219,17 @@ def verified_qdii_window(
                     return False
                 if len(parsed["closed_dates"]) < 10 or len(parsed["early_close_dates"]) < 2:
                     return False
-                if any(day in parsed["closed_dates"] + parsed["early_close_dates"] for day in (base, target)):
+                unusual = parsed["closed_dates"] + parsed["early_close_dates"]
+                if base in unusual:
                     return False
+                if target in unusual:
+                    from app.services.fund_daily_profiles import confirmed_us_exception
+
+                    # 只确认目标估值日。若特殊日期是行情基准日，还需实际收盘或另行核验可用参考。
+                    if evidence["policy"] != POLICY or not confirmed_us_exception(
+                        material["fund_code"], date.fromisoformat(target), prospectus
+                    ):
+                        return False
                 if "Core Trading Session" not in parsed["source_text"] or "4:00 p.m." not in parsed["source_text"]:
                     return False
             elif market == "HK":

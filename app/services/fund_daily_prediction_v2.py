@@ -122,10 +122,10 @@ def followthrough_report(owner, codes, window, records, *, at):
         except (OSError, ValueError, KeyError) as error:
             failure = type(error).__name__ + ":" + str(error)
         ready = bool(handoff and not failure)
-        from app.services.fund_prediction_nav_identity import current_nav_identity
+        from app.services.fund_prediction_nav_identity import current_prediction_nav_identity
 
         result = verify_outputs(code, window, records, materials_input_hash=identity, materials_ready=ready,
-                                nav_input_hash=current_nav_identity(code, window["base_nav_date"]))
+                                nav_input_hash=current_prediction_nav_identity(code, window["base_nav_date"], at=at))
         result["prepare_failure"] = failure
         if not ready:
             result["actions"] = [

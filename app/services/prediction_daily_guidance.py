@@ -1,6 +1,6 @@
 """每日执行的审阅指引：约束实际分析过程，不自动决定方向或改变严格规则。"""
 
-VERSION = "DAILY_V2_BASELINE_SENSITIVITY_20261116"
+VERSION = "DAILY_V2_BASELINE_SENSITIVITY_20261119"
 DOCUMENT = "docs_zhx/implementation/daily-prediction-review-guidance-2026-11-16.md"
 
 
@@ -11,7 +11,10 @@ def review_guidance():
         "document": DOCUMENT,
         "purpose": "动态读取本人持仓，以本期真实资料实际生成四周期分析并正式读回。",
         "requirements": {
-            "current_window": "核官方窗口、真实基准净值及公告可见时间；缺净值先补，未到位就等待。"
+            "current_window": "核官方窗口、真实基准净值及公告可见时间；优先使用基准日正式净值。"
+            "境外投资基金的基准日净值未披露时，可用前一个已核验沪深交易日的本份额正式净值作参考。"
+            "仍缺可用净值时继续补查。"
+            "写清实际参考净值日，行情与汇率仍按本期基准日核验。半年目标从实际参考净值日算起。"
             "收盘后不得倒填旧一日预测，不用场内价格、估算净值或代理汇率代替真实基准。",
             "evidence": "按用途有界补原文并阅读，保留取得时间、来源版本与引文；"
             "报告持仓、当前篮子、现金存量和当期现金流分别说明，不冒充实时全仓。",

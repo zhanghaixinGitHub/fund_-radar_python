@@ -10,6 +10,40 @@ from app.services.direction_1d_protocol import digest
 from app.services.prediction_contract import PredictionFailure
 
 
+@pytest.mark.parametrize("code", ["014978", "017437", "018853"])
+def test_verified_thanksgiving_restores_twentieth_valuation_day(code):
+    import json
+
+    from app.services.fund_daily_profiles import profiles
+
+    proof = profiles()[code]["verified_valuation_dates"]
+    sessions = tuple(date.fromisoformat(day) for day in proof["counted_sessions"])
+    contract = {"kind": "PROSPECTUS", "codes": [code], "body": proof["valuation_day_clause"], "body_hash": "own"}
+    exchange = {
+        "kind": "EXCHANGE_CALENDAR",
+        "url": "https://www.nyse.com/markets/hours-calendars",
+        "body_hash": "us",
+        "body": json.dumps({"year": 2026, "closed_dates": ["2026-11-26"], "early_close_dates": ["2026-11-27"]}),
+    }
+    packet = {
+        "fund_code": code,
+        "calendar_evidence": {
+            "policy": "QDII_CNY_VERIFIED_SESSION_V1", "prospectus_ref": "own", "calendar_refs": {"US": "nyse"},
+        },
+        "window": {"target_nav_date": "2026-11-19"},
+        "companies": [],
+        "market": {"US_REFERENCE": {"valuation_market": "US"}},
+    }
+    docs = {"own": contract, "nyse": exchange}
+    resolved, _, _ = service._matched_future_sessions(packet, docs, sessions, sessions[-1], "cn")
+    assert len(resolved) == 20 and resolved[-1] == date(2026, 12, 16)
+
+    contract["body"] = "本基金的估值日为本基金相关的证券交易场所的交易日。"
+    resolved, end, _ = service._matched_future_sessions(packet, docs, sessions, sessions[-1], "cn")
+    assert end == date(2026, 11, 25)
+    assert len(resolved) == 5
+
+
 @pytest.mark.parametrize("data", [{}, {"calendar_evidence": None}, {"calendar_evidence": {}}])
 def test_existing_fund_without_supplementary_calendar_keeps_original_path(data, monkeypatch):
     from app.services import prediction_features

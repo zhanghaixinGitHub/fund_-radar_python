@@ -376,7 +376,7 @@ def validate_review_v2(packet, data, value, *, at=None):
     if r.horizon == "M6_V1" and period.get("end_date_basis") == "CALENDAR_MONTH":
         from app.services.prediction_natural_month import RULE, natural_month_target
 
-        expected = natural_month_target(period["base_date"], period["start_date"])
+        expected = natural_month_target(data.get("reference_nav_date") or period["base_date"], period["start_date"])
         if (period.get("end_date") != expected["endDate"] or period.get("outcome_rule") != RULE
                 or period.get("status") != "RESOLVED" or r.output_kind != "DATED_ANALYSIS"):
             raise ValueError("V2_M6_NATURAL_MONTH_TARGET_INVALID")
@@ -386,6 +386,14 @@ def validate_review_v2(packet, data, value, *, at=None):
         raise ValueError("V2_M6_SCENARIOS_REQUIRED")
 
     if r.decision in {"UP", "DOWN", "FLAT"}:
+        estimate = (data.get("valuation_status") or {}).get("prediction_reference_fx")
+        if estimate and r.decision != estimate["directions"][r.horizon]:
+            raise ValueError("VN_REFERENCE_FX_DIRECTION_CHANGED")
+        if data.get("reference_nav_date"):
+            from app.services.prediction_v2_baseline import baseline_ready
+
+            if not baseline_ready(data):
+                raise ValueError("V2_TARGET_OR_SOURCE_UNVERIFIED")
         if data.get("valuation_status") is not None and (
             data["valuation_status"].get("ready") is not True
             or data.get("time_context", {}).get("baseline_complete") is not True

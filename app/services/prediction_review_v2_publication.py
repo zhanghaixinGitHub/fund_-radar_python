@@ -305,7 +305,32 @@ def adopt_release(ledger_path: Path, *, adopt=False):
     return _publish(prepared, adopt=adopt)
 
 
-def _publish(prepared, *, adopt=False):
+def _check_live_reference_nav(connection, cases):
+    from app.repositories import direction_1d as repo
+    from app.services.fund_prediction_nav_identity import available_prediction_nav
+
+    references = {
+        case["case"]["fund_code"]: case["workflow_identity"]
+        for case in cases
+        if case.get("workflow_identity", {}).get("reference_nav_date")
+    }
+    if not references:
+        return
+    instant = connection.scalar(text("SELECT clock_timestamp()"))
+    source_id = repo.source(connection)["source_id"]
+    for profile in repo.profiles(connection, references):
+        identity = references[profile["fund_code"]]
+        deadline = datetime.combine(date.fromisoformat(identity["target_date"]), time(15), ZONE)
+        if instant >= deadline:
+            continue
+        selected, _ = available_prediction_nav(
+            connection, profile, source_id, date.fromisoformat(identity["base_date"]), instant
+        )
+        if selected != identity["reference_nav_date"]:
+            raise ValueError("V2_PUBLICATION_REFERENCE_NAV_CHANGED")
+
+
+def _publish(prepared, *, adopt=False, expected_current=None):
     if not adopt:
         return {"status": "PREVIEW", **{k: prepared[k] for k in ("version", "policyHash", "contentHash", "summary")}}
     storage_check(
@@ -318,6 +343,11 @@ def _publish(prepared, *, adopt=False):
         raise ValueError("V2_PUBLICATION_HOLDINGS_CHANGED_BEFORE_ADOPTION")
     with get_engine().begin() as connection:
         connection.execute(text("SELECT pg_advisory_xact_lock(hashtext('prediction_review_v2_release'))"))
+        for code, expected in (expected_current or {}).items():
+            active = _active(connection, code)
+            if active is None or str(active["release_id"]) != expected:
+                raise ValueError("V2_PUBLICATION_PRIOR_RELEASE_CHANGED")
+        _check_live_reference_nav(connection, prepared["archive"]["cases"])
         release_id = uuid4()
         connection.execute(
             text("""INSERT INTO prediction_review_v2_release
@@ -572,6 +602,19 @@ def prepare_trial_release(directory: Path, *, holdings=None, clock=None):
         if view["marketAsOf"] != record["period"]["base_date"]:
             raise ValueError("V2_PUBLICATION_BASE_DATE_MISMATCH")
         item = _public_period(row_view, record, record, record, evaluated.isoformat())
+        reference = data.get("reference_nav_date")
+        if reference:
+            item["baseNavDate"] = reference
+            item["limitations"].insert(
+                0, f"{view['marketAsOf']}正式净值尚未取得，本次参考{reference}已公布净值。"
+            )
+        estimate = (data.get("valuation_status") or {}).get("prediction_reference_fx")
+        if estimate:
+            item["referenceFx"] = estimate
+            item["limitations"].insert(
+                0, f"使用{estimate['date']}汇丰参考汇率，1 美元兑 {estimate['usd_vnd']} 越南盾。"
+                "已用 Wise 和越南央行参考价交叉核对，本数据用于方向参考。"
+            )
         # 材料归属留在私有审计。没有原材料绑定时照实展示分析，但不能完成每日事前任务。
         material_path, material_hash = data.get("materials_path"), data.get("materials_hash")
         materials_identity = None
@@ -605,6 +648,7 @@ def prepare_trial_release(directory: Path, *, holdings=None, clock=None):
                     "ex_ante_eligible": ex_ante,
                     "analysis_version": VERSION,
                     "base_date": record["period"]["base_date"],
+                    **({"reference_nav_date": reference} if reference else {}),
                     "target_date": record["period"]["start_date"],
                     "end_date": end,
                 },
@@ -688,7 +732,10 @@ def daily_records(owner, codes, target):
                 ):
                     continue
                 cutoff = datetime.combine(datetime.fromisoformat(identity["target_date"]).date(), time(15), ZONE)
-                eligible = identity.get("ex_ante_eligible") is True and stored["adopted_at"] < cutoff
+                carried = item.get("carried_forward") or {}
+                release_id = carried.get("release_id", stored["release_id"])
+                adopted_at = _stamp(carried["adopted_at"]) if carried else stored["adopted_at"]
+                eligible = identity.get("ex_ante_eligible") is True and adopted_at < cutoff
                 # 区间结束后的旧结果可审计，但不再作为待生成的未来方向。
                 expired = db_clock >= cutoff
                 kind = (
@@ -700,21 +747,24 @@ def daily_records(owner, codes, target):
                 )
                 result.append(
                     {
-                        "id": str(stored["release_id"]) + ":" + code + ":" + row["horizon"],
+                        "id": str(release_id) + ":" + code + ":" + row["horizon"],
                         "fund_code": code,
                         "horizon": row["horizon"],
                         "decision": "ABSTAIN" if row["decision"] == "BLOCKED" else row["decision"],
                         "source_decision": row["decision"],
                         "source_reason": item["analysis"].get("summary") or row.get("period", {}).get("reason"),
-                        "adopted_at": stored["adopted_at"].isoformat(),
+                        "adopted_at": adopted_at.isoformat(),
                         "base_date": identity["base_date"],
+                        "reference_nav_date": identity.get("reference_nav_date"),
                         "target_date": identity["target_date"],
                         "end_date": identity.get("end_date"),
                         "owner_verified": True,
                         "snapshot_verified": identity.get("snapshot_verified") is True,
                         "materials_input_hash": identity.get("materials_input_hash"),
                         "materials_hash": identity.get("materials_hash"),
-                        "nav_input_hash": nav_identity(frozen_nav, identity["base_date"])
+                        "nav_input_hash": nav_identity(
+                            frozen_nav, identity.get("reference_nav_date") or identity["base_date"]
+                        )
                         if frozen_nav is not None else None,
                         "analysis_version": VERSION,
                         "record_kind": kind,

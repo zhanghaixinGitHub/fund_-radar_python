@@ -10,16 +10,28 @@ def baseline_ready(data: dict) -> bool:
     context = data.get("time_context", {})
     if data.get("valuation_status") is not None and data["valuation_status"].get("ready") is not True:
         return False
-    if context.get("baseline_complete") is True:
-        return True
     base = data.get("window", {}).get("base_nav_date")
+    reference = data.get("reference_nav_date")
+    if reference is not None:
+        from app.services.fund_prediction_nav_identity import previous_qdii_nav_date
+
+        if (
+            not base
+            or reference != previous_qdii_nav_date(data.get("nav", []), base, data)
+            or context.get("nav_status") != "READY_PREVIOUS_SESSION"
+            or context.get("latest_nav_date") != reference
+            or context.get("baseline_date") != base
+        ):
+            return False
+    if context.get("baseline_complete") is True and reference is None:
+        return True
     markets = context.get("markets", {})
     return bool(
         base
         and context.get("baseline_date") == base
-        and context.get("nav_status") == "READY"
-        and context.get("latest_nav_date") == base
-        and max((str(row.get("nav_date", "")) for row in data.get("nav", [])), default=None) == base
+        and context.get("nav_status") == ("READY_PREVIOUS_SESSION" if reference else "READY")
+        and context.get("latest_nav_date") == (reference or base)
+        and max((str(row.get("nav_date", "")) for row in data.get("nav", [])), default=None) == (reference or base)
         and markets
         and set(markets) == set(data.get("market", {}))
         and all(

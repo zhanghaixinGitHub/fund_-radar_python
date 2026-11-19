@@ -105,6 +105,26 @@ def test_baseline_gap_is_not_promoted_to_source_ready(tmp_path, isolated):
     assert packet["periods"]["M6_V1"]["end_date_basis"] == "CALENDAR_MONTH"
 
 
+def test_qdii_prior_nav_keeps_forecast_window_and_anchors_half_year_target(tmp_path, isolated):
+    inventory, data, _ = isolated
+    data.update(
+        fund_name="测试基金(QDII)",
+        nav=[{"nav_date": "2026-11-11", "ann_date": "2026-11-12", "source_id": "test", "unit_nav": "1.04"}],
+        latest_nav_date="2026-11-11",
+        companies=[],
+        stock_market_applicable=False,
+        market={code: {"date": "2026-11-12", "change_pct": 1.0} for code in ("000300.SH", "000905.SH")},
+    )
+    result = command.freeze_sources(tmp_path / "sources", holdings_provider=lambda: inventory, clock=AT)
+    assert result["funds"][0]["reference_nav_date"] == "2026-11-11"
+    assert result["funds"][0]["source_ready"] is True
+    trial.prepare_trial(tmp_path / "trial", Path(result["selection_path"]), holdings=inventory, clock=AT)
+    packet = read(tmp_path / "trial/inputs/002112.json")
+    assert packet["periods"]["T1"]["start_date"] == "2026-11-13"
+    assert packet["periods"]["M6_V1"]["base_date"] == "2026-11-12"
+    assert packet["periods"]["M6_V1"]["end_date"] == "2027-05-11"
+
+
 def test_partial_materials_keep_real_gap_while_resolving_natural_month_target(tmp_path, isolated):
     inventory, data, _ = isolated
     source = tmp_path / "actual-partial-materials.json"

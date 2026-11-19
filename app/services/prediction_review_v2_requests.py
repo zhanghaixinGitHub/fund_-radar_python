@@ -26,20 +26,16 @@ def enabled_v2():
 
 def _readiness(codes, instant):
     """请求中的基准只用于安排补查，正式预测仍须核本基金估值条款与资料。"""
+    from app.services.fund_prediction_nav_identity import available_prediction_nav
+
     planning = window(instant)
     base = date.fromisoformat(planning["base_nav_date"])
-    found = {}
+    found = dict.fromkeys(codes, False)
     with get_engine().connect() as connection:
         source = repo.source(connection)
-        for code in codes:
-            available = repo.navs(connection, code, source["source_id"], base, base)
-            found[code] = any(
-                row["nav_date"] == base
-                and row.get("unit_nav") is not None
-                and row["unit_nav"] > 0
-                and (row.get("ann_date") is None or row["ann_date"] <= instant.date())
-                for row in available
-            )
+        for profile in repo.profiles(connection, codes):
+            selected, _ = available_prediction_nav(connection, profile, source["source_id"], base, instant)
+            found[profile["fund_code"]] = selected is not None
     return planning, found
 
 
@@ -118,16 +114,22 @@ def request_batch(codes, *, horizons=None, request_key=None, retry_items=None, m
             {"id": payload["taskId"], "key": identity, "payload": json.dumps(payload, ensure_ascii=False)},
         )
         result = connection.execute(
-            text("SELECT payload FROM prediction_review_v2_request WHERE idempotency_key=:key"), {"key": identity}
+            text("SELECT payload FROM prediction_review_v2_request WHERE idempotency_key=:key FOR UPDATE"),
+            {"key": identity},
         ).scalar_one()
-        if result["status"] in {"WAITING_FOR_NAV", "PENDING_ANALYSIS"} and result["status"] != status:
-            result = {**result, "status": status, "summary": summary}
-            connection.execute(
-                text(
-                    "UPDATE prediction_review_v2_request SET payload=CAST(:payload AS jsonb) WHERE idempotency_key=:key"
-                ),
-                {"key": identity, "payload": json.dumps(result, ensure_ascii=False)},
-            )
+        if result["status"] in {"WAITING_FOR_NAV", "PENDING_ANALYSIS"}:
+            updated = copy.deepcopy(result)
+            updated.update(status=status, summary=summary)
+            for item in updated["items"]:
+                if item["status"] == "PENDING":
+                    item["result"]["waitingFor"] = "ANALYSIS" if ready[item["fundCode"]] else "NAV"
+            if updated != result:
+                connection.execute(
+                    text("UPDATE prediction_review_v2_request SET payload=CAST(:payload AS jsonb) "
+                         "WHERE idempotency_key=:key"),
+                    {"key": identity, "payload": json.dumps(updated, ensure_ascii=False)},
+                )
+                result = updated
     return _public_task(result)
 
 
