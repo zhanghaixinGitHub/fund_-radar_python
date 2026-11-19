@@ -43,3 +43,19 @@ def test_formal_publication_preserves_natural_endpoint_and_not_conditional_kind(
     view = _public_period(row, analysis, {}, {}, "2026-11-18T16:00:00+08:00")
     assert view["kind"] == "DATED_ANALYSIS"
     assert view["endDate"] == "2027-05-18" and view["outcomeRule"] == RULE
+
+
+def test_resolved_natural_date_does_not_allow_direction_without_real_baseline():
+    from app.services.direction_1d_protocol import digest
+    from app.services.prediction_review_v2 import validate_review_v2
+    from tests.test_prediction_review_v2 import AT, sample
+
+    packet, data, review = sample("M6_V1")
+    packet["source_ready"] = False
+    packet["periods"]["M6_V1"] = {
+        "status": "RESOLVED", "base_date": "2026-11-11", "start_date": "2026-11-12",
+        "end_date": "2027-05-11", "end_date_basis": "CALENDAR_MONTH", "outcome_rule": RULE,
+    }
+    review["packet_hash"] = digest(packet)
+    with pytest.raises(ValueError, match="V2_TARGET_OR_SOURCE_UNVERIFIED"):
+        validate_review_v2(packet, data, review, at=AT)

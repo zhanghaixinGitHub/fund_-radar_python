@@ -24,9 +24,8 @@ def prepare_daily_review(directory, request_packet):
     guard = storage_check(instant.replace(hour=0, minute=0, second=0, microsecond=0).isoformat())
     if (sources / "freeze-summary.json").exists():
         frozen = read(sources / "freeze-summary.json")
-        if not frozen["frozen_count"]:
-            # 上轮失败不是永久缓存；原失败由版本存储保留，本轮重新读取补齐后的来源。
-            frozen = freeze_sources(sources, analysis_requests=[Path(request_packet["path"])])
+        # 此目录由资料、净值和规则身份决定；同一输入的失败保留原原因。
+        # 真正补齐后身份改变，自然使用新的sources目录，不能重写旧失败目录。
     else:
         frozen = freeze_sources(sources, analysis_requests=[Path(request_packet["path"])])
     if not frozen["frozen_count"]:

@@ -101,6 +101,27 @@ def test_old_service_without_materials_only_contract_never_submits():
     assert len(calls) == 1 and calls[0]["materialsOnly"] is not True
 
 
+def test_daily_material_submission_binds_owner_for_real_collection_scope(monkeypatch):
+    import json
+
+    import httpx
+    from app.services import fund_daily_runtime as runtime
+
+    calls = []
+    def handler(request):
+        body = json.loads(request.content)
+        calls.append(body)
+        if body["materialsOnly"] is not True:
+            return httpx.Response(422, json={"detail": [{"loc": ["body", "materialsOnly"]}]})
+        return httpx.Response(200, json={"job_id": "owner-material-job"})
+    monkeypatch.setattr(runtime, "read", lambda path: {"jobs": []})
+    b = object.__new__(LocalDailyBackend)
+    b.base, b.owner = "http://local", "bound-owner"
+    with httpx.Client(transport=httpx.MockTransport(handler)) as b.client:
+        assert b.start_or_reuse(None) == {"job_id": "owner-material-job", "reused": False}
+    assert calls[-1] == {"materialsOnly": True, "ownerUserId": "bound-owner"}
+
+
 def test_new_holding_uses_own_report_and_actual_quote_without_fake_financials(tmp_path, monkeypatch):
     from app.services import fund_market_preparation as preparation
 

@@ -677,6 +677,19 @@ def _validate(root, code, entry, source, value):
             )
             and not re.search(r"(?:修订|变更)基金合同|调整后的风险等级自|基金经理变更|调整.{0,8}费率", _compact(body))
         )
+        # 服务器升级的短时渠道提示与维护同义；仅接明确服务标题及银行渠道办理正文。
+        # 不把含“升级”的暂停申赎、投资、估值或费率公告放进管理人服务类别。
+        server_channel_service = (
+            value["scope"] == "MANAGER_SERVICE"
+            and re.fullmatch(
+                r"(?:" + re.escape(manager) + r")?关于因服务器(?:升级|维护)[、，,]?可能短暂影响服务的通知", title
+            ) is not None
+            and re.search(r"服务器(?:升级|维护)", _compact(body)) is not None
+            and all(term in _compact(body) for term in ("银行", "渠道", "签约", "申购", "客服电话"))
+            and not re.search(
+                r"暂停.{0,15}(?:基金|申购|赎回)|基金经理|基金合同|估值方法|调整.{0,8}费率", _compact(body)
+            )
+        )
         if (
             re.search(r"旗下部分基金|关联交易|估值方法|基金经理|获配|承销证券", title)
             or not re.search(terms, title + _compact(body[:400]))
@@ -686,6 +699,7 @@ def _validate(root, code, entry, source, value):
             and not product_impersonation_warning
             and not manager_risk_classification_guide
             and not manager_suitability_explanation
+            and not server_channel_service
         ):
             raise ValueError("MARKET_NEWS_MANAGER_SCOPE_UNPROVEN")
     return value

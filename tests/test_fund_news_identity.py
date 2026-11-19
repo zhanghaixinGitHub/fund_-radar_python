@@ -955,3 +955,27 @@ def test_short_legal_product_still_requires_independent_share_original(sources, 
     else:
         with pytest.raises(ValueError, match="EXPLICIT_PRODUCT_REQUIRED"):
             review(sources, **args)
+
+
+@pytest.mark.parametrize('economic', ['', '暂停本基金申购。', '调整基金经理。', '调整基金费率。'])
+def test_server_upgrade_is_only_reviewed_bank_channel_service(sources, economic):
+    title = '关于因服务器升级、可能短暂影响服务的通知'
+    body = ('某某基金管理有限公司将于2026年10月20日16:30至18:00进行服务器升级。'
+            '可能影响民生银行等渠道的签约及申购业务办理，请提前安排；客服电话4000000000。' + economic)
+    args = _specific_notice(sources, title, body)
+    if economic:
+        with pytest.raises(ValueError, match='MANAGER_SCOPE_UNPROVEN'):
+            review(sources, **args)
+    else:
+        receipt = review(sources, **args)
+        assert receipt['scope'] == 'MANAGER_SERVICE'
+        assert receipt['does_not_determine_direction'] is True
+
+
+def test_server_upgrade_still_requires_actual_manager_and_service_body(sources):
+    title = '关于因服务器升级、可能短暂影响服务的通知'
+    for body in ['另一基金管理有限公司服务器升级，可能影响银行渠道签约及申购，客服电话4000000000。' * 2,
+                 '某某基金管理有限公司服务器升级通知，本基金投资范围变化，请投资者注意风险。' * 2]:
+        args = _specific_notice(sources, title, body)
+        with pytest.raises(ValueError, match='MANAGER_IDENTITY_UNPROVEN|MANAGER_SCOPE_UNPROVEN'):
+            review(sources, **args)

@@ -2,7 +2,8 @@
 
 import argparse
 import json
-from datetime import date
+from copy import deepcopy
+from datetime import date, timedelta
 from pathlib import Path
 
 from app.services.comprehensive_multi_prediction import review_calendar
@@ -58,6 +59,69 @@ def _missing_dates(horizon, current, reason):
     }
 
 
+def _partial_calendar_materials(at, code, material_path, material, current):
+    """已知QDII窗口缺件仅供实际审阅；原件仍真校验，净值/归档版本只读。"""
+    from sqlalchemy import text
+
+    from app.db.session import get_nav_preview_engine
+    from app.services.fund_comprehensive_materials import checked_documents
+
+    documents = {d["id"]: d for d in checked_documents(at, code, material)}
+    for key, kind in (("prospectus_ref", "PROSPECTUS"), ("report_ref", "REPORT")):
+        document = documents.get((material.get("calendar_evidence") or {}).get(key), {})
+        if document.get("kind") != kind or code not in document.get("codes", []):
+            raise ValueError("V2_PARTIAL_OWN_ORIGINAL_REQUIRED")
+        if document.get("raw_path"):
+            from app.services.material_content import content_digest, source_bytes, source_exists
+
+            raw = Path(document["raw_path"])
+            if not source_exists(raw):
+                raise FileNotFoundError("V2_PARTIAL_ORIGINAL_FILE_MISSING")
+            if content_digest(source_bytes(raw)) != document.get("raw_sha256"):
+                raise ValueError("V2_PARTIAL_ORIGINAL_HASH_MISMATCH")
+    base = date.fromisoformat(current["base_nav_date"])
+    with get_nav_preview_engine().connect() as connection:
+        rows = connection.execute(text("""
+            SELECT n.nav_date,n.ann_date,n.source_id,n.unit_nav,n.content_hash,n.updated_at,
+                   v.version_id,v.received_at,v.expires_at
+            FROM nav_daily n JOIN source_registry s ON s.source_id=n.source_id
+            LEFT JOIN LATERAL (
+                SELECT version_id,received_at,expires_at FROM direction_1d_source_version
+                WHERE fund_code=n.fund_code AND source_id=n.source_id AND kind='NAV'
+                  AND business_date=n.nav_date AND payload->>'upstream_hash'=n.content_hash
+                ORDER BY received_at DESC LIMIT 1
+            ) v ON TRUE
+            WHERE n.fund_code=:code AND n.nav_date BETWEEN :start AND :base AND s.enabled=true
+            ORDER BY n.nav_date,n.source_id
+        """), {"code": code, "start": base - timedelta(days=7), "base": base}).mappings()
+        nav = []
+        for row in rows:
+            if row["updated_at"] > at or (row["ann_date"] and row["ann_date"] > at.date()):
+                continue
+            value = {
+                "nav_date": str(row["nav_date"]), "ann_date": str(row["ann_date"]) if row["ann_date"] else None,
+                "source_id": str(row["source_id"]), "unit_nav": str(row["unit_nav"]),
+                "upstream_hash": row["content_hash"], "updated_at": row["updated_at"].isoformat(),
+            }
+            if row["version_id"]:
+                value.update(version_id=str(row["version_id"]), observed_at=row["received_at"].isoformat(),
+                             expires_at=row["expires_at"].isoformat())
+            nav.append(value)
+    data = deepcopy(material)
+    data.update(
+        as_of=at.isoformat(), window=deepcopy(current), materials_path=str(Path(material_path).resolve()),
+        materials_hash=digest(material), nav=nav,
+        time_context={"baseline_complete": any(v["nav_date"] == str(base) for v in nav)},
+        valuation_status={"ready": False, "reason": "COMPREHENSIVE_CALENDAR_POLICY_REQUIRED"},
+        partial_material_assembly={
+            "assembled_at": at.isoformat(), "source_ready": False,
+            "reason": "COMPREHENSIVE_CALENDAR_POLICY_REQUIRED", "no_original_dates_changed": True,
+            "requires_actual_reading": True, "nav_versions_read_only": True,
+        },
+    )
+    return data
+
+
 def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_provider=current_holdings, clock=None):
     """逐只冻结当前持仓。失败保留缺口；成功清单可以直接交给第二版 prepare。"""
     directory = local_path(directory)
@@ -95,6 +159,7 @@ def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_pr
             "status": "WAITING_MATERIALS",
             "periods": {},
         }
+        preparing_materials = False
         try:
             handoff = registered_materials(code, at=at)
             if not handoff:
@@ -115,7 +180,9 @@ def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_pr
             ):
                 raise ValueError("V2_SOURCE_REQUEST_MATERIALS_CHANGED")
             # 共用准备器保留全部来源状态；第二版区分基金基准与历史个股缺口。
+            preparing_materials = True
             data = prepare(at, code, material_path)
+            preparing_materials = False
             if data.get("fund_code") != code or any(
                 data.get("window", {}).get(k) != current[k] for k in ("base_nav_date", "target_nav_date")
             ):
@@ -137,11 +204,11 @@ def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_pr
                 calendar, calendar_failure = None, failure(error)
             for horizon in HORIZONS:
                 reason = calendar_failure
-                if horizon == "M6_V1" and row["source_ready"] and calendar is not None:
+                if horizon == "M6_V1" and calendar is not None:
                     from app.services.prediction_natural_month import natural_month_target
 
                     dates = natural_month_target(current["base_nav_date"], current["target_nav_date"])
-                    # 当前基准仍须真实齐备，只有未来终点不再依赖尚未公布的日历。
+                    # 这里只确定日期；source_ready仍独立阻止缺真实基准的方向发布。
                     reason = None
                 elif calendar is None:
                     dates = _missing_dates(horizon, current, reason)
@@ -178,6 +245,24 @@ def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_pr
             )
         except (ValueError, KeyError, FileNotFoundError) as error:
             row["failure"] = failure(error)
+            profile = next((p for p in inventory["profiles"] if p["fund_code"] == code), {})
+            if preparing_materials and str(error) == "COMPREHENSIVE_CALENDAR_POLICY_REQUIRED" and "QDII" in str(
+                profile.get("fund_name", "")
+            ).upper():
+                try:
+                    partial = _partial_calendar_materials(at, code, material_path, material, current)
+                    path = directory / "funds" / code / "partial-input.json"
+                    save_once(path, partial)
+                except (ValueError, KeyError, FileNotFoundError) as partial_error:
+                    row["partial_failure"] = failure(partial_error)
+                else:
+                    row.update(status="FROZEN_WITH_CALENDAR_GAPS", source_path=str(path),
+                               source_hash=digest(partial), source_ready=False)
+                    selection.append({
+                        "fund_code": code, "source_kind": "PARTIAL_MATERIALS", "source_path": str(path),
+                        "sample_label": "本人当前持仓的真实缺件审阅资料",
+                        "reason": "原件已核但QDII估值窗口未齐，仅供实际缺件审阅，不能放行方向。",
+                    })
         rows.append(row)
         save_once(directory / "funds" / code / "freeze-status.json", row)
     final = holdings_provider()

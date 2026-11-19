@@ -72,7 +72,7 @@ def test_storage_failure_stops_before_any_source_write(tmp_path, monkeypatch):
     assert not (tmp_path / "analysis").exists()
 
 
-def test_transient_failed_freeze_is_retried_without_approving_any_review(tmp_path, monkeypatch):
+def test_failed_freeze_waits_for_changed_input_and_preserves_first_failure(tmp_path, monkeypatch):
     from app.commands import fund_prediction_v2_sources as sources
     from app.services import prediction_trial_v2 as trial
 
@@ -83,6 +83,7 @@ def test_transient_failed_freeze_is_retried_without_approving_any_review(tmp_pat
     count = []
     monkeypatch.setattr(trial, "storage_check", lambda since: {"count": 0})
     def freeze(directory, **kwargs):
+        assert not directory.exists()
         count.append(1)
         result = {"frozen_count": int(len(count) > 1), "selection_path": str(directory / "selection.json")}
         versioned_save(directory / "freeze-summary.json", result)
@@ -93,5 +94,11 @@ def test_transient_failed_freeze_is_retried_without_approving_any_review(tmp_pat
     monkeypatch.setattr(trial, "prepare_trial", prepare)
     packet = {"path": str(path), "review_path": str(tmp_path / "reference.json")}
     assert prepare_daily_review(tmp_path, packet)["preparation_status"] == "WAITING_SOURCE_REPAIR"
+    failed = next((tmp_path / "analysis").glob("*/*/sources/freeze-summary.json"))
+    first = failed.read_bytes()
+    assert prepare_daily_review(tmp_path, packet)["preparation_status"] == "WAITING_SOURCE_REPAIR"
+    assert len(count) == 1 and failed.read_bytes() == first
+    versioned_save(path, {**read(path), "materials_input_hash": "new-real-material"})
     assert prepare_daily_review(tmp_path, packet)["preparation_status"] == "READ_AND_JUDGE"
     assert len(count) == 2 and not (tmp_path / "reference.json").exists()
+    assert failed.read_bytes() == first

@@ -149,7 +149,7 @@ def prepare_trial(directory, selection, *, holdings=None, clock=None):
                         or dates.get("startDate") != target
                     ):
                         raise ValueError("V2_PERIOD_ORIGINAL_MISMATCH")
-                    if (horizon == "M6_V1" and ready and dates.get("calendarId")
+                    if (horizon == "M6_V1" and dates.get("calendarId")
                             and dates.get("calendarHash") and dates.get("endDateBasis") != "CALENDAR_MONTH"):
                         from app.services.prediction_natural_month import natural_month_target
 
@@ -168,6 +168,16 @@ def prepare_trial(directory, selection, *, holdings=None, clock=None):
                         source_hash=digest(original),
                         reason=None,
                     )
+            elif horizon == "M6_V1" and kind == "PARTIAL_MATERIALS":
+                from app.services.prediction_natural_month import natural_month_target
+
+                # 缺件输入也能确定自然月目标；ready始终为False，不能因此生成方向。
+                dates = natural_month_target(base, target)
+                periods[horizon].update(
+                    status="RESOLVED", end_date=dates["endDate"],
+                    nominal_end_date=dates["nominalEndDate"], end_date_basis=dates["endDateBasis"],
+                    outcome_rule=dates["outcomeRule"], reason="仅日期已确定；当前资料缺口仍需补齐",
+                )
         packets.append(
             {
                 "format": "FUND_PREDICTION_V2_TRIAL_INPUT",

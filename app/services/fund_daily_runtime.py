@@ -306,7 +306,7 @@ class LocalDailyBackend:
         if active:
             original = next((j for j in active if j["status"] == "RUNNING"), active[0])
             return {"job_id": original["job_id"], "reused": True}
-        response = self.client.post(self.base + "/all", json={"materialsOnly": True})
+        response = self.client.post(self.base + "/all", json={"materialsOnly": True, "ownerUserId": self.owner})
         if response.status_code == 409:
             # 与其他正常入口竞态且明确未接受时，恢复实际原作业等待，不重试POST。
             state = read(ROOT.parent / "sync-center/jobs.json")

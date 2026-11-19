@@ -1,8 +1,9 @@
 """第二版资料冻结的隔离验收；不访问真实本人接口或业务库。"""
 
+import hashlib
 import json
 from copy import deepcopy
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -99,6 +100,26 @@ def test_baseline_gap_is_not_promoted_to_source_ready(tmp_path, isolated):
     packet = read(tmp_path / "trial/inputs/002112.json")
     assert packet["source_ready"] is False
     assert packet["periods"]["T1"]["status"] == "UNVERIFIED"
+    assert packet["periods"]["M6_V1"]["status"] == "RESOLVED"
+    assert packet["periods"]["M6_V1"]["end_date"] == "2027-05-12"
+    assert packet["periods"]["M6_V1"]["end_date_basis"] == "CALENDAR_MONTH"
+
+
+def test_partial_materials_keep_real_gap_while_resolving_natural_month_target(tmp_path, isolated):
+    inventory, data, _ = isolated
+    source = tmp_path / "actual-partial-materials.json"
+    versioned_save(source, data)
+    selection = tmp_path / "partial-selection.json"
+    selection.write_text(json.dumps([{
+        "fund_code": "002112", "source_kind": "PARTIAL_MATERIALS", "source_path": str(source),
+        "sample_label": "本期真实缺件资料", "reason": "当前基准及行情尚未全部齐备，仅供缺件审阅",
+    }]), encoding="utf-8")
+    trial.prepare_trial(tmp_path / "trial", selection, holdings=inventory, clock=AT)
+    packet = read(tmp_path / "trial/inputs/002112.json")
+    assert packet["source_ready"] is False
+    assert packet["periods"]["T1"]["status"] == "UNVERIFIED"
+    assert packet["periods"]["M6_V1"]["end_date"] == "2027-05-12"
+    assert packet["periods"]["M6_V1"]["end_date_basis"] == "CALENDAR_MONTH"
 
 
 def test_v2_freeze_and_trial_share_partial_stock_baseline_boundary(tmp_path, isolated):
@@ -195,3 +216,87 @@ def test_removed_holding_never_produces_selection(tmp_path, isolated):
     with pytest.raises(ValueError, match="V2_SOURCE_HOLDINGS_CHANGED_DURING_FREEZE"):
         command.freeze_sources(tmp_path / "sources", holdings_provider=lambda: next(states), clock=AT)
     assert not (tmp_path / "sources/selection.json").exists()
+
+
+def _qdii_calendar_case(tmp_path, isolated, monkeypatch, error="COMPREHENSIVE_CALENDAR_POLICY_REQUIRED"):
+    inventory, _, handoff = isolated
+    inventory["profiles"][0].update(fund_name="本基金股票(QDII)", fund_type="STOCK")
+    raw = tmp_path / "own-contract.txt"
+    raw.write_bytes(b"002112 actual own contract original")
+    documents = []
+    for ref, kind in (("own-contract", "PROSPECTUS"), ("own-report", "REPORT")):
+        body = "本基金002112原件正文，估值日按收盘价及人民币中间价计算。"
+        documents.append({
+            "id": ref, "kind": kind, "codes": ["002112"], "url": "https://example.com/" + ref,
+            "body": body, "body_hash": digest(body), "published_date": "2026-11-11",
+            "available_at": "2026-11-11T18:00:00+08:00", "raw_path": str(raw),
+            "raw_sha256": hashlib.sha256(raw.read_bytes()).hexdigest(),
+        })
+    material = {"fund_code": "002112", "documents": documents, "facts": {},
+                "calendar_evidence": {"prospectus_ref": "own-contract", "report_ref": "own-report"}}
+    versioned_save(Path(handoff["materials_path"]), material)
+    handoff["materials_hash"] = digest(material)
+    monkeypatch.setattr(command, "prepare", lambda *args: (_ for _ in ()).throw(ValueError(error)))
+    return inventory, handoff, material, raw
+
+
+def test_qdii_exact_calendar_failure_prepares_false_partial_with_real_nav_identity(tmp_path, isolated, monkeypatch):
+    inventory, handoff, material, _ = _qdii_calendar_case(tmp_path, isolated, monkeypatch)
+    statements = []
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, statement, parameters):
+            statements.append(str(statement))
+            return self
+
+        def mappings(self):
+            return [{"nav_date": date(2026, 11, 12), "ann_date": date(2026, 11, 12),
+                     "source_id": "actual-source", "unit_nav": "2.04980000", "content_hash": "upstream",
+                     "updated_at": AT - timedelta(hours=1), "version_id": None}]
+
+    monkeypatch.setattr("app.db.session.get_nav_preview_engine", lambda: type(
+        "ReadOnlyEngine", (), {"connect": lambda self: Connection()})())
+    result = command.freeze_sources(tmp_path / "sources", holdings_provider=lambda: inventory, clock=AT)
+    assert result["frozen_count"] == 1 and result["source_ready_count"] == 0
+    assert result["funds"][0]["status"] == "FROZEN_WITH_CALENDAR_GAPS"
+    assert result["funds"][0]["failure"]["code"] == "COMPREHENSIVE_CALENDAR_POLICY_REQUIRED"
+    selection = json.loads(Path(result["selection_path"]).read_text())
+    assert selection[0]["source_kind"] == "PARTIAL_MATERIALS"
+    data = read(Path(selection[0]["source_path"]))
+    assert data["materials_path"] == handoff["materials_path"]
+    assert data["materials_hash"] == digest(material)
+    assert data["nav"][0]["source_id"] == "actual-source"
+    assert data["nav"][0]["nav_date"] == "2026-11-12"
+    assert read(Path(handoff["materials_path"])) == material
+    assert len(statements) == 1 and statements[0].lstrip().startswith("SELECT")
+    trial.prepare_trial(tmp_path / "trial", Path(result["selection_path"]), holdings=inventory, clock=AT)
+    packet = read(tmp_path / "trial/inputs/002112.json")
+    assert packet["source_ready"] is False
+    assert packet["periods"]["T1"]["status"] == "UNVERIFIED"
+    assert packet["periods"]["M6_V1"]["end_date"] == "2027-05-12"
+    with pytest.raises(ValueError, match="V2_SOURCE_DIRECTORY_MUST_BE_NEW"):
+        command.freeze_sources(tmp_path / "sources", holdings_provider=lambda: inventory, clock=AT)
+
+
+def test_qdii_other_technical_failure_does_not_fall_back(tmp_path, isolated, monkeypatch):
+    inventory, _, _, _ = _qdii_calendar_case(tmp_path, isolated, monkeypatch, error="COMPREHENSIVE_SOURCE_INVALID")
+    monkeypatch.setattr(command, "_partial_calendar_materials", lambda *args: pytest.fail("unexpected fallback"))
+    result = command.freeze_sources(tmp_path / "sources", holdings_provider=lambda: inventory, clock=AT)
+    assert result["frozen_count"] == 0
+    assert result["funds"][0]["failure"]["code"] == "COMPREHENSIVE_SOURCE_INVALID"
+
+
+def test_qdii_missing_original_is_not_promoted_to_partial(tmp_path, isolated, monkeypatch):
+    inventory, _, _, raw = _qdii_calendar_case(tmp_path, isolated, monkeypatch)
+    raw.unlink()
+    monkeypatch.setattr("app.db.session.get_nav_preview_engine", lambda: pytest.fail("NAV read before original proof"))
+    result = command.freeze_sources(tmp_path / "sources", holdings_provider=lambda: inventory, clock=AT)
+    assert result["frozen_count"] == 0
+    assert result["funds"][0]["failure"]["code"] == "COMPREHENSIVE_CALENDAR_POLICY_REQUIRED"
+    assert result["funds"][0]["partial_failure"]["code"] == "SOURCE_FILE_MISSING"

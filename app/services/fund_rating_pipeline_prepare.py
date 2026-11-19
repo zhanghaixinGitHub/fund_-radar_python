@@ -666,6 +666,9 @@ def prepare_fees(session, request: dict, *, root: Path) -> dict:
     explanation = request.get("explanation", "").strip()
     if len(explanation) < 40:
         raise ValueError("R5_FEE_EXPLANATION_REQUIRED")
+    # 同月续办与首评使用相同的原件导入边界；共享审阅可保留新闻库原路径，
+    # 先核原字节并规范归档，不能直接交给只接受评分 sources 的严格重放器。
+    raw["sources"] = {sha: canonical_source(root, ref) for sha, ref in raw["sources"].items()}
     calculated = calculate_fees(raw, root=root)
     point = calculated["score"]
     document = bundle["reviewed_document"]
