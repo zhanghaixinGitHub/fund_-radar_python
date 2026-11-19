@@ -822,8 +822,8 @@ def test_internal_signals_do_not_invent_direction_when_data_is_insufficient(monk
     monkeypatch.setattr(
         signals,
         "list_completed_signals",
-        lambda _fund_code, _page_size, _cursor: InternalSignalPage(
-            items=(
+        lambda _fund_code, _page_size, _cursor, *, active_only=False: InternalSignalPage(
+            items=() if active_only else (
                 InternalSignalSummary(
                     forecast_id=UUID("00000000-0000-0000-0000-000000000201"),
                     fund_code="000001",
@@ -850,10 +850,16 @@ def test_internal_signals_do_not_invent_direction_when_data_is_insufficient(monk
             headers={"X-Service-Token": "test-service-token", "Origin": "http://localhost:5173"},
         )
         response = client.get("/internal/v1/signals?fundCode=000001", headers={"X-Service-Token": "test-service-token"})
+        published = client.get(
+            "/internal/v1/signals?fundCode=000001&activeOnly=true",
+            headers={"X-Service-Token": "test-service-token"},
+        )
 
     assert browser_response.status_code == 403
     assert response.status_code == 200
     item = response.json()["items"][0]
+    assert published.status_code == 200
+    assert published.json()["items"] == []
     assert item["score_status"] == "DATA_INSUFFICIENT"
     assert item["direction"] is None
     assert item["directional_probability"] is None

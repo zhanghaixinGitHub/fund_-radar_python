@@ -10,10 +10,10 @@ from app.repositories.signal_read import list_active_scored_signal_changes, list
 from app.schemas.signal import InternalSignalChange, InternalSignalChangePage, InternalSignalPage, InternalSignalSummary
 
 
-def list_completed_signals(fund_code: str, page_size: int, cursor: UUID | None) -> InternalSignalPage:
+def list_completed_signals(fund_code: str, page_size: int, cursor: UUID | None, *, active_only: bool = False) -> InternalSignalPage:
     """只返回本地已持久化的可复现结果；处理请求期间绝不运行模型。"""
     with Session(get_engine()) as session:
-        rows = list_signal_results_for_fund(session, fund_code, page_size, cursor)
+        rows = list_signal_results_for_fund(session, fund_code, page_size, cursor, active_only=active_only)
     page_rows = rows[:page_size]
     return InternalSignalPage(
         items=tuple(

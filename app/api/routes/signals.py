@@ -21,10 +21,11 @@ def list_internal_signals(
     fund_code: Annotated[str, Query(alias="fundCode", min_length=6, max_length=6, pattern=r"^\d{6}$")],
     page_size: Annotated[int, Query(alias="pageSize", ge=1, le=100)] = 20,
     cursor: UUID | None = None,
+    active_only: Annotated[bool, Query(alias="activeOnly")] = False,
 ) -> InternalSignalPage:
     """返回已落库的评分结果，不执行模型，也不会补造缺失的预测方向。"""
     try:
-        payload = list_completed_signals(fund_code, page_size, cursor)
+        payload = list_completed_signals(fund_code, page_size, cursor, active_only=active_only)
     except ValueError as error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
     logger.info(

@@ -9,7 +9,7 @@ from app.models.analysis import AnalysisModelRelease, FeatureSnapshot, ForecastR
 
 
 def list_signal_results_for_fund(
-    session: Session, fund_code: str, page_size: int, cursor: UUID | None
+    session: Session, fund_code: str, page_size: int, cursor: UUID | None, *, active_only: bool = False
 ) -> tuple[tuple[ForecastResult, FeatureSnapshot], ...]:
     """查询指定基金的评分结果与特征快照，并按稳定顺序返回一页加一条探测记录。"""
     statement: Select[tuple[ForecastResult, FeatureSnapshot]] = (
@@ -18,6 +18,10 @@ def list_signal_results_for_fund(
         .where(ForecastResult.fund_code == fund_code)
         .order_by(ForecastResult.as_of_date.desc(), ForecastResult.scored_at.desc(), ForecastResult.forecast_id.desc())
     )
+    if active_only:
+        statement = statement.join(
+            AnalysisModelRelease, ForecastResult.model_release_id == AnalysisModelRelease.model_release_id
+        ).where(ForecastResult.score_status == "SCORED", AnalysisModelRelease.release_status == "ACTIVE")
     if cursor is not None:
         cursor_result = session.get(ForecastResult, cursor)
         if cursor_result is None:
