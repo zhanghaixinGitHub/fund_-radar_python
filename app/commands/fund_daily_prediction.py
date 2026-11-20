@@ -46,12 +46,30 @@ def main():
     parser.add_argument("--resume-only", action="store_true", help="上午续办，只允许使用已有窗口和资料作业")
     parser.add_argument("--publish-prepared", action="store_true",
                         help="实际阅读并写入审阅文件后续办；仍核当前资料版本，不重复采集已有候选")
+    parser.add_argument("--refresh-checklist", metavar="基金代码", help="只用本轮台账和最新档案重画指定基金的补数清单")
     args = parser.parse_args()
     from app.services.prediction_trial_v2 import storage_check
 
     instant = now()
     storage_check(instant.replace(hour=0, minute=0, second=0, microsecond=0).isoformat())
     directory = args.run_dir or PROJECT / ".local-runs" / ("daily-prediction-" + now().strftime("%Y%m%d"))
+    if args.refresh_checklist:
+        from app.services.fund_daily_profiles import profiles, save_pending
+        from app.services.fund_exposure_common import read
+
+        directory = directory.resolve()
+        if directory.parent != (PROJECT / ".local-runs").resolve():
+            parser.error("补数清单只从本项目 .local-runs 下的已有运行目录刷新")
+        state = read(directory / "run.json")
+        code = args.refresh_checklist
+        if code not in state["scope"]:
+            parser.error("基金不在本轮持仓范围")
+        profile = read(directory / "fund-profiles.json")[code]
+        profile.update({k: v for k, v in profiles().get(code, {}).items() if v is not None})
+        tasks = save_pending(directory, state, records={code: profile}, fund_code=code, aggregate=False)
+        print(json.dumps({"fund_code": code, "pending_count": len(tasks),
+                          "checklist": str(directory.parent / "fund-supplements" / f"{code}.md")}, ensure_ascii=False))
+        return
     resume_receipt = None
     if args.resume_only:
         from app.services.fund_exposure_common import read
@@ -129,6 +147,7 @@ def main():
                 "pending_funds": result.get("pending_funds", []),
                 "run_dir": str(directory.resolve()),
                 "work_items": str((directory / "work-items.json").resolve()),
+                "fund_checklists": str((directory.resolve().parent / "fund-supplements")),
                 "all_predictions_generated": result.get("all_predictions_generated", False),
                 "all_reviews_saved": result.get("all_reviews_saved", False),
                 "reviewed_period_count": result.get("reviewed_period_count", 0),

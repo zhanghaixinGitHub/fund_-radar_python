@@ -2,6 +2,201 @@
   "001021": {
     "template": "domestic",
     "target_funds": [],
+    "data_requirements": [
+      {
+        "use": "评分 · 收益能力",
+        "item": "iBoxx ABF China 人民币全收益指数（ABTRCHIN，GB00B068N195）的原始收盘点位，覆盖最近已结束评分月及之前 12 个月的基金估值日；收益分核对准确首尾值",
+        "source": "标普道琼斯 iBoxx ABF China 官方页面 https://www.spglobal.com/spdji/en/indices/fixed-income/iboxx-abf-china/ 的原始行情数据，或标普和 Bloomberg 授权日终历史。核对指数代码、人民币全收益、估值日和原始精度",
+        "base_fact_prefix": "rating_abtrchin_valuation_window_",
+        "evidence_date": "target_nav_date"
+      },
+      {
+        "use": "评分 · 业绩稳定性",
+        "item": "同一基准的完整 12 个月逐月比较，按基金实际估值月末对齐，证据须足以确定每月基金与基准的高低",
+        "source": "标普 iBoxx ABF China https://www.spglobal.com/spdji/en/indices/fixed-income/iboxx-abf-china/ 的人民币全收益日终历史；基金侧在华夏 001021 公告 https://fund.chinaamc.com/fund/001021/jijingonggao.shtml 核对分红并与 A 类净值历史配对",
+        "base_fact_prefix": "rating_abtrchin_valuation_window_",
+        "evidence_date": "target_nav_date"
+      },
+      {
+        "use": "评分 · 目标执行",
+        "item": "覆盖评分要求交易日的同口径精确基准日线，用于计算跟踪误差",
+        "source": "标普 iBoxx ABF China https://www.spglobal.com/spdji/en/indices/fixed-income/iboxx-abf-china/ ，向标普或 Bloomberg 授权终端按 ABTRCHIN、GB00B068N195 导出人民币全收益日终序列。000012.SH 用于债市背景",
+        "base_fact_prefix": "rating_abtrchin_valuation_window_",
+        "evidence_date": "target_nav_date"
+      },
+      {
+        "use": "预测 · 国债利率",
+        "item": "基准日国债收益率曲线",
+        "source": "中债关键期限表 https://yield.chinabond.com.cn/cbweb-cbrc-web/cbrc/queryGjqxInfo?locale=en_US （workTime 填所需日期，比较时另查前一交易日）",
+        "base_fact_prefix": "government_curve"
+      },
+      {
+        "use": "预测 · 政策性金融债利率",
+        "item": "基准日国开债收益率曲线",
+        "source": "中债国开债 https://yield.chinabond.com.cn/gkh/yield",
+        "base_fact_prefix": "cdb_curve"
+      },
+      {
+        "use": "预测 · 资金利率",
+        "item": "基准日隔夜和七天银行间资金利率",
+        "source": "中国货币网 https://www.chinamoney.com.cn/chinese/llshibor/ 或 Tushare shibor",
+        "base_fact_prefix": "shibor_"
+      },
+      {
+        "use": "预测 · 目标日资金",
+        "item": "目标日 11:00 发布的隔夜和七天 Shibor，与基准日同口径比较",
+        "source": "中国货币网 Shibor 历史数据 https://www.chinamoney.com.cn/ags/ms/cm-u-bk-shibor/ShiborHis",
+        "base_fact_prefix": "cfets_target_shibor_",
+        "evidence_date": "target_nav_date"
+      },
+      {
+        "use": "预测 · 目标日现券",
+        "item": "目标日国债、国开债、进出口行债和农发债的同券盘中报价，与基准日同口径比较",
+        "source": "中国货币网实时收益率曲线 https://www.chinamoney.com.cn/english/bmkycvrty/",
+        "base_fact_prefix": "cfets_target_bond_",
+        "evidence_date": "target_nav_date"
+      },
+      {
+        "use": "预测 · 公开市场操作",
+        "item": "央行公开市场操作量及到期量",
+        "source": "中国人民银行公开市场业务交易公告 https://www.pbc.gov.cn/zhengcehuobisi/125207/125213/125431/125475/index.html",
+        "base_fact_prefix": "pbc_open_market_"
+      },
+      {
+        "use": "预测 · 国债供给",
+        "item": "近期国债发行、缴款及上市安排，核对期限和规模",
+        "source": "财政部国债业务公告 https://zwgls.mof.gov.cn/ywgg/index.htm",
+        "base_fact_prefix": "treasury_supply_",
+        "max_source_age_days": 7
+      },
+      {
+        "use": "预测 · 本基金投向",
+        "item": "最新定期报告的国债、政策性金融债占比和主要持有债券",
+        "source": "华夏基金本份额最新定期报告 https://fund.chinaamc.com/fund/001021/jijingonggao.shtml",
+        "base_fact_prefix": "checked_bond_exposure_",
+        "max_source_age_days": 120
+      },
+      {
+        "use": "预测 · 利率敏感度",
+        "item": "最新半年报或年报的利率变动压力测试和回购余额，作为报告期参考",
+        "source": "华夏基金本份额定期报告中的利率风险敏感性分析及资产负债表 https://fund.chinaamc.com/fund/001021/jijingonggao.shtml",
+        "base_fact_prefix": "checked_report_sensitivity_",
+        "max_source_age_days": 220
+      },
+      {
+        "use": "预测 · 多日利率走势",
+        "item": "近几个交易日同券同一时刻的收益率，观察国债和三类政策性金融债是否连续走强",
+        "source": "中国货币网实时收益率曲线 https://www.chinamoney.com.cn/english/bmkycvrty/",
+        "base_fact_prefix": "cfets_multiday_bond_"
+      },
+      {
+        "use": "预测 · 月内发行安排",
+        "item": "预测期内已公告国债的续发行、缴款和上市安排",
+        "source": "财政部国债业务公告 https://zwgls.mof.gov.cn/ywgg/index.htm",
+        "base_fact_prefix": "forward_treasury_supply_",
+        "max_source_age_days": 7
+      },
+      {
+        "use": "预测 · 季度招标日程",
+        "item": "从财政部本季度附件提取落在预测期内的国债招标日、期限和首发或续发，规模随后按逐券公告核对",
+        "source": "财政部发行安排 https://www.mof.gov.cn/gkml/bulinggonggao/tongzhitonggao/；2026 年四季度附件入口 https://app.mof.gov.cn/mofmobile2026/czxw/202609/t20260929_4002374.htm",
+        "base_fact_prefix": "mof_quarter_auction_window_",
+        "max_source_age_days": 120
+      },
+      {
+        "use": "预测 · 月内历史对照",
+        "item": "最近约一个月的同券收益率周度对照、七天和十四天回购定盘价",
+        "source": "中国货币网实时收益率曲线及回购定盘利率 https://www.chinamoney.com.cn/chinese/bkfrr/",
+        "base_fact_prefix": "cfets_month_window_"
+      },
+      {
+        "use": "预测 · 到期本金对照",
+        "item": "二十日窗口内已披露国债的兑付日期和可核实本金，续发与原券按代码合并",
+        "source": "财政部国债公告 https://zwgls.mof.gov.cn/ywgg/index.htm 、中国货币网付息兑付公告 https://www.chinamoney.com.cn/chinese/lsfxdflm/ ，按代码和日期查年度兑付、逐券发行与续发",
+        "base_fact_prefix": "treasury_maturity_verified_",
+        "max_source_age_days": 365
+      },
+      {
+        "use": "预测 · 政策性金融债到期对照",
+        "item": "二十日窗口内已查到的政策性金融债到期日和已核实本金，分别标明单次实际增发面值或全券待兑余额",
+        "source": "中国货币网发行说明、实际发行结果和付息兑付 https://www.chinamoney.com.cn/chinese/lsfxdflm/，上海清算所流通要素和兑付注销 https://www.shclearing.com.cn/xxpl/dfzx/",
+        "base_fact_prefix": "checked_policy_maturity_",
+        "evidence_date": "target_nav_date",
+        "max_source_age_days": 730
+      },
+      {
+        "use": "预测 · 北向债券通到期对照",
+        "item": "用北向债券通名单按发行人、人民币、到期日和国际证券编号核对国债和三家政策银行的登记发行规模，并记录名单覆盖和境内公告差异",
+        "source": "香港金管局债务工具中央结算系统运营方 CMU OmniClear 证券查询 https://www.cmuomniclear.com/en/securities-search，接口参数 search_type=8023，规模字段 cmu_iss_siz、到期字段 cmu_mat_dte",
+        "base_fact_prefix": "cmu_maturity_window_",
+        "evidence_date": "target_nav_date"
+      },
+      {
+        "use": "预测 · 国债发行规模对账",
+        "item": "逐券核对境内发行面值与北向登记差额，纳入财政部做市随卖成交额",
+        "source": "财政部国债公告 https://zwgls.mof.gov.cn/ywgg/index.htm 和中国货币网发行公告 https://www.chinamoney.com.cn/chinese/lszqfxlm/ 查逐券发行及做市成交，和北向登记 https://www.cmuomniclear.com/en/securities-search 对账",
+        "base_fact_prefix": "treasury_maturity_face_reconciled_",
+        "evidence_date": "target_nav_date",
+        "max_source_age_days": 2557
+      },
+      {
+        "use": "预测 · 逐券招标和缴款安排",
+        "item": "核对二十日窗口内已发布逐券公告的期限、计划招标额、缴款截止日和上市日",
+        "source": "财政部国债业务公告 https://zwgls.mof.gov.cn/ywgg/index.htm",
+        "base_fact_prefix": "treasury_window_payment_notices_",
+        "evidence_date": "target_nav_date",
+        "max_source_age_days": 45
+      },
+      {
+        "use": "预测 · 逐券实际兑付",
+        "item": "按券核对境内托管或发行人公布的实际兑付日及本金",
+        "source": "中国货币网付息兑付 https://www.chinamoney.com.cn/chinese/lsfxdflm/ 、上海清算所兑付注销 https://www.shclearing.com.cn/xxpl/dfzx/ 依代码检索。实际金额未公开时向对应托管结算机构或发行人要兑付凭据",
+        "horizons": ["T20_V1"]
+      },
+      {
+        "use": "预测 · 跨月资金报价",
+        "item": "覆盖下个月初的一月期回购利率互换报价，明确与实际回购成交的区别",
+        "source": "中国货币网利率互换曲线 https://www.chinamoney.com.cn/chinese/bkcurvfx/",
+        "base_fact_prefix": "cfets_cross_month_swap_",
+        "evidence_date": "target_nav_date"
+      },
+      {
+        "use": "预测 · 跨月回购成交参考",
+        "item": "目标日可观察的银行间回购成交加权利率及实际期限，核对期限是否覆盖下月初，可用交易所同期限成交对照",
+        "source": "中国货币网货币市场质押式回购 https://www.chinamoney.com.cn/chinese/mkdatapm/?tab=2；上交所协议回购 https://bond.sse.com.cn/data/quote/tradeinfo/Repomarket/",
+        "base_fact_prefix": "cfets_cross_month_repo_trade_",
+        "evidence_date": "target_nav_date"
+      },
+      {
+        "use": "预测 · 政策性金融债发行缴款对照",
+        "item": "逐券核对窗口内政策性金融债已披露的发行登记金额及缴款日，注明待确认发行和做市成交",
+        "source": "上海清算所交易流通要素及逐券发行说明 https://www.shclearing.com.cn/xxpl/jyltysgg/jrz_547/；中国货币网及政策银行发行、缴款和做市操作公告",
+        "base_fact_prefix": "policy_issue_payment_confirmed_",
+        "evidence_date": "target_nav_date"
+      },
+      {
+        "use": "预测 · 月内净供给",
+        "item": "汇总二十日窗口内国债和政策性金融债按期限的实际发行减到期本金，一只债券各次增发合并，核对缺失日期与券种",
+        "source": "财政部国债公告；中国货币网债券发行 https://www.chinamoney.com.cn/chinese/lszqfxlm/ 和付息兑付 https://www.chinamoney.com.cn/chinese/lsfxdflm/；上海清算所兑付注销 https://www.shclearing.com.cn/xxpl/dfzx/；北向债券通登记规模用于交叉核对"
+      },
+      {
+        "use": "预测 · 中长期宏观",
+        "item": "最近的官方货币政策报告、通胀和经济活动数据，用于判断利率基准情景和反转风险",
+        "source": "中国人民银行货币政策执行报告和国家统计局 https://www.stats.gov.cn/sj/",
+        "base_fact_prefix": "official_bond_macro_",
+        "max_source_age_days": 45
+      },
+      {
+        "use": "预测 · 当期融资和久期",
+        "item": "当期组合有效久期及回购融资成本，用于核对利率变化能否抵过利息收入",
+        "source": "华夏基金本份额最新报告及持仓披露 https://fund.chinaamc.com/fund/001021/jijingonggao.shtml"
+      },
+      {
+        "use": "建议 · 资金安排",
+        "item": "本人的资金使用日期、可承受亏损和下一次复查日期",
+        "source": "我的持仓中的最新确认资金安排；到复查日由本人更新确认"
+      }
+    ],
     "market_references": {
       "000012.SH": "https://api.tushare.pro"
     },
@@ -10,7 +205,19 @@
     "valuation_clause": null,
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "标普 iBoxx ABF China https://www.spglobal.com/spdji/en/indices/fixed-income/iboxx-abf-china/ ，ABTRCHIN、GB00B068N195 的人民币全收益日终原始点位或授权历史导出",
+      "rating_data": null,
+      "market_source": "中债收益率与指数 https://yield.chinabond.com.cn/；中国货币网 https://www.chinamoney.com.cn/；财政部国债业务公告 https://zwgls.mof.gov.cn/ywgg/index.htm；中国人民银行 https://www.pbc.gov.cn/；发行人及托管结算机构",
+      "cycles": {
+        "T1": "基准日与目标日同券国债、国开、进出口行和农发债收益率，隔夜及七天资金，逆回购投放和到期",
+        "T5_V1": "近几日同券同刻利率、资金波动、已知招标缴款和跨周传导",
+        "T20_V1": "核实际发行缴款减到期本金，分国债和三类政策性金融债、按期限对账，结合跨月回购成交",
+        "M6_V1": "最新久期、组合收益率和融资成本，对照通胀、经济与货币政策的利率情景"
+      },
+      "scope_note": "上证国债 000012.SH 用于观察市场。评分使用合同指定的 iBoxx 人民币全收益序列。"
+    }
   },
   "001632": {
     "template": "domestic",
@@ -27,10 +234,33 @@
     "valuation_clause": null,
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "中证食品饮料 930653，中证指数 https://www.csindex.com.cn/；合同活期税后利率",
+      "rating_data": "159736目标ETF及联接本C同日资产；穿透中证食品饮料成分、白酒集中度与跟踪误差",
+      "market_source": "中证指数 https://www.csindex.com.cn/；深交所 https://www.szse.cn/ 159736；巨潮资讯 https://www.cninfo.com.cn/；国家统计局 https://www.stats.gov.cn/sj/",
+      "cycles": {
+        "T1": "930653、159736及披露重仓的同日收盘和成交，查食品、饮料与白酒是否同向",
+        "T5_V1": "近几日白酒与其他食品子行业涨跌、交易量，及未来一周重点公司公告",
+        "T20_V1": "白酒价格与渠道库存、食品饮料消费数据和重点成分业绩验证日期",
+        "M6_V1": "消费走向、渠道去库存、主要公司营收毛利与现金流、行业估值情景"
+      }
+    }
   },
   "002112": {
     "template": "domestic",
+    "data_requirements": [
+      {
+        "item": "比较组的真实日净值和自然月末净值",
+        "use": "评分",
+        "source": "银华 001728 净值历史入口 https://fundf10.eastmoney.com/jjjz_001728.html ，以银华管理人披露或授权导出作交叉核对；比较组成员从本期正式评分输入读取"
+      },
+      {
+        "item": "换股及终止上市证券的流动性证据",
+        "use": "评分",
+        "source": "巨潮资讯 https://www.cninfo.com.cn/ 及对应证券的上交所 https://www.sse.com.cn/ 或深交所 https://www.szse.cn/ 公告，按证券代码查换股、摘牌与最后成交；与德邦 002112 定报 https://fundf10.eastmoney.com/jjgg_002112.html 对账"
+      }
+    ],
     "target_funds": [],
     "market_references": {
       "000300.SH": "https://api.tushare.pro",
@@ -41,7 +271,18 @@
     "valuation_clause": null,
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "中国战略新兴产业成份指数按德邦基金合同向发布方或授权供应商取数；中债综合全价总值，中债收益率与指数 https://yield.chinabond.com.cn/",
+      "rating_data": "本C适用比较组的日/月末净值、真实权益仓位、集中度、组合换股摘牌及变现证据",
+      "market_source": "巨潮资讯 https://www.cninfo.com.cn/；上交所 https://www.sse.com.cn/；深交所 https://www.szse.cn/；中债收益率与指数 https://yield.chinabond.com.cn/；德邦基金报告",
+      "cycles": {
+        "T1": "按德邦最新披露重仓核行情和公告，换股或终止上市证券用实际事件和存续价格",
+        "T5_V1": "按本期主要行业权重核重仓多日行情和资金扩散，区分组合实际持股与比较指数",
+        "T20_V1": "重点持仓财报、订单或回款和组合换手依据，核战略新兴成分与基金实际偏离",
+        "M6_V1": "重仓盈利现金流、基金策略和行业估值、权益与债券两部分的风险情景"
+      }
+    }
   },
   "005284": {
     "template": "domestic",
@@ -58,7 +299,30 @@
     "valuation_clause": "本基金的估值日为本基金相关的证券交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。",
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "https://fund.eastmoney.com/gonggao/005284,AN202608311828786632.html"
+    "share_currency_evidence": "https://fund.eastmoney.com/gonggao/005284,AN202608311828786632.html",
+    "data_requirements": [
+      {
+        "item": "5%现金门槛的合格金额",
+        "use": "评分",
+        "source": "华商 005284 合同和定报目录 https://fundf10.eastmoney.com/jjgg_005284.html 先核门槛。向华商基金 https://www.hsfund.com/ 或合同列明托管人索取同日合格现金、逐只政府债到期日及公允价值明细"
+      },
+      {
+        "item": "80%可转换债券比例的分子和分母",
+        "use": "评分",
+        "source": "华商 005284 合同及比例披露 https://fundf10.eastmoney.com/jjgg_005284.html 。逐项金额向华商基金 https://www.hsfund.com/ 或合同列明托管人取同日比例核对表，核可交换债、非现金基金资产和适用调整期"
+      }
+    ],
+    "supplement_focus": {
+      "benchmark_source": "中证指数 https://www.csindex.com.cn/ 中证800（000906）、中证全债（H11001）、中证可转换债券（000832）的合约约定系列",
+      "rating_data": "同日逐券可转债、现金及政府债明细，核合同转债比例和现金门槛，以及转债流动性和信用",
+      "market_source": "中证指数 https://www.csindex.com.cn/；上交所 https://www.sse.com.cn/；深交所 https://www.szse.cn/；巨潮资讯 https://www.cninfo.com.cn/；中债收益率与指数 https://yield.chinabond.com.cn/",
+      "cycles": {
+        "T1": "转债指数、主要转债及正股收盘，核偏股偏债分化、强赎及停复牌公告",
+        "T5_V1": "转股溢价、成交和正股方向的多日变化，核下修、赎回或发行催化",
+        "T20_V1": "逐券到期、强赎、下修与条款观察日期，跟踪供需、信用事件和股债联动",
+        "M6_V1": "组合票息、到期收益和转股弹性，结合信用、利率及正股估值分别设情景"
+      }
+    }
   },
   "006038": {
     "template": "domestic",
@@ -72,10 +336,27 @@
     "valuation_clause": null,
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "中证指数 https://www.csindex.com.cn/ 中证1000；中债收益率与指数 https://yield.chinabond.com.cn/ 国债总财富1至3年序列",
+      "rating_data": "按景恒合同与实际持仓核中小盘、行业分散、仓位调整和债券分项的执行",
+      "market_source": "中证指数 https://www.csindex.com.cn/；巨潮资讯 https://www.cninfo.com.cn/；中债收益率与指数 https://yield.chinabond.com.cn/；大成基金原报告",
+      "cycles": {
+        "T1": "实际重仓及中证1000收盘、成交与涨跌家数，同时确认短期国债行情",
+        "T5_V1": "核小盘与组合主要行业多日成交变化、资金风格和近期成分公告",
+        "T20_V1": "重仓财报与组合仓位变化，检验小盘盈利和短债部分能否支撑",
+        "M6_V1": "中小市值盈利与估值、组合风格漂移和一年至三年国债利率情景"
+      }
+    }
   },
   "006730": {
     "template": "domestic",
+    "retired_market_references": {
+      "601059.SH": {
+        "effective_date": "2026-10-19",
+        "source": "https://www.sse.com.cn/disclosure/announcement/listing/stock/c/c_20261012_10834561.shtml"
+      }
+    },
     "target_funds": [],
     "market_references": {
       "000300.SH": "https://api.tushare.pro",
@@ -86,7 +367,18 @@
     "valuation_clause": "本基金的估值日为本基金相关的证券交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。",
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "中证指数 https://www.csindex.com.cn/ 中证500（000905）；合同一年期人民币定期存款税后利率",
+      "rating_data": "中证500同日成分权重、基金实际权重、超额收益和跟踪偏离，保留退市换股凭证",
+      "market_source": "中证指数 https://www.csindex.com.cn/；巨潮资讯 https://www.cninfo.com.cn/；上交所 https://www.sse.com.cn/；深交所 https://www.szse.cn/；万家基金",
+      "cycles": {
+        "T1": "中证500行情、成分涨跌广度和实际重仓、停复牌或换股公告",
+        "T5_V1": "中盘相对大盘走势、成交和主动偏离持仓的多日贡献",
+        "T20_V1": "指数定期调样、流动性和组合主要增强仓位的财报、超额来源",
+        "M6_V1": "增强策略多期超额与回撤、风格和交易成本、成分盈利持续性"
+      }
+    }
   },
   "007045": {
     "template": "domestic",
@@ -100,7 +392,18 @@
     "valuation_clause": null,
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "中证指数 https://www.csindex.com.cn/ 沪深300（000300）；合同同期银行活期税后利率",
+      "rating_data": "沪深300成分和实际持仓同日权重、增强仓位及净超额，核费用与调样前后跟踪差",
+      "market_source": "中证指数 https://www.csindex.com.cn/；上交所 https://www.sse.com.cn/；深交所 https://www.szse.cn/；巨潮资讯 https://www.cninfo.com.cn/；博道基金",
+      "cycles": {
+        "T1": "沪深300、前列成分与增强重仓的同日行情和新增公告",
+        "T5_V1": "大盘成分涨跌广度、实际偏配和资金承接，核成交及风格切换",
+        "T20_V1": "沪深300调样、权重股财报和组合主动偏离的持续性",
+        "M6_V1": "跟踪误差、长期超额来源、组合交易成本与大盘盈利估值情景"
+      }
+    }
   },
   "007832": {
     "template": "domestic",
@@ -114,10 +417,29 @@
     "valuation_clause": "本基金的估值日为本基金相关的证券交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。",
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "中证指数 https://www.csindex.com.cn/ 中证500（000905）；合同活期存款利率",
+      "rating_data": "博道伍佰智航是主动股票产品，核实股票仓位和量化选股、换手、主动权重及相对收益",
+      "market_source": "中证指数 https://www.csindex.com.cn/；巨潮资讯 https://www.cninfo.com.cn/；博道基金",
+      "cycles": {
+        "T1": "实际量化持仓及中证500行情，查异常成交和主要权重公告",
+        "T5_V1": "中盘因子、行业与持仓有效参与程度，核风格反转和交易拥挤",
+        "T20_V1": "量化选股的主要行业权重、财报变化和交易成本依据",
+        "M6_V1": "主动策略在不同风格期的超额、回撤、持仓流动性和规模影响"
+      }
+    }
   },
   "008164": {
     "template": "domestic",
+    "data_requirements": [
+      {
+        "item": "2026-06-30目标指数实际成分名单",
+        "use": "评分",
+        "source": "向标普指数 https://www.spglobal.com/spdji/en/indices/dividends-factors/sp-china-a-share-largecap-low-volatility-high-dividend-50-index/ 或授权渠道申请对应历史成分及权重，和南方 008164、515450 的 2026 年中报对齐",
+        "required_date": "2026-06-30"
+      }
+    ],
     "target_funds": [
       "515450"
     ],
@@ -131,7 +453,18 @@
     "valuation_clause": null,
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "标普中国A股大盘红利低波50 https://www.spglobal.com/spdji/en/indices/dividends-factors/sp-china-a-share-largecap-low-volatility-high-dividend-50-index/ ，按合同取序列及活期税后利率",
+      "rating_data": "515450报告与对应时点标普历史成分及权重配对，核实际分红、股息率、低波动约束与跟踪",
+      "market_source": "标普指数官方页及调样公告；上交所 https://www.sse.com.cn/ 515450；巨潮资讯 https://www.cninfo.com.cn/；中国人民银行 https://www.pbc.gov.cn/",
+      "cycles": {
+        "T1": "515450、指数和已披露重仓日行情，核派息除权及防御行业表现",
+        "T5_V1": "高股息主行业多日相对强弱、ETF份额与折溢价，观察轮动",
+        "T20_V1": "分红实施、除权日、成分调整和银行、能源等高权重行业公告",
+        "M6_V1": "实际股息贡献、分红可持续性、低波动暴露和利率变化下的估值敏感性"
+      }
+    }
   },
   "008603": {
     "template": "domestic",
@@ -145,10 +478,36 @@
     "valuation_clause": "本基金的估值日为本基金相关的证券/期货交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。",
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "中证指数 https://www.csindex.com.cn/ 中证新兴产业、中证全债；恒生指数公司 https://www.hsi.com.hk/ 恒生指数相应日期和基金合同的合成口径",
+      "rating_data": "方正富邦新兴成长实际A股、港股及债券比例和行业集中度，核三部分基准及策略执行",
+      "market_source": "中证指数 https://www.csindex.com.cn/；巨潮资讯 https://www.cninfo.com.cn/；港交所披露易 https://www.hkexnews.hk/；中债收益率与指数 https://yield.chinabond.com.cn/；方正富邦基金",
+      "cycles": {
+        "T1": "按真实股票、港股和债券敞口核行情及公告，境内与港股日期分别对齐",
+        "T5_V1": "A股新兴产业和已披露港股重仓走势是否一致，债券部分看利率和资金变化",
+        "T20_V1": "重仓成长业务财报和兑现节点，核组合行业权重及股债敞口改变",
+        "M6_V1": "成长股盈利、回款和估值，港股汇率及债券利率变化下的组合情景"
+      }
+    }
   },
   "008764": {
     "template": "overseas",
+    "data_requirements": [
+      {
+        "item": "2026-10月末评分窗口的实际估值日、本C份额净值和适用比较序列",
+        "use": "评分",
+        "source": "天弘 008764 净值历史 https://fundf10.eastmoney.com/jjjz_008764.html 与天弘基金 https://www.thfund.com.cn/ 或托管人核对；越南估值假日查 https://vsdc.vn/en ，比较组以当期正式评分输入为入口",
+        "required_date": "2026-10-31"
+      },
+      {
+        "item": "2026-11-24越南新增休市和本份额暂停申赎，11月25日恢复",
+        "use": "预测及建议",
+        "source": "天弘基金公告 https://fund.eastmoney.com/gonggao/008764,AN202611201831877278.html 和越南证券登记结算公司 https://vsdc.vn/en/ad/202680",
+        "base_fact_prefix": "verified_vietnam_cultural_day_",
+        "evidence_date": "target_nav_date"
+      }
+    ],
     "target_funds": [],
     "market_references": {
       "VN30": "https://api.dnse.com.vn/chart-api/v2/ohlcs/index?resolution=1D&symbol=VN30&from=1794502800&to=1794848399"
@@ -158,10 +517,24 @@
     "valuation_clause": "（一）估值日\n\n  本基金的估值日为本基金相关的证券交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。",
     "fx_clause": "11、估值中的汇率选取原则：估值计算中涉及中国人民银行或其授权机构公布人民币汇率中间价的货币，其对人民币汇率以估值日中国人民银行或其授权机构公布的人民币汇率中间价为准；涉及其他货币对人民币的汇率，采用彭博信息(Bloomberg)提供的估值日伦敦时间 16:00 各种货币与美元折算率并采用套算的方法进行折算。\n\n  若无法取得上述汇率价格信息时，以基金托管人或境外托管人所提供的合理公开外汇市场交易价格为准。",
     "share_currency": "CNY",
-    "share_currency_evidence": "https://fund.eastmoney.com/gonggao/008764,AN202610211830735173.html"
+    "share_currency_evidence": "https://fund.eastmoney.com/gonggao/008764,AN202610211830735173.html",
+    "supplement_focus": {
+      "benchmark_source": "越南胡志明证券交易所 VN30 https://www.hsx.vn/ ；按合同用伦敦16时的越南盾折算源及人民银行人民币折算；中国货币网汇率中间价 https://www.chinamoney.com.cn/chinese/bkccpr/index.html?tab=2",
+      "rating_data": "VN30原始点位和合同折算率逐估值日对齐，核本C分红、持仓和适当比较组",
+      "market_source": "胡志明证券交易所 https://www.hsx.vn/；越南证券存管结算公司 https://vsdc.vn/en；中国货币网汇率中间价 https://www.chinamoney.com.cn/chinese/bkccpr/index.html?tab=2；天弘基金和托管人",
+      "cycles": {
+        "T1": "越南实际开市日VN30与重仓、境内估值日和同一合同折算率，核临时停市和申赎公告",
+        "T5_V1": "越南银行、消费等披露重仓结构和近几日量价，核外资与越南盾波动",
+        "T20_V1": "越南休市、政策、资金流及指数更换成分日期，分开核境内外估值日",
+        "M6_V1": "越南信贷、汇率、估值、指数集中度与本C人民币回报情景"
+      },
+      "scope_note": "越南盾折算和境内人民币定价各自核合同。临时参考汇率按该次授权使用。"
+    }
   },
   "008888": {
     "template": "domestic",
+    "nav_fallback": "在华夏基金008888历史净值页复核本C份额同日正式净值 https://www.chinaamc.com/fund/008888/lishijingzhi_jg.shtml",
+    "report_source": "华夏基金008888公告 https://www.chinaamc.com/product/publishGgList.do?fundcode=008888",
     "target_funds": [
       "159995"
     ],
@@ -175,10 +548,29 @@
     "valuation_clause": null,
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "国证半导体芯片（980017）国证指数 https://www.cnindex.com.cn/；合同活期税后利率",
+      "rating_data": "159995及国证芯片同日成分权重、联接仓位和主要股的真实暴露，核基金与目标指数跟踪差",
+      "market_source": "国证指数 https://www.cnindex.com.cn/ 980017；深交所 https://www.szse.cn/ 159995；巨潮资讯 https://www.cninfo.com.cn/ 芯片成分发行人",
+      "cycles": {
+        "T1": "国证芯片收盘、159995及主要设备、代工、设计成分同日涨跌和成交",
+        "T5_V1": "设备、代工、设计、存储多日广度与承接，查重要持仓催化及反证",
+        "T20_V1": "主要持仓订单、资本开支、库存与回款，核已披露财报的验证节点",
+        "M6_V1": "芯片景气、量产、毛利与现金流，按仓位核代工、设备、存储及估值情景"
+      }
+    }
   },
   "008960": {
     "template": "domestic",
+    "data_requirements": [
+      {
+        "item": "801740.SI在2026-10-15的原始收盘点位",
+        "use": "评分",
+        "source": "向申万指数发布机构或授权终端按 801740.SI 与 2026-10-15 取原始日收盘。可到 Tushare 文档 https://tushare.pro/document/1?doc_id=108 核对申万日线权限和适用接口，仍缺行则走授权导出",
+        "required_date": "2026-10-15"
+      }
+    ],
     "target_funds": [],
     "market_references": {
       "000300.SH": "https://api.tushare.pro",
@@ -189,7 +581,18 @@
     "valuation_clause": null,
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "申万国防军工 801740.SI 的指数发布方或授权日线；中债收益率与指数 https://yield.chinabond.com.cn/ 中债综合财富1年以下指数",
+      "rating_data": "核军工指数点位缺日及实际股票、债券敞口，比较基金量化选股、集中度和同期基准",
+      "market_source": "申万指数发布方；巨潮资讯 https://www.cninfo.com.cn/；中债收益率与指数 https://yield.chinabond.com.cn/；长信基金报告",
+      "cycles": {
+        "T1": "军工行业与实际重仓同日行情和订单、停牌公告，核短债部分",
+        "T5_V1": "航空航天、船舶、军工电子不同子行业的参与范围与公告",
+        "T20_V1": "可核招标、订单、交付与回款进度，核债券资产和行业集中度变化",
+        "M6_V1": "军工采购和兑现节奏、重仓经营现金流、短债收益与估值情景"
+      }
+    }
   },
   "010710": {
     "template": "domestic",
@@ -203,7 +606,18 @@
     "valuation_clause": "本基金的估值日为本基金相关的证券交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。",
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "中证指数 https://www.csindex.com.cn/ 中证医药卫生；恒生指数公司 https://www.hsi.com.hk/ 恒生医疗保健；中债收益率与指数 https://yield.chinabond.com.cn/ 中债总全价总值",
+      "rating_data": "安信医药实际A股、港股和债券比例、持仓集中度、资金与受限资产及分市场合成基准",
+      "market_source": "巨潮资讯 https://www.cninfo.com.cn/；港交所披露易 https://www.hkexnews.hk/；国家药监局 https://www.nmpa.gov.cn/；国家医保局 https://www.nhsa.gov.cn/",
+      "cycles": {
+        "T1": "医药持仓实际A港行情，查批件、临床、招采和停牌公告",
+        "T5_V1": "境内外医药分项多日轮动、主要重仓临床或审批窗口及资金承接",
+        "T20_V1": "集采、医保与产品阶段里程碑，核药企收入兑现、研发费用和回款",
+        "M6_V1": "管线商业化、支付变化、研发效率及A港估值、汇率和债券情景"
+      }
+    }
   },
   "011036": {
     "template": "domestic",
@@ -220,7 +634,18 @@
     "valuation_clause": null,
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "中证稀土产业 930598，中证指数 https://www.csindex.com.cn/；合同活期税后利率",
+      "rating_data": "516150定报穿透、稀土成分、权重和跟踪误差，区分采选冶炼和磁材应用",
+      "market_source": "中证指数 https://www.csindex.com.cn/；上交所 https://www.sse.com.cn/ 516150；巨潮资讯 https://www.cninfo.com.cn/；工信部 https://www.miit.gov.cn/；商务部 https://www.mofcom.gov.cn/",
+      "cycles": {
+        "T1": "930598、516150、重仓和相关价格的同日行情，查供应或出口新公告",
+        "T5_V1": "稀土上游和下游磁材多日涨跌参与、成交与不同品种报价",
+        "T20_V1": "开采冶炼供应、进出口政策、订单和氧化物价格传导至主要持仓",
+        "M6_V1": "稀土供给约束、终端磁材需求、价格毛利弹性和行业资本开支"
+      }
+    }
   },
   "011066": {
     "template": "domestic",
@@ -234,7 +659,18 @@
     "valuation_clause": "本基金的估值日为本基金相关的证券交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。",
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "中证指数 https://www.csindex.com.cn/ 中证800；恒生指数公司 https://www.hsi.com.hk/ 恒生指数；中证指数 https://www.csindex.com.cn/ 中证综合债指数",
+      "rating_data": "大成高鑫实际A股、港股和债券权重、选股集中度及三组基准在相同估值期的合成",
+      "market_source": "中证指数 https://www.csindex.com.cn/；巨潮资讯 https://www.cninfo.com.cn/；港交所披露易 https://www.hkexnews.hk/；中债收益率与指数 https://yield.chinabond.com.cn/；大成基金报告",
+      "cycles": {
+        "T1": "实际A股和港股重仓行情、重点盈利与交易公告及债券市场背景",
+        "T5_V1": "组合主要行业多日走势、港股相对变化和个股现金回报或新增催化",
+        "T20_V1": "主要持仓财报、资本回报、估值和经理披露的仓位变化",
+        "M6_V1": "实际重仓盈利、现金流和分红延续性，核A港市场与债券的风险情景"
+      }
+    }
   },
   "011103": {
     "template": "domestic",
@@ -248,7 +684,18 @@
     "valuation_clause": null,
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "中证光伏产业 931151，中证指数 https://www.csindex.com.cn/；合同活期税后利率",
+      "rating_data": "光伏指数成分和实际权重、跟踪误差、上下游集中度及受限流动性",
+      "market_source": "中证指数 https://www.csindex.com.cn/；巨潮资讯 https://www.cninfo.com.cn/；国家能源局 https://www.nea.gov.cn/；国家统计局 https://www.stats.gov.cn/sj/",
+      "cycles": {
+        "T1": "光伏指数和重仓量价，分别核硅料、组件、逆变器的公告与成交",
+        "T5_V1": "近几日光伏产业链价格与成交、出口或招标变化和反向板块",
+        "T20_V1": "装机、组件投标价、排产库存和已披露重点公司业绩节点",
+        "M6_V1": "光伏供需缺口、产能出清、公司成本现金流及政策和估值情景"
+      }
+    }
   },
   "013180": {
     "template": "domestic",
@@ -265,7 +712,18 @@
     "valuation_clause": null,
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "国证新能源车电池 980032，国证指数 https://www.cnindex.com.cn/；合同活期利率",
+      "rating_data": "159755与联接仓位、实际持仓及同日指数样本、跟踪偏离，核配套申赎和成交承接",
+      "market_source": "国证指数 https://www.cnindex.com.cn/；深交所 https://www.szse.cn/ 159755；巨潮资讯 https://www.cninfo.com.cn/；工信部 https://www.miit.gov.cn/",
+      "cycles": {
+        "T1": "980032、159755与主要电池和材料公司同日量价，核最新公告",
+        "T5_V1": "动力电池股相对材料股的多日广度，观察锂价、销量与资金承接",
+        "T20_V1": "电池装机、车企销售、材料库存和主要公司的订单、排产验证",
+        "M6_V1": "电池技术和竞争、上游成本、海外布局、公司现金和投资情景"
+      }
+    }
   },
   "013275": {
     "template": "domestic",
@@ -279,7 +737,18 @@
     "valuation_clause": null,
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "中证指数 https://www.csindex.com.cn/ 中证煤炭指数；合同活期税后利率",
+      "rating_data": "煤炭指数及实际持仓跟踪，核LOF场内交易与本C份额申赎、费率及分红身份",
+      "market_source": "中证指数 https://www.csindex.com.cn/；巨潮资讯 https://www.cninfo.com.cn/；国家能源局 https://www.nea.gov.cn/；国家统计局 https://www.stats.gov.cn/sj/",
+      "cycles": {
+        "T1": "煤炭指数、主要生产企业收盘，核动力煤、焦煤和主要重仓公告",
+        "T5_V1": "不同煤种价格、成交和电厂及港口库存多日变化",
+        "T20_V1": "产量、进口、运费及电力钢铁需求与长协和现货价差",
+        "M6_V1": "年度煤炭供需、政策、电力及钢铁需求与主要公司利润分红情景"
+      }
+    }
   },
   "013330": {
     "template": "domestic",
@@ -293,7 +762,18 @@
     "valuation_clause": null,
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "中证指数 https://www.csindex.com.cn/ 中证银行指数；合同活期税后利率",
+      "rating_data": "中证银行实际成分及权重、银行集中、跟踪误差和分红除息",
+      "market_source": "中证指数 https://www.csindex.com.cn/；巨潮资讯 https://www.cninfo.com.cn/；中国人民银行 https://www.pbc.gov.cn/；国家金融监督管理总局 https://www.nfra.gov.cn/",
+      "cycles": {
+        "T1": "银行指数及大行、股份行和区域银行涨跌，核除息和政策公告",
+        "T5_V1": "各银行组多日参与度、国债收益率和资金价格以及分红预期变化",
+        "T20_V1": "信贷、存贷款利率、银行季报和净利息收入、资产质量变化",
+        "M6_V1": "息差、资本充足率、信用成本、分红和权益估值情景"
+      }
+    }
   },
   "013472": {
     "template": "domestic",
@@ -310,10 +790,40 @@
     "valuation_clause": null,
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "中证全指农牧渔 930910，中证指数 https://www.csindex.com.cn/；合同活期税后利率",
+      "rating_data": "核159275真实仓位、指数样本及联接穿透，按实际权重区分养殖、饲料和种植",
+      "market_source": "中证指数 https://www.csindex.com.cn/；深交所 https://www.szse.cn/ 159275；巨潮资讯 https://www.cninfo.com.cn/；农业农村部 https://www.moa.gov.cn/",
+      "cycles": {
+        "T1": "930910、159275和养殖饲料种植的收盘，核猪价及养殖公司公告",
+        "T5_V1": "猪、饲料及种业多日分化、成交和猪粮价变化",
+        "T20_V1": "能繁母猪存栏、出栏、饲料成本与重点公司经营数据日期",
+        "M6_V1": "养殖周期、供给出清、成本和种业政策，核重仓现金及盈利弹性"
+      }
+    }
   },
   "014978": {
     "template": "overseas",
+    "data_requirements": [
+      {
+        "item": "2026-10-08至2026-10-30的17个实际估值日的本C份额官网收益曲线，供收益、风险、目标执行和稳定性复核",
+        "use": "评分",
+        "source": "华安基金收益走势 https://www.huaan.com.cn/fund/FundPerformance/fundPerformanceChart.do ，以华安发布的014978人民币C份额原始序列核对"
+      }
+    ],
+    "retired_market_references": {
+      "EA.US": {
+        "effective_date": "2026-08-05",
+        "description": "2026-08-04为最后交易日，已核实私有化及现金对价",
+        "source": "https://www.nasdaqtrader.com/TraderNews.aspx?id=ECA2026-545"
+      },
+      "WBD.US": {
+        "effective_date": "2026-10-06",
+        "description": "2026-10-05为最后交易日，已核实并购完成及停牌",
+        "source": "https://www.nasdaqtrader.com/TraderNews.aspx?id=ECA2026-710"
+      }
+    },
     "target_funds": [
       "159632"
     ],
@@ -395,7 +905,18 @@
       ],
       "valuation_day_clause": "本基金的估值日为本基金相关的证券、期货交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。"
     },
-    "share_currency": "CNY"
+    "share_currency": "CNY",
+    "supplement_focus": {
+      "benchmark_source": "纳斯达克 NDX https://indexes.nasdaqomx.com/Index/Overview/NDX；中国货币网汇率中间价 https://www.chinamoney.com.cn/chinese/bkccpr/index.html?tab=2；合同活期税后利率，另取华安159632持仓和官方净值",
+      "rating_data": "纳指100人民币基准与华安本C估值日逐日对齐，区分159632盘中交易、正式净值和目标底层资产",
+      "market_source": "纳斯达克 NDX https://indexes.nasdaqomx.com/Index/Overview/NDX；美国证券交易委员会公司公告 https://www.sec.gov/edgar/search/；中国货币网汇率中间价 https://www.chinamoney.com.cn/chinese/bkccpr/index.html?tab=2；深交所 https://www.szse.cn/ 159632；华安基金",
+      "cycles": {
+        "T1": "美国最后完整或已核提前收市的NDX、实际底层证券和人民币中间价，159632场内折溢价单列",
+        "T5_V1": "纳指权重股多日涨跌、成交和人民币变化，核美国财报及短期日历",
+        "T20_V1": "权重股财报、科技资本开支、利率和纳指调样的窗口影响",
+        "M6_V1": "纳指盈利、AI投入回报、实际利率和美元人民币情景，核联接跟踪"
+      }
+    }
   },
   "015596": {
     "template": "domestic",
@@ -409,7 +930,18 @@
     "valuation_clause": null,
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "国证有色金属行业 399395，国证指数 https://www.cnindex.com.cn/；合同活期税后利率",
+      "rating_data": "指数历史成分与实持比对、铜铝和贵金属等分项权重及跟踪误差",
+      "market_source": "国证指数 https://www.cnindex.com.cn/；上海期货交易所 https://www.shfe.com.cn/；巨潮资讯 https://www.cninfo.com.cn/；国家统计局 https://www.stats.gov.cn/sj/",
+      "cycles": {
+        "T1": "399395和披露重仓行情，分铜铝、黄金及能源金属核现货或期货品种",
+        "T5_V1": "主要金属合约、库存、国内外价格和成分多日成交，核价格口径",
+        "T20_V1": "金属库存、冶炼供给、制造需求和重点矿企公告的验证日期",
+        "M6_V1": "全球工业需求、供给资本开支、能源成本与公司盈利估值情景"
+      }
+    }
   },
   "016008": {
     "template": "domestic",
@@ -426,10 +958,34 @@
     "valuation_clause": null,
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "中证消费电子主题 931494，中证指数 https://www.csindex.com.cn/；合同活期税后利率",
+      "rating_data": "159779、联接基金与931494同日成分、实际权重、跟踪偏离和集中度",
+      "market_source": "中证指数 https://www.csindex.com.cn/；深交所 https://www.szse.cn/ 159779；巨潮资讯 https://www.cninfo.com.cn/；中国信通院 https://www.caict.ac.cn/；招商基金",
+      "cycles": {
+        "T1": "931494、159779及终端、元器件和代工重仓同日收盘，与全市场对照",
+        "T5_V1": "消费电子内部多日参与度、ETF份额及重要持仓公告",
+        "T20_V1": "手机和消费电子终端出货、供应链订单以及立讯等重仓的利润与回款",
+        "M6_V1": "终端更新、元器件需求、行业库存、重点企业利润与经营现金流情景"
+      }
+    }
   },
   "017437": {
     "template": "overseas",
+    "report_source": "华宝基金本C份额公告 https://www.fsfund.com/fund/017437/fundDetail.shtml ，三季报原件 https://dataclouds.cninfo.com.cn/sjother2/fund/2026/20261027/659490ffa0e4a9fa5cc6074cde988da4.pdf",
+    "data_requirements": [
+      {
+        "item": "本C份额实际估值日净值、分红及同期合同基准，供收益、风险、目标执行和稳定性评分",
+        "use": "评分",
+        "source": "华宝基金本份额净值及分红公告 https://www.fsfund.com/fund/017437/fundDetail.shtml 、纳斯达克100指数原始序列和本合同适用汇率"
+      },
+      {
+        "item": "管理人与策略执行、完整持仓及成交和申赎资料，供管理、持仓结构和规模流动性评分",
+        "use": "评分",
+        "source": "华宝 017437 产品页 https://www.fsfund.com/fund/017437/fundDetail.shtml 及公告目录 https://fundf10.eastmoney.com/jjgg_017437.html 查招募书、经理公告与年报中报；持仓成交、受限资产及申赎缺件向华宝基金或合同列明托管人取证"
+      }
+    ],
     "target_funds": [],
     "market_references": {
       "QQQ.US": "https://hq.sinajs.cn/list=gb_qqq"
@@ -509,7 +1065,19 @@
       "valuation_day_clause": "本基金的估值日为本基金相关的证券交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。"
     },
     "share_currency": "CNY",
-    "share_currency_evidence": "https://fund.eastmoney.com/gonggao/017437,AN202512091796782393.html"
+    "share_currency_evidence": "https://fund.eastmoney.com/gonggao/017437,AN202512091796782393.html",
+    "supplement_focus": {
+      "benchmark_source": "纳斯达克 NDX https://indexes.nasdaqomx.com/Index/Overview/NDX；中国货币网汇率中间价 https://www.chinamoney.com.cn/chinese/bkccpr/index.html?tab=2；合同活期税后利率",
+      "rating_data": "华宝实际精选股和纳指100权重同日对照，区分主动偏离和人民币调整后的超额",
+      "market_source": "纳斯达克 NDX https://indexes.nasdaqomx.com/Index/Overview/NDX；美国证券交易委员会公司公告 https://www.sec.gov/edgar/search/；中国货币网汇率中间价 https://www.chinamoney.com.cn/chinese/bkccpr/index.html?tab=2；华宝基金公告；QQQ为同市场对照",
+      "cycles": {
+        "T1": "美国实际收市的纳指100及华宝已披露重仓、人民币折算和次日估值映射",
+        "T5_V1": "重仓相对纳指的多日收益、广度和财报或政策催化",
+        "T20_V1": "美股大型科技财报、重仓主动偏离、美元及利率关键日期",
+        "M6_V1": "主动选股超额、估值、科技盈利与美元人民币组合情景"
+      },
+      "scope_note": "QQQ 是行情对照。评分使用本份额合同指定且经人民币调整的纳斯达克100。"
+    }
   },
   "018590": {
     "template": "domestic",
@@ -522,10 +1090,44 @@
     "valuation_clause": null,
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "中证指数 https://www.csindex.com.cn/ 中证800与中证全债按基金合同各50%的同期序列",
+      "rating_data": "银华体育文化实际股债现金、文化传媒及相关重仓集中度、可变现性和持有人申赎",
+      "market_source": "巨潮资讯 https://www.cninfo.com.cn/；中证指数 https://www.csindex.com.cn/；中债收益率与指数 https://yield.chinabond.com.cn/；国家电影局 https://www.chinafilm.gov.cn/；银华基金",
+      "cycles": {
+        "T1": "按实际重仓核文化传媒、体育等股价和债券行情，查经营公告",
+        "T5_V1": "重仓行业多日量价，观察内容发行、体育赛事等公开日期及反证",
+        "T20_V1": "重点内容上线、票房或经营披露、实际重仓回款和股债调整依据",
+        "M6_V1": "内容和体育消费趋势、重点公司收入现金流、债券利率与估值情景"
+      }
+    }
   },
   "018853": {
     "template": "overseas",
+    "data_requirements": [
+      {
+        "item": "2023-10-31至2026-10-30本C份额实际估值日、人民币换算和完整合同基准对齐",
+        "use": "评分 · 风险控制、目标执行",
+        "source": "博时基金本份额正式净值与估值条款、境外交易所日历、合同认可的汇率及标普原始指数 https://www.spglobal.com/spdji/zh/indices/equity/sp-oil-gas-exploration-production-select-industry-index/"
+      },
+      {
+        "item": "同一披露日的实际持仓及目标指数成员权重",
+        "use": "评分 · 持仓结构",
+        "source": "博时 018853 年报或中报目录 https://fundf10.eastmoney.com/jjgg_018853.html ；相同日期的指数成分与权重向标普 https://www.spglobal.com/spdji/en/indices/equity/sp-oil-gas-exploration-production-select-industry-index/ 或授权商导出"
+      },
+      {
+        "item": "成交承接、受限资产、可供申赎支付的金额及持有人相关披露",
+        "use": "评分 · 规模与流动性",
+        "source": "博时 018853 定报与申赎公告 https://fundf10.eastmoney.com/jjgg_018853.html 。未披露的同日成交、受限资产、支付能力与集中持有人明细向博时基金或合同列明托管人取证"
+      },
+      {
+        "item": "2026-09-05基金合同三周年的资产净值及存续核验",
+        "use": "评分",
+        "source": "先查博时 018853 合同及存续公告 https://fund.eastmoney.com/gonggao/018853,AN202609301830018910.html ，向博时基金或合同列明托管人核取该日全基金人民币净资产证明",
+        "required_date": "2026-09-05"
+      }
+    ],
     "target_funds": [],
     "market_references": {
       "XOP.US": "https://hq.sinajs.cn/list=gb_xop"
@@ -604,10 +1206,36 @@
       ],
       "valuation_day_clause": "本基金的估值日为本基金相关的证券、期货交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。"
     },
-    "share_currency": "CNY"
+    "share_currency": "CNY",
+    "supplement_focus": {
+      "benchmark_source": "标普油气勘探及生产精选行业 https://www.spglobal.com/spdji/en/indices/equity/sp-oil-gas-exploration-production-select-industry-index/ 合同指定版本；中国货币网汇率中间价 https://www.chinamoney.com.cn/chinese/bkccpr/index.html?tab=2",
+      "rating_data": "标普历史成分权重与博时实际持仓同日配对，按人民币实估值日核跟踪、费率与流动性",
+      "market_source": "标普指数；美国证券交易委员会公司公告 https://www.sec.gov/edgar/search/；美国能源信息署 https://www.eia.gov/petroleum/supply/weekly/；中国货币网汇率中间价 https://www.chinamoney.com.cn/chinese/bkccpr/index.html?tab=2；博时基金",
+      "cycles": {
+        "T1": "美股油气指数、实际重仓和XOP同日收盘，WTI期货和人民币汇率各按自己的时点",
+        "T5_V1": "原油库存、期货期限价差和油气股票多日广度，核产油方消息",
+        "T20_V1": "库存、产量、炼化和重点公司财报时间，核价格向油气企业传导",
+        "M6_V1": "原油供需和不同油价下的产量、套保、资本开支与股东回报情景"
+      },
+      "scope_note": "XOP 和原油价格用于分析。评分使用合同指定标普指数版本和估值汇率。"
+    }
   },
   "019449": {
     "template": "overseas",
+    "data_requirements": [
+      {
+        "item": "境内开市而日本休市时，核对本份额是否估值、采用哪日日本收盘及哪日人民币兑日元汇率；本次对应2026-11-23",
+        "use": "预测",
+        "source": "摩根基金本份额招募说明书和实际估值披露、日本交易所休市表 https://www.jpx.co.jp/english/corporate/about-jpx/calendar/ 、中国外汇交易中心人民币中间价"
+      },
+      {
+        "item": "6861.JP股价的1拆5除权口径",
+        "use": "预测",
+        "source": "日本交易所 https://www.jpx.co.jp/news/2020/20261105-01.html 和基恩士 https://www.keyence.co.jp/pdf/PressRelease_20261105.pdf",
+        "base_fact_prefix": "verified_keyence_split_",
+        "max_source_age_days": 30
+      }
+    ],
     "target_funds": [],
     "market_references": {
       "TOPIX": "https://finance.yahoo.co.jp/quote/998405.T/history"
@@ -617,11 +1245,108 @@
     "valuation_clause": "本基金的估值日为本基金相关的证券/期货交易场所的交易日以及国家法律法规规定需\n要对外披露基金净值的非交易日。",
     "fx_clause": "采用当日中国人民银行或其授权机构公布的人民币汇率中间价； 中国人民银行或其授权\n机构未公布人民币汇率的币种， 采用指定数据服务商提供的估值日各种货币对美元折算率并\n采用套算的方法进行折算。",
     "share_currency": "CNY",
-    "share_currency_evidence": "https://fund.eastmoney.com/gonggao/019449,AN202509301753246555.html"
+    "share_currency_evidence": "https://fund.eastmoney.com/gonggao/019449,AN202509301753246555.html",
+    "supplement_focus": {
+      "benchmark_source": "日本交易所 TOPIX https://www.jpx.co.jp/english/markets/indices/topix/；中国货币网汇率中间价 https://www.chinamoney.com.cn/chinese/bkccpr/index.html?tab=2；合同活期税后利率",
+      "rating_data": "摩根日本精选实际持仓与TOPIX对照，核日本收市、拆分复权和合同约定汇率规则",
+      "market_source": "日本交易所 https://www.jpx.co.jp/english/；日本银行 https://www.boj.or.jp/en/；中国货币网汇率中间价 https://www.chinamoney.com.cn/chinese/bkccpr/index.html?tab=2；摩根基金",
+      "cycles": {
+        "T1": "日本实际开市日TOPIX和重仓收盘，日本休市、拆股与人民币兑日元单独按合同核",
+        "T5_V1": "日本重点持仓多日参与度和日元变化，核日本央行、财报与本份额开放日",
+        "T20_V1": "重仓财报、经济及日本央行的事件日期，分开核本币股价和汇率",
+        "M6_V1": "日本持仓盈利、治理和回购，日元、货币政策与估值的组合情景"
+      }
+    }
   },
   "021740": {
     "template": "domestic",
+    "report_source": "前海开源基金本C份额三季报 https://www.qhkyfund.com/upload/20261027/20261027179306342042181922.pdf",
+    "nav_fallback": "核对前海开源基金021740产品页同日正式净值 https://www.qhkyfund.com/osoa/qhkyfund/fund/info/021740.html",
+    "data_requirements": [
+      {
+        "item": "本期份额净值、分红和同期合同基准，计算收益能力、风险控制、目标执行和业绩稳定性",
+        "use": "评分",
+        "source": "前海开源 021740 产品页 https://www.qhkyfund.com/osoa/qhkyfund/fund/info/021740.html 和基金分红公告、上海黄金交易所 Au99.99 https://www.sge.com.cn/sjzx/quotation_daily_new 、合同适用银行活期利率及评分留存原件",
+        "check_key": "rating_performance"
+      },
+      {
+        "item": "基金经理与跟踪策略、联接仓位和目标基金、基金规模与申赎、管理托管及C类销售服务费，计算其余四项评分",
+        "use": "评分",
+        "source": "前海开源 021740 产品页 https://www.qhkyfund.com/osoa/qhkyfund/fund/info/021740.html 与目标 159812 产品页 https://www.qhkyfund.com/osoa/qhkyfund/fund/info/159812.html ，对照合同、招募书、经理公告及已留存评分原件",
+        "check_key": "rating_product"
+      },
+      {
+        "item": "与基准净值日同日的Au99.99正式收盘和对照涨跌",
+        "use": "四周期预测",
+        "source": "上海黄金交易所每日交易行情 https://www.sge.com.cn/sjzx/quotation_daily_new ，逐日核对日期及现货合约",
+        "base_fact_prefix": "current_gold"
+      },
+      {
+        "item": "新旧合同基准比例和11月30日正式生效日，供评分及二十日、半年使用",
+        "use": "四周期预测",
+        "source": "前海开源基金021740三季报及调整业绩比较基准公告 https://fund.eastmoney.com/gonggao/021740,AN202610301831233913.html",
+        "base_fact_prefix": "event_AN202610301831233913",
+        "max_source_age_days": 45
+      },
+      {
+        "item": "一日与五日所需的黄金现货、目标ETF收盘时点及穿透持仓",
+        "use": "四周期预测",
+        "source": "上海黄金交易所、深交所上市的159812收盘行情及管理人定报 https://qhkyfund.com/upload/20261027/20261027179306342539118417.pdf",
+        "check_key": "gold_exposure_and_close"
+      },
+      {
+        "item": "基准日人民币兑美元中间价，与前一交易日比较，供各周期核实汇率背景",
+        "use": "四周期预测",
+        "source": "中国外汇交易中心公布数据及国家外汇管理局历史人民币汇率中间价 https://www.safe.gov.cn/AppStructured/hlw/RMBQuery.do?COLLCC=1275801109",
+        "check_key": "gold_fx_midpoint"
+      },
+      {
+        "item": "预测时点前美国最近已公布的十年期实际利率及近几日变化，供中长期核对",
+        "use": "四周期预测",
+        "source": "美国财政部实际收益率曲线 https://home.treasury.gov/resource-center/data-chart-center/interest-rates/TextView?type=daily_treasury_real_yield_curve",
+        "check_key": "gold_real_yield_latest"
+      },
+      {
+        "item": "基准日底层ETF总份额与前一日变化，核对申赎方向",
+        "use": "四周期预测",
+        "source": "前海开源 159812 产品页 https://www.qhkyfund.com/osoa/qhkyfund/fund/info/159812.html ，按 159812.SZ 与基准日补查 Tushare fund_share https://tushare.pro/document/2?doc_id=207 和深交所披露",
+        "check_key": "gold_etf_base_shares"
+      },
+      {
+        "item": "基准日底层ETF正式单位净值，和同日场内收盘价比较折溢价",
+        "use": "四周期预测",
+        "source": "前海开源基金159812产品页 https://www.qhkyfund.com/osoa/qhkyfund/fund/info/159812.html 和深交所场内行情",
+        "check_key": "gold_etf_base_premium"
+      },
+      {
+        "item": "本期正式评分及持有诊断，包括经理、规模、同类排名、基准、回撤、费用、分红",
+        "use": "买卖建议",
+        "source": "基金雷达现行评分和持有诊断的正式报告",
+        "check_key": "advice_quality"
+      },
+      {
+        "item": "一日、五日、二十日和半年当期可用预测，按本人持有偏好匹配周期",
+        "use": "买卖建议",
+        "source": "基金雷达正式预测。先补共同资料中的本C份额当日正式净值",
+        "check_key": "advice_current_predictions"
+      },
+      {
+        "item": "实际持仓、组合占比、可用份额、待确认订单和定投安排",
+        "use": "买卖建议",
+        "source": "本人账号的我的持仓页面、订单和定投账本",
+        "check_key": "advice_ledger"
+      },
+      {
+        "item": "本人持有偏好、资金安排、用款期限、允许损失和资金复查日期",
+        "use": "买卖建议",
+        "source": "本人最近确认且当前有效的持有偏好和资金安排",
+        "check_key": "advice_funding"
+      }
+    ],
     "target_funds": [
+      "159812"
+    ],
+    "target_market_specialized": [
       "159812"
     ],
     "market_references": {
@@ -632,7 +1357,19 @@
     "valuation_clause": null,
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "上海黄金交易所 https://www.sge.com.cn/sjzx/quotation_daily_new Au99.99，合同活期税后利率；以生效公告的90/10及95/5分别计算",
+      "rating_data": null,
+      "market_source": "上海黄金交易所 https://www.sge.com.cn/sjzx/quotation_daily_new；深交所 https://www.szse.cn/ 159812；中国货币网汇率中间价 https://www.chinamoney.com.cn/chinese/bkccpr/index.html?tab=2；美国财政部 https://home.treasury.gov/resource-center/data-chart-center/interest-rates/；前海开源基金",
+      "cycles": {
+        "T1": "Au99.99、159812场内价和本C实际估值起点，核跨周前后的金价、汇率和折溢价",
+        "T5_V1": "近期人民币金价、目标ETF份额变化与折溢价，核成交参与和回撤是否持续",
+        "T20_V1": "月底基准调整前后的正式跟踪数据及实际利率、人民币和黄金供需变化",
+        "M6_V1": "黄金现货暴露、实际利率、美元人民币和黄金需求的三种情景"
+      },
+      "scope_note": "前海开源公告自2026年11月30日起将黄金比较基准权重由90%调为95%。按生效日前后分别核对。"
+    }
   },
   "160323": {
     "template": "domestic",
@@ -647,6 +1384,17 @@
     "valuation_clause": "本基金的估值日为本基金相关的证券、期货交易场所的交易日以及国家法律法规规定需要对外披露基金净值的非交易日。",
     "fx_clause": null,
     "share_currency": "CNY",
-    "share_currency_evidence": "fund_peer_classifications_v1.json"
+    "share_currency_evidence": "fund_peer_classifications_v1.json",
+    "supplement_focus": {
+      "benchmark_source": "上交所 https://www.sse.com.cn/ 上证国债（000012）；中证指数 https://www.csindex.com.cn/ 沪深300（000300），按合同权重合成",
+      "rating_data": "华夏磐泰A实际债券、权益、回购和现金比例，核合同组合、久期、信用及交易费用",
+      "market_source": "上交所 https://www.sse.com.cn/；中证指数 https://www.csindex.com.cn/；中债收益率与指数 https://yield.chinabond.com.cn/；中国货币网 https://www.chinamoney.com.cn/；巨潮资讯 https://www.cninfo.com.cn/；华夏基金",
+      "cycles": {
+        "T1": "核组合主要债券收益率、隔夜和七天资金及披露股票收盘与公告",
+        "T5_V1": "利率和信用利差多日走势、跨周资金及股票权重部分参与度",
+        "T20_V1": "持券到期发行、信用事件与股债权重变化，核月内资金和持仓公告",
+        "M6_V1": "票息、久期、信用和融资成本，结合股票盈利估值与实际仓位建情景"
+      }
+    }
   }
 }

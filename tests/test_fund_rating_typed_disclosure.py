@@ -76,6 +76,21 @@ def test_verified_partial_release_cannot_produce_total_even_with_eight_points(sa
     assert typed.replay_snapshot(bundle, dimensions, weights, root=tmp_path) is None
 
 
+@pytest.mark.parametrize(
+    "changes, complete",
+    [({}, True), ({"fund_code": "001023"}, False), ({"share_class": "C"}, False), ({"version": "OLD"}, False)],
+)
+def test_bond_index_completion_is_bound_to_the_verified_share_and_version(sample, tmp_path, changes, complete):
+    bundle, _, _, _ = sample
+    packet = bundle[typed.FIELD]
+    packet["profile"] = "BOND_INDEX"
+    scope = typed.PROFILES["BOND_INDEX"]["completion"]["scope"]
+    packet["inputs"].update({**scope, **changes})
+    for key in ("fund_code", "share_class"):
+        bundle[key] = packet["inputs"][key]
+    assert (typed.calculate(bundle, root=tmp_path)["score"] is not None) is complete
+
+
 def test_partial_release_still_rejects_frozen_points_and_live_material_events(sample, monkeypatch, tmp_path):
     bundle, _, dimensions, weights = sample
     monkeypatch.setitem(

@@ -373,3 +373,95 @@ def test_existing_non_materials_job_must_finish_then_submit_pure_batch(tmp_path)
     result = DailyPredictionRun(tmp_path, b).advance()
     assert result["status"] == "WAITING_MATERIALS" and not b.recovers
     assert b.submissions == 1 and result["preceding_jobs"][0]["job_id"] == "predecessor"
+
+
+def test_fund_checklist_pending_keeps_source_date_and_horizon_by_use(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from app.services import fund_daily_profiles as checklists
+
+    monkeypatch.setattr(checklists, "now", lambda: datetime.fromisoformat("2026-11-20T17:00:00+08:00"))
+    fund = "016008"
+    profile = {**checklists.profiles()[fund], "name": "招商消费电子联接C"}
+    root = tmp_path / "run"
+    current = {"base_nav_date": "2026-11-20", "target_nav_date": "2026-11-23",
+               "deadline_at": "2026-11-23T15:00:00+08:00"}
+    state = {"scope": [fund], "window": current, "funds": {}}
+    checklists.save_pending(root, state, records={fund: profile})
+    tasks = {row["field"]: row for row in read(root / "supplement-tasks.json")["tasks"]}
+    assert tasks["rating_return"]["required_date"] == "2026-10-31"
+    assert "doc_id=119" in tasks["NAV"]["next_source"]
+    assert "jjgg_159779.html" in tasks["prediction_target_159779"]["next_source"]
+    assert "jjgg_016008.html" in tasks["rating_cost"]["next_source"]
+    assert tasks["prediction_t20_v1"]["affects"] == ["T20_V1"]
+    assert "caict.ac.cn" in tasks["prediction_t20_v1"]["next_source"]
+    assert tasks["advice_funding"]["collection"] == "系统读回及本人确认"
+    assert tasks["outcome_nav"]["required_date"] is None
+    document = (tmp_path / "fund-supplements" / f"{fund}.md").read_text(encoding="utf-8")
+    assert "## 预测结果核验\n\n- **□ 待核实**　到期预测" in document
+    assert "## 四周期预测" in document and "931494" in document
+
+
+def test_source_recheck_updates_only_the_matching_daily_checklist(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from app.services import fund_daily_profiles as checklists
+
+    monkeypatch.setattr(checklists, "now", lambda: datetime.fromisoformat("2026-11-20T00:31:00+08:00"))
+    fund = "021740"
+    root = tmp_path / "run"
+    current = {"base_nav_date": "2026-11-19", "target_nav_date": "2026-11-20",
+               "deadline_at": "2026-11-20T15:00:00+08:00"}
+    state = {"scope": [fund], "window": current, "funds": {}}
+    source_review = {
+        "day": "2026-11-20", "base_nav_date": "2026-11-19", "target_nav_date": "2026-11-20",
+        "items": [{
+            "fund_code": fund, "field": "NAV", "status": "NOT_PUBLISHED",
+            "attempted_at": "2026-11-20T00:30:00+08:00", "attempted_source": "本份额原净值入口",
+            "summary": "11月19日本份额同日净值尚未披露", "next_source": "基金管理人正式净值页面复查",
+        }],
+    }
+    versioned_save(root / "source-rechecks.json", source_review)
+    records = {fund: {"name": "黄金联接C", "template": "domestic"}}
+    document = tmp_path / "fund-supplements" / f"{fund}.md"
+    tasks = checklists.save_pending(root, state, records=records)
+    nav = next(task for task in tasks if task["field"] == "NAV")
+    assert nav["source_review"]["status"] == "NOT_PUBLISHED"
+    assert nav["next_source"] == "基金管理人正式净值页面复查"
+    assert "□ 待核实**　本份额正式净值" in document.read_text(encoding="utf-8")
+    assert "本次取件 所需日期尚未披露" in document.read_text(encoding="utf-8")
+    source_review["target_nav_date"] = "2026-11-23"
+    versioned_save(root / "source-rechecks.json", source_review)
+    tasks = checklists.save_pending(root, state, records=records)
+    assert all("source_review" not in task for task in tasks)
+    assert "本次取件" not in document.read_text(encoding="utf-8")
+
+
+def test_refresh_single_checklist_reads_latest_profile_without_entering_business_run(tmp_path, monkeypatch):
+    from datetime import datetime
+    import sys
+
+    from app.commands import fund_daily_prediction as command
+    from app.services import fund_daily_profiles as checklists
+
+    at = datetime.fromisoformat("2026-11-20T00:31:00+08:00")
+    records = tmp_path / ".local-runs"
+    directory = records / "daily-prediction-20261120"
+    fund = "021740"
+    state = {"scope": [fund], "window": {"base_nav_date": "2026-11-19", "target_nav_date": "2026-11-20",
+                                         "deadline_at": "2026-11-20T15:00:00+08:00"}, "funds": {}}
+    versioned_save(directory / "run.json", state)
+    versioned_save(directory / "fund-profiles.json", {fund: {"name": "黄金联接C", "report_source": "旧公告入口"}})
+    monkeypatch.setattr(command, "PROJECT", tmp_path)
+    monkeypatch.setattr(command, "now", lambda: at)
+    monkeypatch.setattr(checklists, "now", lambda: at)
+    monkeypatch.setattr(checklists, "profiles", lambda: {fund: {"report_source": "已核验的新公告入口"}})
+    monkeypatch.setattr("app.services.prediction_trial_v2.storage_check", lambda _: None)
+    monkeypatch.setattr("app.services.fund_daily_services.ensure_services", lambda _: pytest.fail("误入业务续办"))
+    monkeypatch.setattr(sys, "argv", ["fund_daily_prediction", "--run-dir", str(directory), "--refresh-checklist", fund])
+
+    command.main()
+
+    checklist = records / "fund-supplements" / f"{fund}.md"
+    assert "已核验的新公告入口" in checklist.read_text(encoding="utf-8")
+    assert read(directory / "run.json") == state

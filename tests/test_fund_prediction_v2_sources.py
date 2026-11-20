@@ -125,8 +125,11 @@ def test_qdii_prior_nav_keeps_forecast_window_and_anchors_half_year_target(tmp_p
     assert packet["periods"]["M6_V1"]["end_date"] == "2027-05-11"
 
 
-def test_partial_materials_keep_real_gap_while_resolving_natural_month_target(tmp_path, isolated):
+@pytest.mark.parametrize(('reference', 'end_date'), [(None, '2027-05-12'), ('2026-11-11', '2027-05-11')])
+def test_partial_materials_keep_real_gap_while_resolving_natural_month_target(tmp_path, isolated, reference, end_date):
     inventory, data, _ = isolated
+    if reference:
+        data["reference_nav_date"] = reference
     source = tmp_path / "actual-partial-materials.json"
     versioned_save(source, data)
     selection = tmp_path / "partial-selection.json"
@@ -138,7 +141,7 @@ def test_partial_materials_keep_real_gap_while_resolving_natural_month_target(tm
     packet = read(tmp_path / "trial/inputs/002112.json")
     assert packet["source_ready"] is False
     assert packet["periods"]["T1"]["status"] == "UNVERIFIED"
-    assert packet["periods"]["M6_V1"]["end_date"] == "2027-05-12"
+    assert packet["periods"]["M6_V1"]["end_date"] == end_date
     assert packet["periods"]["M6_V1"]["end_date_basis"] == "CALENDAR_MONTH"
 
 
@@ -260,9 +263,18 @@ def _qdii_calendar_case(tmp_path, isolated, monkeypatch, error="COMPREHENSIVE_CA
     return inventory, handoff, material, raw
 
 
-def test_qdii_exact_calendar_failure_prepares_false_partial_with_real_nav_identity(tmp_path, isolated, monkeypatch):
+@pytest.mark.parametrize(('nav_day', 'identity_matches', 'expected_reference'), [
+    (12, True, None), (11, True, '2026-11-11'), (11, False, None),
+])
+def test_qdii_exact_calendar_failure_prepares_false_partial_with_real_nav_identity(
+    tmp_path, isolated, monkeypatch, nav_day, identity_matches, expected_reference
+):
     inventory, handoff, material, _ = _qdii_calendar_case(tmp_path, isolated, monkeypatch)
     statements = []
+    from app.services.fund_prediction_nav_identity import nav_identity
+
+    nav_date = date(2026, 11, nav_day)
+    nav = {"nav_date": nav_date, "ann_date": nav_date, "source_id": "actual-source", "unit_nav": "2.04980000"}
 
     class Connection:
         def __enter__(self):
@@ -276,12 +288,13 @@ def test_qdii_exact_calendar_failure_prepares_false_partial_with_real_nav_identi
             return self
 
         def mappings(self):
-            return [{"nav_date": date(2026, 11, 12), "ann_date": date(2026, 11, 12),
-                     "source_id": "actual-source", "unit_nav": "2.04980000", "content_hash": "upstream",
+            return [{**nav, "content_hash": "upstream",
                      "updated_at": AT - timedelta(hours=1), "version_id": None}]
 
     monkeypatch.setattr("app.db.session.get_nav_preview_engine", lambda: type(
         "ReadOnlyEngine", (), {"connect": lambda self: Connection()})())
+    monkeypatch.setattr("app.services.fund_prediction_nav_identity.current_prediction_nav_identity",
+                        lambda code, base, *, at: nav_identity([nav] if identity_matches else [], nav_date))
     result = command.freeze_sources(tmp_path / "sources", holdings_provider=lambda: inventory, clock=AT)
     assert result["frozen_count"] == 1 and result["source_ready_count"] == 0
     assert result["funds"][0]["status"] == "FROZEN_WITH_CALENDAR_GAPS"
@@ -292,14 +305,15 @@ def test_qdii_exact_calendar_failure_prepares_false_partial_with_real_nav_identi
     assert data["materials_path"] == handoff["materials_path"]
     assert data["materials_hash"] == digest(material)
     assert data["nav"][0]["source_id"] == "actual-source"
-    assert data["nav"][0]["nav_date"] == "2026-11-12"
+    assert data["nav"][0]["nav_date"] == str(nav_date)
+    assert data.get("reference_nav_date") == expected_reference
     assert read(Path(handoff["materials_path"])) == material
     assert len(statements) == 1 and statements[0].lstrip().startswith("SELECT")
     trial.prepare_trial(tmp_path / "trial", Path(result["selection_path"]), holdings=inventory, clock=AT)
     packet = read(tmp_path / "trial/inputs/002112.json")
     assert packet["source_ready"] is False
     assert packet["periods"]["T1"]["status"] == "UNVERIFIED"
-    assert packet["periods"]["M6_V1"]["end_date"] == "2027-05-12"
+    assert packet["periods"]["M6_V1"]["end_date"] == ('2027-05-11' if expected_reference else '2027-05-12')
     with pytest.raises(ValueError, match="V2_SOURCE_DIRECTORY_MUST_BE_NEW"):
         command.freeze_sources(tmp_path / "sources", holdings_provider=lambda: inventory, clock=AT)
 

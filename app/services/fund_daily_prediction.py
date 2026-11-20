@@ -5,11 +5,12 @@
 """
 
 import hashlib
+from datetime import datetime
 from pathlib import Path
 
 import httpx
 
-from app.services.direction_1d_protocol import digest
+from app.services.direction_1d_protocol import ZONE, digest
 from app.services.fund_exposure_common import read
 from app.services.fund_materials_store import versioned_save
 
@@ -59,11 +60,20 @@ class DailyPredictionRun:
                 versioned_save(self.path, state)
                 return state
             return state
+        previous_scope = state.get("scope")
         state.update(checked_at=at, scope=scope, scope_hash=digest(scope), status="CHECKING")
-        if hasattr(b, "save_profiles"):
-            from app.services.fund_daily_profiles import save_pending
+        checklists = hasattr(b, "save_profiles")
+        if checklists:
+            from app.services.fund_daily_profiles import reset_fund_checklists, save_pending
 
-            b.save_profiles(scope)
+            records = b.save_profiles(scope)
+            checklist_day = datetime.fromisoformat(at).astimezone(ZONE).date().isoformat()
+            # 北京时间当天首次运行清空对勾；当天续办按实际核对结果逐项更新，不在清单中累积流水。
+            if state.get("checklist_day") != checklist_day:
+                reset_fund_checklists(root, records, state["window"], checklist_day)
+                state["checklist_day"] = checklist_day
+            elif previous_scope != scope:
+                save_pending(root, state, records=records, aggregate=False)
         state["workflow_version"] = "HOLDINGS_END_TO_END_V1"
         if hasattr(b, "repair_handoffs"):
             state["handoff_recovery"] = b.repair_handoffs(scope)
@@ -102,8 +112,8 @@ class DailyPredictionRun:
             terminal = b.batch_status(state["batch"])
         versioned_save(root / "materials-status.json", terminal)
         if not terminal["terminal"]:
-            if hasattr(b, "save_profiles"):
-                save_pending(root, state)
+            if checklists:
+                save_pending(root, state, records=records)
             state["status"] = "WAITING_MATERIALS"
             versioned_save(self.path, state)
             return state
@@ -130,9 +140,19 @@ class DailyPredictionRun:
             try:
                 # 已保存仍须读回本人范围；本次有新增资料时会由来源摘要重新触发审阅。
                 if not publish_prepared or not item.get("materials_path"):
-                    item.update(b.recover_materials(code, root / "funds" / code, state["window"]))
+                    recovered = b.recover_materials(code, root / "funds" / code, state["window"])
+                    item.update(recovered)
+                    if checklists:
+                        if recovered.get("materials_path"):
+                            item["materials_checklist_day"] = checklist_day
+                        else:
+                            item.pop("materials_checklist_day", None)
+                        save_pending(root, state, records=records, fund_code=code, aggregate=False)
                 if hasattr(b, "refresh_nav"):
                     item["base_nav_refresh"] = b.refresh_nav(code, root / "funds" / code, state["window"])
+                    if checklists:
+                        item["nav_checklist_day"] = checklist_day
+                        save_pending(root, state, records=records, fund_code=code, aggregate=False)
                 review = (reviews or {}).get(code)
                 if review:
                     if (
@@ -192,8 +212,6 @@ class DailyPredictionRun:
                     state["first_failures"].append(failure)
                 item.update(status="ACTION_REQUIRED", failure=failure)
             versioned_save(self.path, state)
-        if hasattr(b, "save_profiles"):
-            save_pending(root, state)
         final = b.guard(root / "followthrough.json", blocked_file)
         if hasattr(b, "ratings"):
             try:
@@ -208,18 +226,18 @@ class DailyPredictionRun:
             except Exception as error:
                 state["advice"] = {"status": "FAILED", "failure": type(error).__name__}
             versioned_save(root / "advice-status.json", state["advice"])
-        versioned_save(
-            root / "work-items.json",
-            {
-                "owner_user_id": owner, "window": state["window"], "funds": final["funds"],
-                "execution": state["funds"], "monthly_compilation": state.get("monthly_compilation"),
-                "ratings": state.get("ratings"), "advice": state.get("advice"),
-                "remaining_funds": sorted(set(final["pending_funds"]) | {
-                    row["fund_code"] for row in state.get("advice", {}).get("items", [])
-                    if row.get("status") in {"WAITING_INPUTS", "INSUFFICIENT", "FAILED"}
-                }),
-            },
-        )
+        work_items = {
+            "owner_user_id": owner, "window": state["window"], "funds": final["funds"],
+            "execution": state["funds"], "monthly_compilation": state.get("monthly_compilation"),
+            "ratings": state.get("ratings"), "advice": state.get("advice"),
+            "remaining_funds": sorted(set(final["pending_funds"]) | {
+                row["fund_code"] for row in state.get("advice", {}).get("items", [])
+                if row.get("status") in {"WAITING_INPUTS", "INSUFFICIENT", "FAILED"}
+            }),
+        }
+        versioned_save(root / "work-items.json", work_items)
+        if checklists:
+            save_pending(root, state, records=records)
         # 守卫是唯一结束判据。同步摘要不完整时仍不能报告整轮完成。
         state.update(
             status=final["status"],

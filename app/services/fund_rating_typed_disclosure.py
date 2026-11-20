@@ -47,6 +47,14 @@ PROFILES = {
         "module": "app.services.fund_rating_bond_index_nav_partial",
         "enabled": False,
         "partial_enabled": True,
+        "completion": {
+            "module": "app.services.fund_rating_bond_index_benchmark",
+            "scope": {
+                "fund_code": "001021",
+                "share_class": "A",
+                "version": "BOND_INDEX_001021_OFFICIAL_BENCHMARK_20261120_V1",
+            },
+        },
     },
     "CONVERTIBLE": {
         "family": "CONVERTIBLE",
@@ -139,14 +147,19 @@ def _window(value: dict, as_of: str) -> None:
 
 def calculate(bundle: dict, *, root: Path) -> dict:
     spec, inputs = check_binding(bundle)
-    result = importlib.import_module(spec["module"]).calculate(inputs, root=root)
+    completion = spec.get("completion")
+    # 只启用已核对份额和来源协议，历史补件及其他债券指数仍走原路径。
+    scoped = completion is not None and all(inputs.get(key) == value for key, value in completion["scope"].items())
+    module = completion["module"] if scoped else spec["module"]
+    result = importlib.import_module(module).calculate(inputs, root=root)
     points = result.get("dimensions", {})
     if set(points) != set(KEYS.values()) or not isinstance(result.get("blocked"), bool):
         raise ValueError("TYPED_DISCLOSURE_COMPILER_CONTRACT")
     for value in points.values():
         if value is not None and not 0 <= number(value) <= 100:
             raise ValueError("TYPED_DISCLOSURE_SCORE_RANGE")
-    complete = spec["enabled"] and all(value is not None for value in points.values()) and not result["blocked"]
+    complete_allowed = spec["enabled"] or scoped
+    complete = complete_allowed and all(value is not None for value in points.values()) and not result["blocked"]
     if complete:
         _window(result.get("facts", {}).get("window", {}), inputs["as_of_date"])
     with localcontext() as context:
@@ -157,8 +170,8 @@ def calculate(bundle: dict, *, root: Path) -> dict:
         **result,
         "score": str(total.quantize(Decimal(".01"))) if total is not None else None,
         "weights": weights,
-        "complete_type_validated": spec["enabled"],
-        "partial_release_only": not spec["enabled"],
+        "complete_type_validated": complete_allowed,
+        "partial_release_only": not complete_allowed,
     }
 
 

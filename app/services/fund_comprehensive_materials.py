@@ -46,6 +46,7 @@ def checked_documents(now: datetime, code: str, material: dict) -> list[dict]:
     by_id = {d["id"]: d for d in documents}
     if len(by_id) != len(documents):
         raise ValueError("COMPREHENSIVE_DUPLICATE_SOURCE")
+    price_responses = {}
     for document in documents:
         from app.services.fund_notice_observed_proof import validate as observed_public_notice
 
@@ -76,6 +77,8 @@ def checked_documents(now: datetime, code: str, material: dict) -> list[dict]:
                 published_at is None
                 and published == str(now.date())
                 and not observed_public_notice(document, code, now)
+                and not verified_post_close_observation(document, code, now, price_responses)
+                and not verified_gold_close_observation(document, code, now)
             )
             or digest(document["body"]) != document["body_hash"]
         ):
@@ -86,6 +89,71 @@ def checked_documents(now: datetime, code: str, material: dict) -> list[dict]:
         document.setdefault("source_hash", document["body_hash"])
         document.setdefault("body_truncated", document.get("body_scope") != "FULL_TEXT")
     return documents
+
+
+def verified_post_close_observation(document, code, as_of, price_responses):
+    """缺精确发布时间的日线，用收盘后真实响应核对当日行情及可用时间。"""
+    import json
+    from datetime import time
+
+    proof = document.get("post_close_observation") or {}
+    if (document.get("kind") != "MARKET_DATA" or document.get("codes") != [code]
+            or document.get("url") != "https://api.tushare.pro"
+            or proof.get("api") not in {"daily", "fund_daily", "index_daily"}
+            or proof.get("received_at") != document.get("available_at")):
+        return False
+    try:
+        from app.services.fund_prediction_market_recovery import FIELDS, quote_row
+
+        day = date.fromisoformat(document["published_date"])
+        close = datetime.combine(day, time(15), ZONE)
+        received = datetime.fromisoformat(proof["received_at"])
+        if received.tzinfo is None or not close <= received <= as_of:
+            return False
+        key = (document["raw_path"], document["raw_sha256"])
+        if key not in price_responses:
+            raw = source_bytes(Path(document["raw_path"]))
+            if len(raw) > 8_000_000 or content_digest(raw) != document["raw_sha256"]:
+                return False
+            price_responses[key] = json.loads(raw)
+        response = price_responses[key]
+        data = response["data"]
+        if data["fields"] != FIELDS:
+            return False
+        symbol, trade_day = proof["symbol"], day.strftime("%Y%m%d")
+        matches = [row for row in data["items"] if row[:2] == [symbol, trade_day]]
+        selected = {"code": response["code"], "data": {"fields": FIELDS, "items": matches}}
+        row = quote_row(selected, symbol, str(day), proof["api"])
+        return row == json.loads(document["body"])
+    except (ArithmeticError, KeyError, OSError, TypeError, ValueError):
+        return False
+
+
+def verified_gold_close_observation(document, code, as_of):
+    """上金所同日每日行情只接受有正式收盘行的原始响应。"""
+    from datetime import time
+
+    proof = document.get("gold_observation") or {}
+    uri = urlparse(document.get("url", ""))
+    day = document.get("published_date")
+    if (document.get("kind") != "MARKET_DATA" or document.get("codes") != [code]
+            or uri.scheme != "https" or uri.hostname not in {"www.sge.com.cn", "sge.com.cn"}
+            or uri.path != "/sjzx/quotation_daily_new" or proof.get("contract") != "Au99.99"
+            or proof.get("valuation_date") != day):
+        return False
+    try:
+        from app.services.fund_prediction_gold_recovery import gold_rows
+
+        received = datetime.fromisoformat(document["available_at"])
+        if received.tzinfo is None or not datetime.combine(date.fromisoformat(day), time(15, 30), ZONE) <= received <= as_of:
+            return False
+        raw = source_bytes(Path(document["raw_path"]))
+        if len(raw) > 3_000_000 or content_digest(raw) != document["raw_sha256"]:
+            return False
+        row, body = gold_rows(raw, day)
+        return row == proof.get("source_row") and body == document.get("body")
+    except (ArithmeticError, KeyError, OSError, TypeError, ValueError):
+        return False
 
 
 def prepare(now, code: str, materials_path=None) -> dict:

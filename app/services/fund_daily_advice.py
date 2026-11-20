@@ -83,6 +83,20 @@ def generate_advice(backend, scope, dependencies, *, engine_factory=core_engine)
                     ).scalar_one()
                 if saved != value:
                     raise ValueError("DAILY_ADVICE_DATABASE_READBACK_MISMATCH")
+                personal = value.get("personalSnapshot") or {}
+                rating = value.get("ratingSnapshot") or {}
+                diagnosis = value.get("diagnosisSnapshot") or {}
+                checklist_verified = []
+                if (personal.get("portfolioComplete")
+                        and (personal.get("position") or {}).get("fundCode") == code
+                        and personal.get("knownWeightPct") is not None
+                        and all(isinstance(personal.get(key), list) for key in ("orders", "plans"))):
+                    checklist_verified.append("advice_ledger")
+                if (rating.get("status") == "SCORED" and rating.get("fundCode") == code
+                        and diagnosis.get("fundCode") == code
+                        and len(diagnosis.get("items") or []) == 7
+                        and not any(step.get("step") in {"MONTHLY_RATING", "COMPLETE_RATING"} for step in pending)):
+                    checklist_verified.append("advice_rating")
                 row.update(
                     read_back=True,
                     report_id=value["reportId"],
@@ -90,6 +104,7 @@ def generate_advice(backend, scope, dependencies, *, engine_factory=core_engine)
                     advice_state=value.get("adviceState"),
                     decision=value.get("decision"),
                     missing=value.get("missingOptionalFactors", []),
+                    checklist_verified=checklist_verified,
                     status=value.get("adviceState") if value.get("adviceState") in {
                         "READY", "QUALIFIED", "INSUFFICIENT", "FAILED"
                     } else "FAILED",

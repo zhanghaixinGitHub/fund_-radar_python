@@ -11,6 +11,7 @@ from sqlalchemy import text
 
 from app.services.direction_1d_protocol import digest
 from app.services.fund_exposure_common import now, read, save
+from app.services.material_file_access import physical_path
 from app.services.prediction_review_v2 import policy_v2, validate_cross_horizons, validate_review_v2
 from app.services.prediction_v2_baseline import baseline_ready
 
@@ -75,7 +76,7 @@ def storage_check(since):
 
 
 def save_once(path, payload):
-    if path.exists():
+    if physical_path(path).exists():
         if read(path) != payload:
             raise ValueError("V2_IMMUTABLE_ARTIFACT_CONFLICT")
         return
@@ -172,7 +173,7 @@ def prepare_trial(directory, selection, *, holdings=None, clock=None):
                 from app.services.prediction_natural_month import natural_month_target
 
                 # 缺件输入也能确定自然月目标；ready始终为False，不能因此生成方向。
-                dates = natural_month_target(base, target)
+                dates = natural_month_target(data.get("reference_nav_date") or base, target)
                 periods[horizon].update(
                     status="RESOLVED", end_date=dates["endDate"],
                     nominal_end_date=dates["nominalEndDate"], end_date_basis=dates["endDateBasis"],
@@ -261,7 +262,7 @@ def evaluate_trial(directory, reviews_file, *, holdings_provider=current_holding
         review = r.model_dump()
         identity = digest({"packet": digest(packet), "review": review, "policy": manifest["policy_hash"]})
         result_path = directory / "results" / r.fund_code / r.horizon / (identity + ".json")
-        if result_path.exists():
+        if physical_path(result_path).exists():
             result = read(result_path)
             if result.get("identity") != identity or result.get("review_hash") != digest(review):
                 raise ValueError("V2_RESULT_IDENTITY_MISMATCH")

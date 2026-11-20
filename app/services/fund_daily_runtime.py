@@ -94,10 +94,13 @@ class LocalDailyBackend:
 
         target_month = now().date().replace(day=1) - timedelta(days=1)
         ratings = {r.get("fundCode"): r for r in state.get("ratings", {}).get("readback", [])}
-        dependencies = {}
+        dependencies, dated_predictions = {}, set()
         for fund in final["funds"]:
             code, pending = fund["fund_code"], []
-            for period in fund.get("horizons", []):
+            periods = fund.get("horizons", [])
+            if len(periods) == 4 and all(p.get("counts_as_dated_forecast") for p in periods):
+                dated_predictions.add(code)
+            for period in periods:
                 if period.get("data_blocked"):
                     pending.append({"step": "PREDICTION_INPUT", "horizon": period.get("horizon"),
                                     "status": "BLOCKED", "reasons": period.get("source_reasons", [])})
@@ -111,18 +114,23 @@ class LocalDailyBackend:
             if rating.get("status") != "SCORED":
                 pending.append({"step": "COMPLETE_RATING", "status": rating.get("status", "UNAVAILABLE")})
             dependencies[code] = pending
-        return generate_advice(self, state["scope"], dependencies)
+        receipt = generate_advice(self, state["scope"], dependencies)
+        for item in receipt["items"]:
+            item["checklist_current_predictions"] = item["read_back"] and item["fund_code"] in dated_predictions
+        return receipt
 
     def ratings(self, terminal):
         """资料终态后执行持仓月评；公告和持仓检查没有真实回执时保持待办。"""
         # 再取一次本人持仓，避免同步期间已清仓的基金仍被新发布。
+        from datetime import date, timedelta
+
         from sqlalchemy.orm import Session
 
         from app.commands.fund_prediction_followthrough import owner_scope
         from app.db.session import get_nav_preview_engine
         from app.services.fund_market_preparation import market_scope
         from app.services.fund_market_workflow import MarketSyncWorkflow
-        from app.services.fund_rating_pipeline import current_inputs
+        from app.services.fund_rating_pipeline import _period_covered, current_inputs
 
         codes = set(owner_scope(self.settings, self.owner))
         with Session(get_nav_preview_engine()) as session:
@@ -174,6 +182,14 @@ class LocalDailyBackend:
                 code: next(m["bundle"] for m in row["input_snapshot"]["members"] if m["fund_code"] == code)
                 for code, row in current.items()
             }
+            checklist_day = now().date()
+            month_end = checklist_day.replace(day=1) - timedelta(days=1)
+            result["checklist_day"] = checklist_day.isoformat()
+            result["checklist_month_covered"] = [
+                row["fundCode"] for row in result["readback"]
+                if row.get("asOfDate") and row["fundCode"] in self.rating_bundles
+                and _period_covered(self.rating_bundles[row["fundCode"]], date.fromisoformat(row["asOfDate"]), month_end)
+            ]
             return result
         finally:
             workflow.close()
@@ -439,7 +455,7 @@ class LocalDailyBackend:
             rows = profiles(connection, scope) if scope else []
         if {row["fund_code"] for row in rows} != set(scope):
             raise ValueError("DAILY_HOLDING_PROFILE_MISSING")
-        save_profiles(self.directory, rows)
+        return save_profiles(self.directory, rows)
 
     def approve(self, code, review):
         from app.services import fund_daily_prediction_v2 as v2

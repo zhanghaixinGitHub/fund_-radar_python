@@ -266,6 +266,19 @@ def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_pr
             ).upper():
                 try:
                     partial = _partial_calendar_materials(at, code, material_path, material, current)
+                    from app.services.fund_prediction_nav_identity import (
+                        current_prediction_nav_identity,
+                        nav_identity,
+                        previous_qdii_nav_date,
+                    )
+
+                    base = current["base_nav_date"]
+                    reference = previous_qdii_nav_date(partial["nav"], base, profile)
+                    if reference and nav_identity(partial["nav"], reference) == current_prediction_nav_identity(
+                        code, base, at=at
+                    ):
+                        # 保留真实参考净值身份；当前行情缺件仍禁止输出方向。
+                        partial["reference_nav_date"] = reference
                     path = directory / "funds" / code / "partial-input.json"
                     save_once(path, partial)
                 except (ValueError, KeyError, FileNotFoundError) as partial_error:

@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from app.db.session import get_engine
 from app.services.direction_1d_protocol import ZONE, canonical, digest
+from app.services.material_file_access import physical_path
 from app.services.prediction_review_v2 import policy_v2
 from app.services.prediction_trial_v2 import current_holdings, storage_check
 
@@ -36,9 +37,10 @@ def _load(path, cache):
         raise ValueError("V2_PUBLICATION_SOURCE_OUTSIDE_WORKSPACE")
     key = str(path)
     if key not in cache:
-        if path.stat().st_size > MAX_SOURCE_BYTES:
+        source = physical_path(path)
+        if source.stat().st_size > MAX_SOURCE_BYTES:
             raise ValueError("V2_PUBLICATION_SOURCE_TOO_LARGE")
-        raw = path.read_bytes()
+        raw = source.read_bytes()
         value = json.loads(raw.decode("utf-8-sig"))
         if isinstance(value, dict) and "hash" in value and "payload" in value:
             if digest(value["payload"]) != value["hash"]:
