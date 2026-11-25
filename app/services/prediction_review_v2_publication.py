@@ -398,16 +398,25 @@ def _publish(prepared, *, adopt=False, expected_current=None):
     }
 
 
-def _active(connection, fund_code=None):
+def _active(connection, fund_code=None, deadline=None):
     # 统一启动迁移前的只读检查允许尚无新表；其他数据库错误原样上报。
     if connection.scalar(text("SELECT to_regclass('prediction_review_v2_release')")) is None:
         return None
     where = "WHERE views ? :code" if fund_code is not None else ""
+    params = {"code": fund_code} if fund_code is not None else {}
+    if deadline is not None:
+        where += """ AND adopted_at < :cutoff AND EXISTS (
+            SELECT 1 FROM jsonb_array_elements(archive->'cases') AS item
+            WHERE item->'case'->>'fund_code' = :code
+              AND item->'workflow_identity'->>'deadline_at' = :deadline
+              AND item->'workflow_identity'->>'ex_ante_eligible' = 'true'
+        )"""
+        params.update(deadline=deadline, cutoff=datetime.fromisoformat(deadline))
     return (
         connection.execute(
             text(f"""SELECT release_id,version,policy_hash,adopted_at,views
       FROM prediction_review_v2_release {where} ORDER BY adopted_at DESC,release_id DESC LIMIT 1"""),
-            {"code": fund_code} if fund_code is not None else {},
+            params,
         )
         .mappings()
         .first()
@@ -469,6 +478,37 @@ def current_review(fund_code):
     if row is None or fund_code not in row["views"]:
         return None
     return public_view(row["views"][fund_code], row["adopted_at"])
+
+
+def current_forecast(fund_code, *, clock=None):
+    """趋势页读本期已发布的判断，未发布时只显示已核实的预计日期。"""
+    from datetime import timedelta
+
+    from app.services.prediction_window_v2 import window
+
+    clock = (clock or datetime.now(ZONE)).astimezone(ZONE)
+    next_open = clock.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    response = {"fundCode": fund_code, "window": {"baseNavDate": None, "targetNavDate": None,
+                 "nextWindowOpenAt": next_open.isoformat(), "periods": []}, "review": None}
+    try:
+        planning = window(clock)
+    except ValueError as error:
+        if str(error) != "CALENDAR_UNAVAILABLE":
+            raise
+        return response
+    with get_engine().connect() as connection:
+        row = _active(connection, fund_code, deadline=planning["deadline_at"])
+    if row is not None:
+        review = public_view(row["views"][fund_code], row["adopted_at"], clock=clock)
+        first = review["periods"][0]
+        response["review"] = review
+        response["window"].update(baseNavDate=first["baseNavDate"], targetNavDate=first["startDate"])
+        return response
+
+    from app.services.prediction_window_v2 import public_dates
+
+    response["window"].update(public_dates(fund_code, clock, planning))
+    return response
 
 
 def read_review(fund_code):

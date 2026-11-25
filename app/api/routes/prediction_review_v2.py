@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Path
 
 from app.api.dependencies import require_service_token
 from app.api.routes.multi_predictions import PredictionRoute
-from app.services.prediction_review_v2_publication import current_review
+from app.services.prediction_review_v2_publication import current_forecast, current_review
 
 router = APIRouter(dependencies=[Depends(require_service_token)], route_class=PredictionRoute)
 FundCode = Annotated[str, Path(pattern=r"^[0-9]{6}$")]
@@ -17,6 +17,11 @@ FundCode = Annotated[str, Path(pattern=r"^[0-9]{6}$")]
 @router.get("/funds/{fund_code}/review-v2")
 def read_review(fund_code: FundCode):
     return current_review(fund_code)
+
+
+@router.get("/funds/{fund_code}/review-v2/current-window")
+def read_current_forecast(fund_code: FundCode):
+    return current_forecast(fund_code)
 
 
 @router.get("/funds/{fund_code}/review-v2/history")

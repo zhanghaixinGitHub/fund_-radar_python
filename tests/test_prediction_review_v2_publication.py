@@ -395,3 +395,32 @@ def test_midnight_publication_checks_frozen_deadline_even_with_no_nav_reference(
             service._check_live_reference_nav(connection, cases)
     else:
         service._check_live_reference_nav(connection, cases)
+
+
+def test_current_forecast_uses_midnight_release_or_verified_plan(monkeypatch):
+    from contextlib import nullcontext
+
+    from app.services import prediction_window_v2
+
+    at = datetime.fromisoformat("2026-11-25T12:30:00+08:00")
+    planning = {"deadline_at": "2026-11-26T00:00:00+08:00"}
+    monkeypatch.setattr(prediction_window_v2, "window", lambda clock: planning)
+    monkeypatch.setattr(service, "get_engine", lambda: SimpleNamespace(connect=lambda: nullcontext(None)))
+    archived = None
+
+    def active(connection, fund_code, *, deadline):
+        assert fund_code == "008888"
+        assert deadline == planning["deadline_at"]
+        return archived
+
+    monkeypatch.setattr(service, "_active", active)
+    dates = {"baseNavDate": "2026-11-25", "targetNavDate": "2026-11-26",
+             "periods": [{"horizonId": "T1", "endDate": "2026-11-26"}]}
+    monkeypatch.setattr(prediction_window_v2, "public_dates", lambda code, clock, plan: dates)
+    result = service.current_forecast("008888", clock=at)
+    assert result["review"] is None
+    assert result["window"] == {**dates, "nextWindowOpenAt": planning["deadline_at"]}
+
+    archived = {"adopted_at": at, "views": {"008888": {"fundCode": "008888", "periods": [
+        {"horizonId": "T1", "baseNavDate": "2026-11-25", "startDate": "2026-11-26", "decision": "UP"}]}}}
+    assert service.current_forecast("008888", clock=at)["review"]["periods"][0]["decision"] == "UP"
