@@ -127,6 +127,21 @@ def test_japan_closing_session_and_national_holiday_are_checked():
     d["calendar"]["body"] = json.dumps(c)
     assert not verified_qdii_window(p, m, d, w)
 
+    from app.services.comprehensive_calendar import QDII_WORKDAY_POLICY
+    from app.services.direction_1d_protocol import digest
+
+    workday_quotes = {
+        "workday": "工作日：指上海证券交易所、深圳证券交易所开放交易的工作日",
+        "daily": "基金管理人应在每个工作日对基金资产估值。但暂停估值时除外。",
+        "holiday_close": "权益类证券估值日无交易，以最近交易日的市价（收盘价）估值；重大变化时确定公允价格。",
+    }
+    body = d["prospectus"]["body"] + "\n" + "\n".join(workday_quotes.values())
+    d["prospectus"].update(url="https://www.cifm.com/fund/prospectus.pdf", body=body, body_hash=digest(body))
+    m["calendar_evidence"].update(future_valuation_policy=QDII_WORKDAY_POLICY, workday_valuation_quotes=workday_quotes)
+    assert verified_qdii_window(p, m, d, w)
+    workday_quotes["daily"] = "估值习惯与申赎开放安排相同。"
+    assert not verified_qdii_window(p, m, d, w)
+
 
 def test_hong_kong_normal_session_uses_verified_auction_completion():
     p, m, d, w = deepcopy(sample())

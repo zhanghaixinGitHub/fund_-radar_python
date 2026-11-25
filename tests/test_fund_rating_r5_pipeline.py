@@ -262,3 +262,25 @@ def test_one_broken_fund_does_not_block_following_fund(monkeypatch, tmp_path):
     )
     assert result["failures"] == ["000001"] and result["items"][1]["status"] == "PARTIAL"
     assert result["published"] == 0
+
+
+def test_late_funds_still_evaluated_after_first_fund_exceeds_ten_minutes(monkeypatch, tmp_path):
+    from app.services import fund_rating_pipeline as module
+    from sqlalchemy import create_engine
+
+    codes, evaluated, clock = ["000001", "000002", "000003"], [], [0]
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0], raising=False)
+    monkeypatch.setattr(module, "current_inputs", lambda session, scope: {
+        code: {"as_of_date": date(2026, 9, 30)} for code in scope})
+    monkeypatch.setattr(module, "source_exists", lambda path: False)
+    monkeypatch.setattr("app.services.fund_market_review.rating_review_required", lambda code: False)
+
+    def evaluate(row, code, root, as_of):
+        evaluated.append(code)
+        clock[0] += 3601
+        return {"status": "PARTIAL", "blockers": []}
+
+    monkeypatch.setattr(module, "_evaluate", evaluate)
+    result = module.update_new_rules(codes, engine=create_engine("sqlite://"), root=tmp_path, as_of=date(2026, 9, 30))
+    assert evaluated == codes
+    assert all(item["status"] == "PARTIAL" and not item["blockers"] for item in result["items"])

@@ -311,18 +311,25 @@ def _check_live_reference_nav(connection, cases):
     from app.repositories import direction_1d as repo
     from app.services.fund_prediction_nav_identity import available_prediction_nav
 
+    from app.services.prediction_window_v2 import publication_deadline
+
+    timed = [case["workflow_identity"] for case in cases if case.get("workflow_identity", {}).get("deadline_at")]
     references = {
         case["case"]["fund_code"]: case["workflow_identity"]
         for case in cases
         if case.get("workflow_identity", {}).get("reference_nav_date")
     }
-    if not references:
+    if not references and not timed:
         return
     instant = connection.scalar(text("SELECT clock_timestamp()"))
+    if any(instant >= publication_deadline(identity) for identity in timed):
+        raise ValueError("V2_PUBLICATION_WINDOW_EXPIRED")
+    if not references:
+        return
     source_id = repo.source(connection)["source_id"]
     for profile in repo.profiles(connection, references):
         identity = references[profile["fund_code"]]
-        deadline = datetime.combine(date.fromisoformat(identity["target_date"]), time(15), ZONE)
+        deadline = publication_deadline(identity)
         if instant >= deadline:
             continue
         selected, _ = available_prediction_nav(
@@ -604,7 +611,13 @@ def prepare_trial_release(directory: Path, *, holdings=None, clock=None):
         if view["marketAsOf"] != record["period"]["base_date"]:
             raise ValueError("V2_PUBLICATION_BASE_DATE_MISMATCH")
         item = _public_period(row_view, record, record, record, evaluated.isoformat())
-        reference = data.get("reference_nav_date")
+        from app.services.prediction_window_v2 import is_midnight, publication_deadline
+
+        planning = data.get("window", {})
+        early = is_midnight(planning)
+        reference = None if early else data.get("reference_nav_date")
+        if early and not any(nav["nav_date"] == record["period"]["base_date"] for nav in data.get("nav", [])):
+            item["limitations"].insert(0, f"出具时尚未取得 {view['marketAsOf']} 正式净值，到期用该日正式净值核对。")
         if reference:
             item["baseNavDate"] = reference
             item["limitations"].insert(
@@ -626,7 +639,9 @@ def prepare_trial_release(directory: Path, *, holdings=None, clock=None):
                 raise ValueError("V2_PUBLICATION_MATERIAL_IDENTITY_MISMATCH")
             materials_identity = materials_input_identity(material)
         end = record["period"].get("end_date")
-        deadline = datetime.combine(datetime.fromisoformat(record["period"]["start_date"]).date(), time(15), ZONE)
+        timing = {"deadline_at": planning["deadline_at"]} if early else {}
+        grouping = data.get("planning_window", planning)
+        deadline = publication_deadline({**timing, "target_date": record["period"]["start_date"]})
         ex_ante = bool(
             packet.get("source_ready")
             and materials_identity
@@ -653,6 +668,9 @@ def prepare_trial_release(directory: Path, *, holdings=None, clock=None):
                     **({"reference_nav_date": reference} if reference else {}),
                     "target_date": record["period"]["start_date"],
                     "end_date": end,
+                    **timing,
+                    **({"planning_base_date": grouping["base_nav_date"],
+                        "planning_target_date": grouping["target_nav_date"]} if early else {}),
                 },
             }
         )
@@ -702,6 +720,8 @@ def daily_records(owner, codes, target):
     if not codes:
         return []
     owner_hash = digest(owner)
+    from app.services.prediction_window_v2 import publication_deadline
+
     result = []
     with get_engine().connect() as connection:
         if connection.scalar(text("SELECT to_regclass('prediction_review_v2_release')")) is None:
@@ -730,10 +750,10 @@ def daily_records(owner, codes, target):
                 if (
                     row["fund_code"] != code
                     or identity.get("owner_hash") != owner_hash
-                    or identity.get("target_date") != str(target)
+                    or identity.get("planning_target_date", identity.get("target_date")) != str(target)
                 ):
                     continue
-                cutoff = datetime.combine(datetime.fromisoformat(identity["target_date"]).date(), time(15), ZONE)
+                cutoff = publication_deadline(identity)
                 carried = item.get("carried_forward") or {}
                 release_id = carried.get("release_id", stored["release_id"])
                 adopted_at = _stamp(carried["adopted_at"]) if carried else stored["adopted_at"]
@@ -759,6 +779,9 @@ def daily_records(owner, codes, target):
                         "base_date": identity["base_date"],
                         "reference_nav_date": identity.get("reference_nav_date"),
                         "target_date": identity["target_date"],
+                        "planning_base_date": identity.get("planning_base_date", identity["base_date"]),
+                        "planning_target_date": identity.get("planning_target_date", identity["target_date"]),
+                        "deadline_at": identity.get("deadline_at"),
                         "end_date": identity.get("end_date"),
                         "owner_verified": True,
                         "snapshot_verified": identity.get("snapshot_verified") is True,

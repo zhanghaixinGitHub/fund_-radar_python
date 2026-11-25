@@ -8,17 +8,18 @@ from pathlib import Path
 import httpx
 
 from app.core.config import get_settings
-from app.services.direction_1d_protocol import digest, window
-from app.services.fund_daily_prediction import TERMINAL
+from app.services.direction_1d_protocol import digest, window as close_window
+from app.services.fund_daily_prediction import TERMINAL, supplement_run_id
 from app.services.fund_exposure_common import now, read
 from app.services.fund_materials_store import versioned_save
 from app.services.fund_workflow_materials import registered_materials, workflow_root
+from app.services.prediction_window_v2 import is_midnight, window
 
 PROJECT = Path(__file__).resolve().parents[2]
 
 
 class LocalDailyBackend:
-    """同一运行复用服务作业，逐只异常留痕，批准与方向始终来自实际聊天审阅。"""
+    """逐基金补件与正式结果读回；旧运行可查询已登记的同步作业。"""
 
     def __init__(self, directory, core=Path(r"D:\Project-FullStack\workSpace01\02-java")):
         self.directory, self.core = Path(directory), core
@@ -43,6 +44,17 @@ class LocalDailyBackend:
         result = reconcile(self, all_archived=all_archived)
         result["natural_month_endpoints"] = reconcile_due_endpoints(self)
         versioned_save(self.directory / "natural-month-endpoints-summary.json", result["natural_month_endpoints"])
+        return result
+
+    def prediction_outcomes(self, scope):
+        from app.services.prediction_generation import verify_all_outcomes
+
+        summary = verify_all_outcomes(progress_reporter=lambda *args: None, fund_codes=scope)
+        result = {
+            "status": "PARTIAL_SUCCESS" if any(summary[k] for k in ("pending", "failed", "remaining")) else "SUCCEEDED",
+            "summary": summary, "scope": list(scope),
+        }
+        versioned_save(self.directory / "prediction-outcomes.json", result)
         return result
 
     def one_day_outcome_status(self):
@@ -71,6 +83,8 @@ class LocalDailyBackend:
         return prepare_monthly(scope, self.directory)
 
     def nav_input_hash(self, code):
+        if is_midnight(self.window):
+            return None
         from app.services.fund_prediction_nav_identity import current_prediction_nav_identity
 
         return current_prediction_nav_identity(code, self.window["base_nav_date"])
@@ -119,7 +133,7 @@ class LocalDailyBackend:
             item["checklist_current_predictions"] = item["read_back"] and item["fund_code"] in dated_predictions
         return receipt
 
-    def ratings(self, terminal):
+    def ratings(self, terminal, state=None):
         """资料终态后执行持仓月评；公告和持仓检查没有真实回执时保持待办。"""
         # 再取一次本人持仓，避免同步期间已清仓的基金仍被新发布。
         from datetime import date, timedelta
@@ -133,6 +147,8 @@ class LocalDailyBackend:
         from app.services.fund_rating_pipeline import _period_covered, current_inputs
 
         codes = set(owner_scope(self.settings, self.owner))
+        if state is not None:
+            codes.intersection_update(state["scope"])
         with Session(get_nav_preview_engine()) as session:
             current = current_inputs(session, sorted(codes))
         self.rating_bundles = {
@@ -146,12 +162,32 @@ class LocalDailyBackend:
             return {"status": "SUCCEEDED", "scope": [], "reason": "EMPTY_HOLDINGS", "readback": []}
         workflow = MarketSyncWorkflow(scope_provider=lambda: [r for r in catalog if r["fund_code"] in codes])
         try:
-            for child in terminal["children"]:
+            checked_notices = set()
+            for child in terminal.get("children", ()):
                 items = (child.get("result_summary") or {}).get("items", [])
                 if child["job_type"] == "FUND_NEWS":
                     workflow.news_results = {r["fund_code"]: r for r in items if r["fund_code"] in codes}
                 elif child["job_type"] == "FUND_MATERIALS":
                     workflow.material_results = {r["fund_code"]: r for r in items if r["fund_code"] in codes}
+            if state is not None:
+                from app.services.fund_daily_profiles import VERIFIED_SOURCE_RESULTS
+
+                for code in codes:
+                    path = self.directory / "supplement-funds" / (code + ".json")
+                    receipt = read(path) if path.is_file() else {}
+                    if (receipt.get("job_id") != supplement_run_id(state)
+                            or receipt.get("fund_code") != code or receipt.get("window") != state["window"]
+                            or receipt.get("day") != state["checked_at"][:10]):
+                        continue
+                    verified_fields = {
+                        row["field"] for row in receipt["items"]
+                        if row.get("required_date") == state["window"]["base_nav_date"]
+                        and row.get("status") in VERIFIED_SOURCE_RESULTS and row.get("evidence_ref")
+                    }
+                    if "MATERIALS" in verified_fields:
+                        workflow.material_results[code] = {"status": "SUCCEEDED", "gaps": []}
+                    if "NOTICES" in verified_fields:
+                        checked_notices.add(code)
             from app.services.fund_market_review import pending_events
 
             # 同步中心的精简摘要不含事项正文；必须读取原公告台账，不能把字段缺失当作无事项。
@@ -166,6 +202,7 @@ class LocalDailyBackend:
                     if news.get("status") == "SUCCEEDED"
                     and news.get("catalog_complete")
                     and news.get("coverage", {}).get("end", "") >= str(now().date())
+                    and (state is None or code in checked_notices)
                     else "FAILED"
                 )
                 item["candidate_events"] = pending_events(news.get("candidate_events", []))
@@ -214,10 +251,12 @@ class LocalDailyBackend:
         self.scope = scope
         # 一个运行分页读取一次正式档案；新保存后只刷新受影响基金，避免逐周期N+1。
         from app.commands.fund_prediction_followthrough import saved_records
+        from app.services.fund_daily_prediction_v2 import adoption
 
-        self.window = window(now())
+        clock = now()
+        self.window = window(clock) if adoption() is not None else close_window(clock)
         self.records = saved_records(self.owner, scope, self.window["target_nav_date"], self.core / ".env")
-        return now().isoformat(), self.owner, scope, self.window
+        return clock.isoformat(), self.owner, scope, self.window
 
     def guard(self, output, blocked_file):
         self.blocked_file = blocked_file
@@ -303,45 +342,6 @@ class LocalDailyBackend:
                 json.dump(active, stream, ensure_ascii=False)
         return filtered
 
-    def latest_batch(self):
-        return self.get(self.base + "/all/latest")
-
-    def start_or_reuse(self, previous):
-        # 运行版本必须认识 materialsOnly，探针失败不会实际启动任务。
-        probe = self.client.post(self.base + "/all", json={"materialsOnly": "__invalid_contract_probe__"})
-        if probe.status_code != 422 or not any(
-            x.get("loc") == ["body", "materialsOnly"] for x in probe.json().get("detail", [])
-        ):
-            raise ValueError("RUNNING_SERVICE_MATERIALS_ONLY_CONTRACT_MISSING")
-        if previous and previous["status"] not in TERMINAL:
-            return {"job_id": previous["job_id"], "reused": True}
-        from app.services.fund_exposure_common import ROOT
-
-        state = read(ROOT.parent / "sync-center/jobs.json")
-        active = [j for j in state["jobs"] if j["status"] not in TERMINAL]
-        if active:
-            original = next((j for j in active if j["status"] == "RUNNING"), active[0])
-            return {"job_id": original["job_id"], "reused": True}
-        response = self.client.post(self.base + "/all", json={"materialsOnly": True, "ownerUserId": self.owner})
-        if response.status_code == 409:
-            # 与其他正常入口竞态且明确未接受时，恢复实际原作业等待，不重试POST。
-            state = read(ROOT.parent / "sync-center/jobs.json")
-            active = [j for j in state["jobs"] if j["status"] not in TERMINAL]
-            if active:
-                original = next((j for j in active if j["status"] == "RUNNING"), active[0])
-                return {"job_id": original["job_id"], "reused": True}
-        response.raise_for_status()
-        return {"job_id": response.json()["job_id"], "reused": False}
-
-    def recover_submission(self, intent):
-        latest = self.latest_batch()
-        previous_id = (intent.get("previous") or {}).get("job_id")
-        if latest and latest["job_id"] != previous_id:
-            return {"job_id": latest["job_id"], "recovered_uncertain_submission": True}
-        if latest and latest["status"] not in TERMINAL:
-            return {"job_id": latest["job_id"], "reused": True}
-        raise ValueError("UNCERTAIN_SUBMISSION_REQUIRES_ORIGINAL_JOB_LOOKUP")
-
     def batch_status(self, batch):
         job = self.get(self.base + "/" + batch["job_id"])
         # 子任务ID来自实际状态树，不按固定12阶段或旧jobId猜测。
@@ -405,7 +405,7 @@ class LocalDailyBackend:
                     versioned_save(path, child)
         return result
 
-    def recover_materials(self, code, output, current_window):
+    def recover_materials(self, code, output, current_window, *, missing_fields=None):
         from app.services import fund_daily_prediction_v2 as v2
 
         if v2.adoption() is not None:
@@ -417,7 +417,7 @@ class LocalDailyBackend:
                 from app.services.market_company_materials import MarketCompanyCollector
 
                 self.collector = MarketCompanyCollector(workflow_root())
-            recovered = recover(code, output, current_window, collector=self.collector)
+            recovered = recover(code, output, current_window, collector=self.collector, missing_fields=missing_fields)
             if recovered.get("materials_path"):
                 from app.services.fund_workflow_materials import inspect_materials
 
@@ -436,15 +436,16 @@ class LocalDailyBackend:
         from app.services.fund_prediction_recovery import recover
 
         # 同一输入版本已复核且守卫无资料行动时，无须重复采集或改写批准时间。
-        report = read(self.directory / "followthrough.json")
-        fund = next((f for f in report["funds"] if f["fund_code"] == code), None)
-        if fund and not fund["actions"]:
-            return {"status": "CURRENT_MATERIALS_VERIFIED"}
+        if missing_fields is None:
+            report = read(self.directory / "followthrough.json")
+            fund = next((f for f in report["funds"] if f["fund_code"] == code), None)
+            if fund and not fund["actions"]:
+                return {"status": "CURRENT_MATERIALS_VERIFIED"}
         if not hasattr(self, "collector"):
             from app.services.market_company_materials import MarketCompanyCollector
 
             self.collector = MarketCompanyCollector(workflow_root())
-        return recover(code, output, current_window, collector=self.collector)
+        return recover(code, output, current_window, collector=self.collector, missing_fields=missing_fields)
 
     def save_profiles(self, scope):
         from app.db.session import get_engine
@@ -456,6 +457,11 @@ class LocalDailyBackend:
         if {row["fund_code"] for row in rows} != set(scope):
             raise ValueError("DAILY_HOLDING_PROFILE_MISSING")
         return save_profiles(self.directory, rows)
+
+    def supplements(self, state, profiles):
+        from app.services.fund_daily_supplements import DailySupplements
+
+        return DailySupplements(self.directory, state, profiles)
 
     def approve(self, code, review):
         from app.services import fund_daily_prediction_v2 as v2
@@ -631,7 +637,7 @@ class LocalDailyBackend:
             handoff = registered_materials(code, at=now())
             if not handoff:
                 raise ValueError("V2_CURRENT_MATERIALS_REQUIRED")
-            # 资料包不变但晚到净值入库时，也必须准备新输入，不能永久复用缺净值快照。
+            # 零点窗口按已见证据版本重审。旧窗口仍把正式基准净值版本纳入身份。
             nav_hash = self.nav_input_hash(code)
             packet = v2.freeze_request(folder, self.owner, code, horizon, self.window, handoff, nav_input_hash=nav_hash)
             from app.services.fund_daily_review import prepare_daily_review

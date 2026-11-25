@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from app.services.direction_1d_protocol import digest
-from app.services.direction_1d_protocol import window as planning_window
+from app.services.prediction_window_v2 import is_midnight, window as planning_window
 from app.services.fund_exposure_common import now, read
 from app.services.fund_materials_store import versioned_save
 from app.services.prediction_daily_guidance import review_guidance
@@ -29,8 +29,9 @@ def matches(row, code, horizon, window, materials_input_hash, nav_input_hash=Non
         and row.get("policy_hash") == digest(policy_v2())
         and row.get("fund_code") == code
         and row.get("horizon") == horizon
-        and row.get("base_date") == window["base_nav_date"]
-        and row.get("target_date") == window["target_nav_date"]
+        and row.get("planning_base_date", row.get("base_date")) == window["base_nav_date"]
+        and row.get("planning_target_date", row.get("target_date")) == window["target_nav_date"]
+        and (not is_midnight(window) or row.get("deadline_at") == window["deadline_at"])
         and row.get("owner_verified") is True
         and row.get("snapshot_verified") is True
         and materials_input_hash is not None
@@ -124,8 +125,9 @@ def followthrough_report(owner, codes, window, records, *, at):
         ready = bool(handoff and not failure)
         from app.services.fund_prediction_nav_identity import current_prediction_nav_identity
 
+        nav_hash = None if is_midnight(window) else current_prediction_nav_identity(code, window["base_nav_date"], at=at)
         result = verify_outputs(code, window, records, materials_input_hash=identity, materials_ready=ready,
-                                nav_input_hash=current_prediction_nav_identity(code, window["base_nav_date"], at=at))
+                                nav_input_hash=nav_hash)
         result["prepare_failure"] = failure
         if not ready:
             result["actions"] = [
@@ -170,7 +172,7 @@ def freeze_request(folder, owner, code, horizon, window, handoff, *, nav_input_h
     from app.services.prediction_review_v2_requests import request_batch
 
     live = planning_window(now())
-    if any(live[k] != window[k] for k in ("base_nav_date", "target_nav_date")):
+    if live != window:
         raise ValueError("V2_DAILY_REQUEST_WINDOW_CHANGED")
     current = adoption()
     if current is None:
@@ -256,7 +258,9 @@ def import_reviewed_trial(folder, owner, code, horizon, window, materials_input_
     for entry in manifest["selection"]:
         packet, data = checked_input(directory, entry)
         period = packet["periods"][horizon]
-        if period["base_date"] != window["base_nav_date"] or period["start_date"] != window["target_nav_date"]:
+        grouping = data.get("planning_window", data.get("window", {}))
+        if (grouping != window if is_midnight(window) else
+            period["base_date"] != window["base_nav_date"] or period["start_date"] != window["target_nav_date"]):
             raise ValueError("V2_DAILY_TRIAL_WINDOW_MISMATCH")
         if entry["fund_code"] == code:
             material = read(Path(data["materials_path"])) if data.get("materials_path") else data

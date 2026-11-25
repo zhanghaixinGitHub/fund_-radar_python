@@ -37,8 +37,11 @@ def review_calendar(data: dict, code: str, at: datetime):
     境内黄金联接另查自己的工作日估值条款，不从股票条款泛化其他资产。
     """
     from app.services.fund_listed_product_contract import POLICY as multi_listed_policy
-    from app.services.prediction_features import read_fund_data
+    from app.services.prediction_features import public_calendar, read_fund_data
+    from app.services.prediction_window_v2 import is_midnight
+    from app.services.qdii_valuation_contract import LISTED_FOF_POLICY, verified_qdii_window
 
+    early = is_midnight(data.get("window"))
     mode = (data.get("calendar_evidence") or {}).get("policy")
     from app.services.vietnam_valuation_contract import POLICY as vn_policy
 
@@ -49,7 +52,14 @@ def review_calendar(data: dict, code: str, at: datetime):
         "CN_GOLD_ETF_NAV_WINDOW_V1",
         vn_policy,
         multi_listed_policy,
-    }:
+    } and not (early and mode == LISTED_FOF_POLICY):
+        if early:
+            # 日期准入只需要已登记的基金与官方日历，不依赖净值、分红同步或其归档写入。
+            with get_engine().connect() as connection:
+                profiles = repo.profiles(connection, [code])
+            if len(profiles) != 1 or profiles[0]["status"] != "ACTIVE":
+                raise PredictionFailure("FUND_SOURCE_UNAVAILABLE", "SOURCE", "基金不存在或登记来源未启用")
+            return public_calendar(profiles[0])
         return read_fund_data(code, at)["calendar"]
     from app.services.comprehensive_calendar import (
         QDII_WORKDAY_POLICY,
@@ -66,12 +76,11 @@ def review_calendar(data: dict, code: str, at: datetime):
     calendars = load_live_calendars()
     past, current = calendars[0], calendars[-1]
     calendar_hash = digest([item.content_hash for item in calendars])
-    from app.services.qdii_valuation_contract import verified_qdii_window
 
     if mode == vn_policy:
         from app.services.vietnam_valuation_contract import assess_vietnam_valuation
 
-        # 日期契约可独立核验，缺行情/指定汇率/本基金净值仍由source_ready阻断。
+            # 日期契约独立核验；行情和汇率的缺项留给逐周期审阅。
         if (
             data.get("fund_code") != code
             or len(profiles) != 1
@@ -93,14 +102,15 @@ def review_calendar(data: dict, code: str, at: datetime):
     if (
         data.get("fund_code") != code
         or len(profiles) != 1
-        or not data.get("time_context", {}).get("baseline_complete")
+        or (not early and not data.get("time_context", {}).get("baseline_complete"))
         or data["window"]["calendar_version"] != calendar_hash
     ):
         raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "本基金实际投向或估值条款仍待核验")
-    if mode in {"QDII_CNY_VERIFIED_SESSION_V1", multi_listed_policy}:
-        verified = verified_qdii_window(profiles[0], data, documents, data["window"], as_of=at)
+    options = {"calendar_only": True} if early else {}
+    if mode in {"QDII_CNY_VERIFIED_SESSION_V1", LISTED_FOF_POLICY, multi_listed_policy}:
+        verified = verified_qdii_window(profiles[0], data, documents, data["window"], as_of=at, **options)
     else:
-        verified = verified_domestic_window(profiles[0], data, documents, data["window"])
+        verified = verified_domestic_window(profiles[0], data, documents, data["window"], **options)
     if not verified or mode == "CN_GOLD_ETF_NAV_WINDOW_V1" and not verified_gold_valuation_days(data, documents):
         raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "本基金实际投向或估值条款仍待核验")
     sessions, end, source_hash = (
@@ -141,6 +151,7 @@ def _matched_future_sessions(data, documents, sessions, coverage_end, calendar_h
     from app.services.fund_listed_product_contract import european_calendar
     from app.services.fund_valuation_sessions import hk_closed_dates
     from app.services.vietnam_valuation_contract import POLICY as vn_policy
+    from app.services.prediction_window_v2 import is_midnight
 
     if data["calendar_evidence"].get("policy") == vn_policy:
         from app.services.vietnam_valuation_contract import future_sessions
@@ -152,6 +163,7 @@ def _matched_future_sessions(data, documents, sessions, coverage_end, calendar_h
     evidence = data["calendar_evidence"]
     own = documents.get(evidence.get("prospectus_ref"), {})
     body = re.sub(r"\s+", "", own.get("body", ""))
+    early = is_midnight(data["window"])
     listed = evidence["policy"] == multi_listed_policy
     open_quote = evidence.get("joint_open_days_quote", "")
     listed_clause = (
@@ -161,6 +173,9 @@ def _matched_future_sessions(data, documents, sessions, coverage_end, calendar_h
         and all(market in open_quote for market in ("纽约", "伦敦", "东京"))
         and "估值日为本基金的开放日" in body
     )
+    joint = early and (listed_clause or bool(re.search(
+        r"估值日为本基金相关的证券(?:[/／、]期货)?交易场所的共同交易日", body
+    )))
     if (
         data["fund_code"] not in own.get("codes", [])
         or own.get("kind") != "PROSPECTUS"
@@ -185,10 +200,18 @@ def _matched_future_sessions(data, documents, sessions, coverage_end, calendar_h
             for q in [*company_quotes, *data["market"].values()]
         } - {"CN"}
         references = evidence.get("calendar_refs", {})
+        if early:
+            # 没有今天的收盘行情时，使用已经披露的证券所属市场来核日期。
+            suffixes = {"US": "US", "HK": "HK", "JP": "JP", "SH": "CN", "SZ": "CN", "BJ": "CN"}
+            markets = (markets - {None}) | {
+                suffixes.get(c["code"].rsplit(".", 1)[-1], (c.get("quote") or {}).get("valuation_market"))
+                for c in data["companies"]
+            } - {"CN"}
     if not markets or not markets <= ({"HK", "US", "JP", "UK", "CH"} if listed else {"HK", "US", "JP"}):
         raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "未来交易市场日历范围仍待核验")
     calendars, hashes = [], [calendar_hash, own["body_hash"]]
     end = min(coverage_end, date(target.year, 12, 31))
+    covered_from = date(target.year, 1, 1)
     for market in sorted(markets):
         source = documents[references[market]]
         host = urlparse(source.get("url", "")).hostname
@@ -200,6 +223,7 @@ def _matched_future_sessions(data, documents, sessions, coverage_end, calendar_h
             if target < start or target > stop:
                 raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "当前目标超出已核实日历覆盖")
             end = min(end, stop)
+            covered_from = max(covered_from, start)
         elif market == "HK":
             # 完整港交所通告同时列出半日市，本接口保守视为未支持的日期。
             closed = hk_closed_dates(source, target.year)
@@ -213,13 +237,29 @@ def _matched_future_sessions(data, documents, sessions, coverage_end, calendar_h
                 or host != {"US": "www.nyse.com", "JP": "www.jpx.co.jp"}[market]
             ):
                 raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "境外年度日历尚未核验")
-            closed = {date.fromisoformat(d) for d in parsed["closed_dates"] + parsed.get("early_close_dates", [])}
+            if early and (
+                (market == "US" and (
+                    len(parsed["closed_dates"]) < 10 or len(parsed.get("early_close_dates", [])) < 2
+                    or not all(x in parsed.get("source_text", "") for x in ("Core Trading Session", "4:00 p.m."))
+                )) or (market == "JP" and (
+                    len(parsed["closed_dates"]) < 20 or "3:30 pm" not in parsed.get("hours_source_text", "")
+                    or urlparse(parsed.get("hours_source_url", "")).hostname != host
+                ))
+            ):
+                raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "境外年度日历或正常交易时段尚未核实")
+            special = [] if joint else parsed.get("early_close_dates", [])
+            closed = {date.fromisoformat(d) for d in parsed["closed_dates"] + special}
         calendars.append(closed)
         hashes.append(source["body_hash"])
     domestic = set(sessions)
     from app.services.fund_daily_profiles import confirmed_us_exception
 
-    day = target
+    if joint:
+        actual = tuple(d for d in sessions if covered_from <= d <= end and all(d not in closed for closed in calendars))
+        return actual, end, digest(hashes)
+    day = date.fromisoformat(data["window"]["base_nav_date"]) if early else target
+    if early and day < covered_from:
+        raise PredictionFailure("CALENDAR_RANGE_MISSING", "CALENDAR", "基准日超出已核实的境外日历覆盖")
     while day <= end:
         if any((day in domestic) != (day.weekday() < 5 and day not in closed) for closed in calendars):
             proof = (

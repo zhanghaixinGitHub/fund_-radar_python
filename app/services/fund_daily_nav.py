@@ -2,14 +2,32 @@
 
 import hashlib
 import json
+import re
 from datetime import date
 from pathlib import Path
 
+from sqlalchemy import select
+
 from app.core.config import get_settings
+from app.db.session import get_nav_preview_engine
+from app.models.fund import FundShareClass
 from app.services.fund_exposure_common import now
 from app.services.fund_materials_store import versioned_save
 from app.services.fund_prediction_nav_identity import current_nav_identity, nav_identity
 from app.services.tushare_fund_sync import TushareFundSyncService
+
+
+def market_source_code(code: str) -> str:
+    """同一份额的既有目录代码保留场内后缀。"""
+    with get_nav_preview_engine().connect() as connection:
+        registered = connection.scalar(
+            select(FundShareClass.source_fund_code).where(FundShareClass.fund_code == code)
+        )
+    if registered is None:
+        return code + ".OF"
+    if not re.fullmatch(r"[0-9]{6}\.[A-Z]+", registered) or registered.split(".")[0] != code:
+        raise ValueError("BASE_NAV_MARKET_SOURCE_MISMATCH")
+    return registered
 
 
 def refresh_missing_nav(code, base_date, output, *, service_factory=TushareFundSyncService):
@@ -47,8 +65,10 @@ def refresh_missing_nav(code, base_date, output, *, service_factory=TushareFundS
 
     result = {"fund_code": code, "base_nav_date": str(day), "attempted_at": now().isoformat()}
     try:
+        symbol = market_source_code(code)
+        result["source_symbol"] = symbol
         service._provider._client.event_hooks["response"].append(capture)
-        outcome = service.sync_market_nav_history((code + ".OF",), start_date=day, end_date=day)
+        outcome = service.sync_market_nav_history((symbol,), start_date=day, end_date=day)
         result["sync"] = outcome.to_payload()
     except Exception as error:
         result["failure"] = type(error).__name__

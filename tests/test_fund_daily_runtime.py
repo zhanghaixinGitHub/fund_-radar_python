@@ -56,15 +56,6 @@ def test_one_day_archive_retry_is_bounded_and_does_not_retry_identity_rejection(
     assert len(requests) == count
 
 
-def test_uncertain_submission_does_not_submit_again():
-    b = object.__new__(LocalDailyBackend)
-    b.latest_batch = lambda: {"job_id": "new", "status": "RUNNING"}
-    assert b.recover_submission({"previous": {"job_id": "old"}})["job_id"] == "new"
-    b.latest_batch = lambda: {"job_id": "old", "status": "SUCCEEDED"}
-    with pytest.raises(ValueError, match="UNCERTAIN_SUBMISSION"):
-        b.recover_submission({"previous": {"job_id": "old"}})
-
-
 def test_approval_cannot_select_old_package_after_new_original_was_collected(tmp_path, monkeypatch):
     """新原件和旧包不能分走两条成功链；缺该原件即在正式用途批准前拒绝。"""
     from app.services import fund_daily_prediction_v2 as daily_v2
@@ -84,42 +75,6 @@ def test_approval_cannot_select_old_package_after_new_original_was_collected(tmp
     with pytest.raises(ValueError, match="CURRENT_JP_FINANCIAL_ORIGINAL_NOT_IN_REVIEWED_MATERIALS"):
         b.approve("123456", {"materials_path": str(selected), "note": "本期实际阅读说明"})
     assert approved == []
-
-
-def test_old_service_without_materials_only_contract_never_submits():
-    calls = []
-
-    class Client:
-        def post(self, url, *, json):
-            calls.append(json)
-            return SimpleNamespace(status_code=422, json=lambda: {"detail": [{"loc": ["body", "otherField"]}]})
-
-    b = object.__new__(LocalDailyBackend)
-    b.client, b.base = Client(), "http://127.0.0.1:8000"
-    with pytest.raises(ValueError, match="CONTRACT_MISSING"):
-        b.start_or_reuse({"status": "SUCCEEDED"})
-    assert len(calls) == 1 and calls[0]["materialsOnly"] is not True
-
-
-def test_daily_material_submission_binds_owner_for_real_collection_scope(monkeypatch):
-    import json
-
-    import httpx
-    from app.services import fund_daily_runtime as runtime
-
-    calls = []
-    def handler(request):
-        body = json.loads(request.content)
-        calls.append(body)
-        if body["materialsOnly"] is not True:
-            return httpx.Response(422, json={"detail": [{"loc": ["body", "materialsOnly"]}]})
-        return httpx.Response(200, json={"job_id": "owner-material-job"})
-    monkeypatch.setattr(runtime, "read", lambda path: {"jobs": []})
-    b = object.__new__(LocalDailyBackend)
-    b.base, b.owner = "http://local", "bound-owner"
-    with httpx.Client(transport=httpx.MockTransport(handler)) as b.client:
-        assert b.start_or_reuse(None) == {"job_id": "owner-material-job", "reused": False}
-    assert calls[-1] == {"materialsOnly": True, "ownerUserId": "bound-owner"}
 
 
 def test_new_holding_uses_own_report_and_actual_quote_without_fake_financials(tmp_path, monkeypatch):

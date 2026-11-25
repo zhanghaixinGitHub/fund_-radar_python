@@ -653,7 +653,7 @@ def resolve_pending_targets(limit=100):
     return {"checked": len(pending), "resolved": resolved_count}
 
 
-def verify_outcomes(limit=100, *, checked_before=None, prediction_ids=None):
+def verify_outcomes(limit=100, *, checked_before=None, prediction_ids=None, fund_codes=None):
     """追加到期答案；批次水位使分页只检查本轮尚未处理的原预测，缺资料仍保留等待。"""
     from app.services.prediction_contract import reinvested_series
 
@@ -671,6 +671,7 @@ def verify_outcomes(limit=100, *, checked_before=None, prediction_ids=None):
             """SELECT prediction_id,payload,content_hash FROM fund_prediction_record
             WHERE mode='LIVE' AND coalesce(payload->>'endDate',payload->>'nominalEndDate')<:due_before
             AND (CAST(:prediction_ids AS uuid[]) IS NULL OR prediction_id=ANY(CAST(:prediction_ids AS uuid[])))
+            AND (CAST(:fund_codes AS text[]) IS NULL OR fund_code=ANY(CAST(:fund_codes AS text[])))
             AND (CAST(:checked_before AS timestamptz) IS NULL OR
               (generated_at<=:checked_before AND NOT EXISTS
                 (SELECT 1 FROM prediction_check_state s WHERE s.prediction_id=fund_prediction_record.prediction_id
@@ -682,6 +683,7 @@ def verify_outcomes(limit=100, *, checked_before=None, prediction_ids=None):
             due_before=str(due_before),
             checked_before=checked_before,
             prediction_ids=selected,
+            fund_codes=fund_codes,
         )
     completed = created = pending = failed = 0
     for record in records:
@@ -784,12 +786,14 @@ def verify_outcomes(limit=100, *, checked_before=None, prediction_ids=None):
     return {"checked": len(records), "completed": completed, "created": created, "pending": pending, "failed": failed}
 
 
-def verify_all_outcomes(*, progress_reporter, max_batches=20):
-    """一键同步专用核对：分页覆盖已到期原预测，不生成预测、不采集外部资料。
+def verify_all_outcomes(*, progress_reporter, max_batches=20, fund_codes=None):
+    """分页覆盖已到期原预测，日常任务可限定本轮持仓范围。
 
     同一轮每条原预测最多处理一次；缺净值、分红或日历时留待下轮，不能因等待项反复重试。
     每页最多500条、每轮最多20页；超出预算时明确记录剩余数量，不把部分检查记为全部成功。
     """
+    if fund_codes is not None:
+        fund_codes = list(fund_codes)
     with get_engine().connect() as c:
         started = c.execute(text("SELECT clock_timestamp()")).scalar()
     due_before = str(started.astimezone(ZoneInfo("Asia/Shanghai")).date())
@@ -799,10 +803,11 @@ def verify_all_outcomes(*, progress_reporter, max_batches=20):
             return c.execute(
                 text("""SELECT count(*) FROM fund_prediction_record p WHERE mode='LIVE'
                 AND coalesce(payload->>'endDate',payload->>'nominalEndDate')<:due_before
+                AND (CAST(:fund_codes AS text[]) IS NULL OR p.fund_code=ANY(CAST(:fund_codes AS text[])))
                 AND generated_at<=:started AND NOT EXISTS
                   (SELECT 1 FROM prediction_check_state s WHERE s.prediction_id=p.prediction_id
                    AND s.last_attempt_at>=:started)"""),
-                {"due_before": due_before, "started": started},
+                {"due_before": due_before, "started": started, "fund_codes": fund_codes},
             ).scalar_one()
 
     total = remaining()
@@ -812,7 +817,7 @@ def verify_all_outcomes(*, progress_reporter, max_batches=20):
     for _ in range(max_batches):
         if summary["checked"] >= total:
             break
-        result = verify_outcomes(limit=500, checked_before=started)
+        result = verify_outcomes(limit=500, checked_before=started, fund_codes=fund_codes)
         batches += 1
         for key in summary:
             summary[key] += result[key]

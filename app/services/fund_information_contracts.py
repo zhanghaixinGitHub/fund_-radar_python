@@ -1,7 +1,7 @@
 """002112 的事项和时间边界：从已冻结原文及交易日历计算，不让生成模型猜测。"""
 
 import re
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from datetime import datetime
 
@@ -27,8 +27,11 @@ def time_context(data: dict, sessions: list[str] | None = None) -> dict:
     if sessions != sorted(set(sessions)):
         raise ValueError("ANALYSIS_CALENDAR_INVALID")
     today = str(stamp.date())
-    index = bisect_left(sessions, today)
-    if index < len(sessions) and sessions[index] == today and stamp.hour >= 15:
+    from app.services.prediction_window_v2 import is_midnight
+
+    early = is_midnight(data["window"])
+    index = bisect_right(sessions, today) if early else bisect_left(sessions, today)
+    if not early and index < len(sessions) and sessions[index] == today and stamp.hour >= 15:
         index += 1
     if not 0 < index < len(sessions):
         raise ValueError("ANALYSIS_CALENDAR_UNAVAILABLE")
@@ -40,7 +43,7 @@ def time_context(data: dict, sessions: list[str] | None = None) -> dict:
         raise ValueError("ANALYSIS_NAV_DATE_MISMATCH")
 
     def state(day):
-        if day and (day > base or day not in sessions):
+        if day and (day > today if early else day > base or day not in sessions):
             raise ValueError("ANALYSIS_QUOTE_DATE_INVALID")
         return "MISSING" if not day else "READY" if day == base else "STALE"
 
@@ -77,8 +80,12 @@ def time_context(data: dict, sessions: list[str] | None = None) -> dict:
             proof = verified_jp_holiday_reference(data, documents, code, quote, data["window"])
             if proof:
                 markets[code].update(status="READY_LAST_SESSION", valuation_reference=proof)
+    if early and latest_nav and latest_nav > base:
+        raise ValueError("ANALYSIS_NAV_DATE_MISMATCH")
     nav_state = state(latest_nav)
     reference = data.get("reference_nav_date")
+    if early and reference is not None:
+        raise ValueError("ANALYSIS_NAV_REFERENCE_INVALID")
     if reference is not None:
         from app.services.fund_prediction_nav_identity import previous_qdii_nav_date
 

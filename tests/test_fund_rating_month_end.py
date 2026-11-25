@@ -1,5 +1,8 @@
+import json
 from copy import deepcopy
 from datetime import date
+from hashlib import sha256
+from urllib.parse import urlencode
 
 import pytest
 from app.services import fund_rating_month_end as month_end
@@ -104,6 +107,51 @@ def test_official_sequence_rejects_candidate_claims(official, tmp_path, failure)
         bundle["monthly_valuation_proof"]["next_valuation_date"] = "2026-11-03"
     with pytest.raises(ValueError):
         month_end.official_month_end(bundle, date(2026, 10, 30), date(2026, 10, 31), root=tmp_path)
+
+
+@pytest.mark.parametrize("failure", [None, "wrong_share", "truncated", "missing_next", "unofficial"])
+def test_csrc_replays_exact_share_and_complete_cross_month_original(tmp_path, failure):
+    code = "008764"
+    args = {
+        "fundCode": code, "iDisplayStart": "0", "iDisplayLength": "20",
+        "startDate": "2026-10-26", "endDate": "2026-11-04",
+    }
+    rows = [
+        {"code": code, "shortName": "天弘越南市场股票发起（QDII）C", "valuationDate": day, "shareNetValue": value}
+        for day, value in [("2026-10-30", "1.5083"), ("2026-11-02", "1.4766")]
+    ]
+    if failure == "wrong_share":
+        rows[0]["code"] = "008763"
+    if failure == "missing_next":
+        rows.pop()
+    raw = json.dumps({"iTotalDisplayRecords": len(rows) + (failure == "truncated"), "aaData": rows}).encode()
+    source = tmp_path / "sources" / "csrc.json"
+    source.parent.mkdir()
+    source.write_bytes(raw)
+    host = "example.com" if failure == "unofficial" else "eid.csrc.gov.cn"
+    url = f"http://{host}{month_end.CSRC_NAV_PATH}?" + urlencode({
+        "aoData": json.dumps([{"name": key, "value": value} for key, value in args.items()]),
+    })
+    bundle = {
+        "fund_code": code,
+        "as_of_date": "2026-10-30",
+        "monthly_valuation_proof": {
+            "format": "CSRC_EID_SHARE_NAV_V1",
+            "fund_code": code,
+            "as_of_date": "2026-10-30",
+            "month_end": "2026-10-31",
+            "next_valuation_date": "2026-11-02",
+            "official_nav_source_ref": {
+                "file": "sources/csrc.json", "sha256": sha256(raw).hexdigest(), "url": url, "http_status": 200,
+            },
+        },
+    }
+    dates = (date(2026, 10, 30), date(2026, 10, 31))
+    if failure:
+        with pytest.raises(ValueError, match="MONTH_END_CSRC"):
+            month_end.official_month_end(bundle, *dates, root=tmp_path)
+    else:
+        assert month_end.official_month_end(bundle, *dates, root=tmp_path)
 
 
 @pytest.mark.parametrize(

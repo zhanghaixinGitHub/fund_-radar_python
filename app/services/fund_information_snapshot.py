@@ -25,7 +25,7 @@ def enabled(code: str) -> bool:
     return isinstance(code, str) and len(code) == 6 and code.isascii() and code.isdigit()
 
 
-def prepare(now, fund_code="002112", materials_path=None) -> dict:
+def prepare(now, fund_code="002112", materials_path=None, *, planning=None, valuations=None) -> dict:
     """所有基金共用资料契约；仅兼容原试点已有的来源格式，不设置分析白名单。
 
     显式提供的资料包优先，默认按基金代码查找自己的资料包。002112 的旧采集档案
@@ -53,6 +53,8 @@ def prepare(now, fund_code="002112", materials_path=None) -> dict:
     if materials_path is not None or source_exists(path) or fund_code != "002112":
         from app.services.fund_comprehensive_materials import prepare as prepare_general
 
+        if planning is not None:
+            return prepare_general(now, fund_code, path, planning=planning, valuations=valuations)
         return prepare_general(now, fund_code, path)
     data = _prepare_002112(now)
     from app.services.comprehensive_prediction_policy import policy

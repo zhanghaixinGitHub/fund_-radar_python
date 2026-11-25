@@ -28,8 +28,11 @@ def test_new_task_read_does_not_read_legacy_task_or_modify_it(monkeypatch):
     assert prediction_generation.task_status("test") is expected
 
 
-@pytest.mark.parametrize("ready,expected", [(False, "WAITING_FOR_NAV"), (True, "PENDING_ANALYSIS")])
-def test_request_retains_new_window_and_never_invents_completed_direction(monkeypatch, ready, expected):
+@pytest.mark.parametrize("ready,early,expected", [(False, False, "WAITING_FOR_NAV"), (True, False, "PENDING_ANALYSIS"),
+                                                 (False, True, "PENDING_ANALYSIS")])
+def test_request_retains_new_window_and_never_invents_completed_direction(monkeypatch, ready, early, expected):
+    from app.services.prediction_window_v2 import POLICY
+
     memory = {}
 
     class Connection:
@@ -43,9 +46,8 @@ def test_request_retains_new_window_and_never_invents_completed_direction(monkey
     monkeypatch.setattr(service, "enabled_v2", lambda: True)
     monkeypatch.setattr(service, "current_holdings", lambda: {"scope": ["013330"], "owner_hash": "owner"})
     monkeypatch.setattr(service, "now", lambda: datetime.fromisoformat("2026-11-12T17:00:00+08:00"))
-    monkeypatch.setattr(
-        service, "_readiness", lambda codes, instant: ({"base_nav_date": "2026-11-12"}, {"013330": ready})
-    )
+    window = {"base_nav_date": "2026-11-12", **({"generation_policy": POLICY} if early else {})}
+    monkeypatch.setattr(service, "_readiness", lambda codes, instant: (window, {"013330": ready}))
     monkeypatch.setattr(service, "get_engine", lambda: SimpleNamespace(begin=lambda: nullcontext(Connection())))
     result = service.request_batch(["013330"])
     assert result["status"] == expected
@@ -53,6 +55,9 @@ def test_request_retains_new_window_and_never_invents_completed_direction(monkey
     assert result["createdItems"] == 0 and result["pendingItems"] == 4
     assert result["generatedAt"] is None
     assert all("direction" not in item["result"] for item in result["items"])
+    assert {item["result"]["waitingFor"] for item in result["items"]} == {
+        "ANALYSIS" if early or ready else "NAV"
+    }
     assert {item["horizonId"] for item in result["items"]} == set(service.HORIZONS)
     assert "_ownerHash" not in result
 

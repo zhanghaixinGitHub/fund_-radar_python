@@ -74,6 +74,8 @@ def vietnam_calendar(document, review, year):
 
 
 def _contract(profile, material, documents, window, at):
+    from app.services.prediction_window_v2 import is_midnight
+
     evidence = material["calendar_evidence"]
     code = material["fund_code"]
     name = profile.get("fund_name", "")
@@ -82,8 +84,10 @@ def _contract(profile, material, documents, window, at):
         or "QDII" not in name.upper()
         or "越南" not in name
         or re.search("美元|港元|FOF|联接", name, re.I)
-        or evidence.get("base_date") != window["base_nav_date"]
-        or evidence.get("target_date") != window["target_nav_date"]
+        or (not is_midnight(window) and (
+            evidence.get("base_date") != window["base_nav_date"]
+            or evidence.get("target_date") != window["target_nav_date"]
+        ))
     ):
         raise ValueError("VN_PRODUCT_OR_WINDOW_INVALID")
     own = _document(documents, evidence["prospectus_ref"], {"PROSPECTUS"}, at)

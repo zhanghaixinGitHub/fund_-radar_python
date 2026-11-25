@@ -102,7 +102,7 @@ def parse_jjfl_html(html: str, fund_code: str) -> FeeProfile:
     )
 
 
-def fetch_fee_profile(fund_code: str) -> FeeProfile:
+def fetch_fee_profile(fund_code: str, *, observe=None) -> FeeProfile:
     """抓取指定基金的 f10 费率页并解析；网络或页面异常均转为明确错误。"""
     url = f"{F10_BASE}/jjfl_{fund_code}.html"
     headers = {
@@ -116,7 +116,10 @@ def fetch_fee_profile(fund_code: str) -> FeeProfile:
             raise ValueError(f"F10_UNAVAILABLE: 天天基金费率页返回 {response.status_code}")
         if len(response.content) > MAX_BYTES:
             raise ValueError("F10_RESPONSE_TOO_LARGE: 页面响应超过大小上限")
-        return parse_jjfl_html(response.text, fund_code)
+        profile = parse_jjfl_html(response.text, fund_code)
+        if observe is not None:
+            observe(response)
+        return profile
     except ValueError:
         raise
     except httpx.HTTPError as error:

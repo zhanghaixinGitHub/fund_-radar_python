@@ -22,11 +22,13 @@ def verified_codes(material, base):
     }
 
 
-def refresh(material, current):
+def refresh(material, current, *, symbols=None):
     receipts = []
     documents = {d["id"]: d for d in material.get("documents", [])}
     companies = {c["code"]: c for c in material.get("companies", [])}
     for security, item in material.get("market_quote_exceptions", {}).items():
+        if symbols is not None and security not in symbols:
+            continue
         previous = deepcopy(item)
         item.update(base_date=current["base_nav_date"], target_date=current["target_nav_date"])
         data = {**material, "window": current, "as_of": now().isoformat()}

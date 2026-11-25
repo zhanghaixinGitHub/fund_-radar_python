@@ -220,6 +220,25 @@ def _november_valuation_background(code, product, proof, document, body, title, 
         "招商基金管理有限公司": "招商基金管理有限公司关于旗下基金估值变更的公告",
     }
     text, quote = _compact(body), (proof or {}).get("quote", "")
+    earlier_format = (
+        _compact(title) == titles.get(manager)
+        and any(day in text for day in ("2026年11月5日", "2026年11月05日"))
+        and "ETF" in text
+        and ("002129" in text or "000831" in text)
+    )
+    # 11 月 20 日三份公告均逐篇核过，生效范围只限实际持有对应证券的基金。
+    november_20_holdings = {
+        "华夏基金管理有限公司": ("关于旗下证券投资基金估值调整情况的公告",
+                         ("旗下基金持有的停牌股票", "英力特", "证券代码:000635")),
+        "博道基金管理有限公司": ("关于旗下基金所持停牌股票估值调整的公告",
+                         ("旗下管理的证券投资基金对所持有的", "艾为电子", "股票代码:688798")),
+        "富国基金管理有限公司": ("关于调整旗下基金长期停牌股票估值方法的公告",
+                         ("本公司旗下基金持有的", "珠免集团", "证券代码:600185")),
+    }
+    title_suffix, terms = november_20_holdings.get(manager, ("", ()))
+    november_20_format = bool(terms) and _compact(title) == manager + title_suffix and all(term in text for term in (
+        "2026年11月20日起", "协商一致", *terms,
+    ))
     return bool(
         document
         and document.get("kind") == "REPORT"
@@ -227,13 +246,10 @@ def _november_valuation_background(code, product, proof, document, body, title, 
         and _compact(product) in _compact(quote)
         and re.search(r"(?<!\d)" + code + r"(?!\d)", quote)
         and manager in _compact(document["body"])
-        and _compact(title) == titles.get(manager)
         and not (re.search(r"ETF|交易型开放式", product, re.I) and "联接" not in product)
-        and any(day in text for day in ("2026年11月5日", "2026年11月05日"))
+        and (earlier_format or november_20_format)
         and "指数收益法" in text
         and "旗下" in text
-        and "ETF" in text
-        and ("002129" in text or "000831" in text)
         and ("复牌" in text or "活跃市场" in text)
         and ("收盘" in text or "市价" in text or "市场价格" in text)
     )

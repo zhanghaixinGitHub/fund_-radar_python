@@ -38,13 +38,15 @@ def quote_row(value, code, base, api):
     return row
 
 
-def refresh(material, base, *, provider=None):
+def refresh(material, base, *, provider=None, symbols=None):
     if not material.get("market"):
         return []
     provider = provider or Provider()
     receipts = []
     for code, previous in material.get("market", {}).items():
-        if previous.get("date") == base:
+        if symbols is not None and code not in symbols:
+            continue
+        if symbols is None and previous.get("date") == base:
             continue
         if re.fullmatch(r"0\d{5}\.(SH|CSI)|H\d{5}\.CSI", code):
             api = "index_daily"

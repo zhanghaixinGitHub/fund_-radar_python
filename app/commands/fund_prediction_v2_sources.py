@@ -7,7 +7,8 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from app.services.comprehensive_multi_prediction import review_calendar
-from app.services.direction_1d_protocol import digest, window
+from app.services.direction_1d_protocol import digest
+from app.services.prediction_window_v2 import fund_window, is_midnight, window
 from app.services.fund_exposure_common import now, read
 from app.services.fund_information_snapshot import prepare
 from app.services.fund_prediction_snapshot_compat import materials_input_identity
@@ -19,6 +20,10 @@ from app.services.prediction_trial_v2 import current_holdings, local_path, save_
 from app.services.prediction_v2_baseline import baseline_ready
 
 HORIZONS = ("T5_V1", "T20_V1", "M6_V1")
+QDII_CALENDAR_REVIEW_ONLY = {
+    "COMPREHENSIVE_CALENDAR_POLICY_REQUIRED",
+    "COMPREHENSIVE_VN_CONTRACT_CALENDAR_REQUIRED",
+}
 
 
 def failure(error):
@@ -59,7 +64,7 @@ def _missing_dates(horizon, current, reason):
     }
 
 
-def _partial_calendar_materials(at, code, material_path, material, current):
+def _partial_calendar_materials(at, code, material_path, material, current, calendar_failure):
     """已知QDII窗口缺件仅供实际审阅；原件仍真校验，净值/归档版本只读。"""
     from sqlalchemy import text
 
@@ -112,10 +117,10 @@ def _partial_calendar_materials(at, code, material_path, material, current):
         as_of=at.isoformat(), window=deepcopy(current), materials_path=str(Path(material_path).resolve()),
         materials_hash=digest(material), nav=nav,
         time_context={"baseline_complete": any(v["nav_date"] == str(base) for v in nav)},
-        valuation_status={"ready": False, "reason": "COMPREHENSIVE_CALENDAR_POLICY_REQUIRED"},
+        valuation_status={"ready": False, "reason": calendar_failure},
         partial_material_assembly={
             "assembled_at": at.isoformat(), "source_ready": False,
-            "reason": "COMPREHENSIVE_CALENDAR_POLICY_REQUIRED", "no_original_dates_changed": True,
+            "reason": calendar_failure, "no_original_dates_changed": True,
             "requires_actual_reading": True, "nav_versions_read_only": True,
         },
     )
@@ -131,6 +136,7 @@ def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_pr
         raise ValueError("V2_SOURCE_CHOOSE_CODES_OR_REQUESTS")
     inventory, at = holdings_provider(), clock or now()
     current = window(at)
+    early = is_midnight(current)
     requests = {}
     for path in analysis_requests or []:
         request = read(local_path(path))
@@ -139,7 +145,9 @@ def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_pr
             request.get("format") != "FUND_PREDICTION_V2_DAILY_ANALYSIS_REQUEST"
             or request.get("owner_hash") != inventory["owner_hash"]
             or request.get("policy_hash") != digest(policy_v2())
-            or any(request.get("window", {}).get(k) != current[k] for k in ("base_nav_date", "target_nav_date"))
+            or (request.get("window") != current if early else any(
+                request.get("window", {}).get(k) != current[k] for k in ("base_nav_date", "target_nav_date")
+            ))
         ):
             raise ValueError("V2_SOURCE_REQUEST_OWNER_POLICY_OR_WINDOW_MISMATCH")
         if code in requests and any(
@@ -181,7 +189,7 @@ def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_pr
                 raise ValueError("V2_SOURCE_REQUEST_MATERIALS_CHANGED")
             # 共用准备器保留全部来源状态；第二版区分基金基准与历史个股缺口。
             preparing_materials = True
-            data = prepare(at, code, material_path)
+            data = prepare(at, code, material_path, planning=current) if early else prepare(at, code, material_path)
             preparing_materials = False
             if data.get("fund_code") != code or any(
                 data.get("window", {}).get(k) != current[k] for k in ("base_nav_date", "target_nav_date")
@@ -193,13 +201,27 @@ def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_pr
             from app.services.fund_prediction_nav_identity import previous_qdii_nav_date
             from app.services.vietnam_reference_fx_review import apply_reference_review
 
-            apply_reference_review(data, material)
-            # 仅第二版采用前一估值日参考。共用准备器已核验本基金估值条款和窗口。
-            reference = previous_qdii_nav_date(data.get("nav", []), current["base_nav_date"], data)
+            if not early:
+                apply_reference_review(data, material)
+            reference = None if early else previous_qdii_nav_date(data.get("nav", []), current["base_nav_date"], data)
             if reference:
                 data["reference_nav_date"] = reference
             if reference or (data.get("valuation_status") or {}).get("prediction_reference_fx"):
                 data["time_context"] = time_context(data)
+            valuation_window = current
+            try:
+                calendar, calendar_failure = review_calendar(data, code, at), None
+                if early:
+                    valuation_window = fund_window(current, calendar)
+            except (ValueError, KeyError) as error:
+                calendar, calendar_failure = None, failure(error)
+            if early and calendar is not None:
+                if valuation_window != current:
+                    data = prepare(at, code, material_path, planning=valuation_window, valuations=calendar)
+                    if data.get("materials_hash") != digest(material):
+                        raise ValueError("V2_SOURCE_PREPARED_MATERIAL_HASH_MISMATCH")
+                data["planning_window"] = current
+                data["forecast_calendar_verified"] = True
             packet = {"format": "CODEX_FUND_INPUT_V1", "input_hash": digest(data), "input": data}
             source = directory / "funds" / code / "T1" / "input.json"
             save_once(source, packet)
@@ -211,28 +233,24 @@ def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_pr
             )
             if reference:
                 row["reference_nav_date"] = reference
-            try:
-                calendar, calendar_failure = review_calendar(data, code, at), None
-            except (ValueError, KeyError) as error:
-                calendar, calendar_failure = None, failure(error)
             for horizon in HORIZONS:
                 reason = calendar_failure
                 if horizon == "M6_V1" and calendar is not None:
                     from app.services.prediction_natural_month import natural_month_target
 
-                    dates = natural_month_target(reference or current["base_nav_date"], current["target_nav_date"])
-                    # 冻结时保留行情窗口身份。到期日按真实使用的净值日期计算。
-                    dates["baseNavDate"] = current["base_nav_date"]
-                    # 这里只确定日期；source_ready仍独立阻止缺真实基准的方向发布。
+                    dates = natural_month_target(reference or valuation_window["base_nav_date"],
+                                                 valuation_window["target_nav_date"])
+                    dates["baseNavDate"] = valuation_window["base_nav_date"]
                     reason = None
                 elif calendar is None:
-                    dates = _missing_dates(horizon, current, reason)
+                    dates = _missing_dates(horizon, valuation_window, reason)
                 else:
                     try:
-                        dates = target_dates(calendar, at, horizon)
+                        dates = (target_dates(calendar, at, horizon, valuation_window=valuation_window)
+                                 if early else target_dates(calendar, at, horizon))
                     except (ValueError, KeyError) as error:
                         reason = failure(error)
-                        dates = _missing_dates(horizon, current, reason)
+                        dates = _missing_dates(horizon, valuation_window, reason)
                 contents = {
                     "data": data,
                     "dates": dates,
@@ -261,11 +279,12 @@ def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_pr
         except (ValueError, KeyError, FileNotFoundError) as error:
             row["failure"] = failure(error)
             profile = next((p for p in inventory["profiles"] if p["fund_code"] == code), {})
-            if preparing_materials and str(error) == "COMPREHENSIVE_CALENDAR_POLICY_REQUIRED" and "QDII" in str(
+            calendar_failure = str(error)
+            if preparing_materials and calendar_failure in QDII_CALENDAR_REVIEW_ONLY and "QDII" in str(
                 profile.get("fund_name", "")
             ).upper():
                 try:
-                    partial = _partial_calendar_materials(at, code, material_path, material, current)
+                    partial = _partial_calendar_materials(at, code, material_path, material, current, calendar_failure)
                     from app.services.fund_prediction_nav_identity import (
                         current_prediction_nav_identity,
                         nav_identity,
@@ -273,7 +292,7 @@ def freeze_sources(directory, *, codes=None, analysis_requests=None, holdings_pr
                     )
 
                     base = current["base_nav_date"]
-                    reference = previous_qdii_nav_date(partial["nav"], base, profile)
+                    reference = None if early else previous_qdii_nav_date(partial["nav"], base, profile)
                     if reference and nav_identity(partial["nav"], reference) == current_prediction_nav_identity(
                         code, base, at=at
                     ):

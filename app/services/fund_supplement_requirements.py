@@ -34,7 +34,7 @@ def checklist_requirements(code, profile):
     focus = profile.get("supplement_focus", {})
     directory = disclosure_directory(code)
     report = "；".join(filter(None, (profile.get("report_source"), directory)))
-    benchmark = profile.get("benchmark") or "待核对本份额生效合同"
+    benchmark = focus.get("benchmark_timing") or profile.get("benchmark") or "待核对本份额生效合同"
     benchmark_source = focus.get("benchmark_source") or "本份额合同列明的指数发布机构、对应利率及授权日线"
     fund = "基金管理人及托管人原件"
     notices = f"{directory}；巨潮资讯 https://www.cninfo.com.cn/ 按基金或证券代码查询"
@@ -109,14 +109,14 @@ def checklist_requirements(code, profile):
     for target in profile.get("target_funds", []):
         if target in profile.get("target_market_specialized", ()):
             continue
-        rows.append(row(
+        rows.append({**row(
             "prediction_target_" + target, "四周期预测",
             f"底层 {target} 正式净值、份额、场内成交与跟踪偏离",
             f"{disclosure_directory(target)}；{SHARE_API}；目标基金正式净值、交易所同日收盘和指数发布方",
             "基准估值日及对应比较交易日；历史跟踪按所需窗口",
             "按目标基金本身的代码和估值日核对净值，场内价和正式净值同日才算折溢价；资金变化用份额资料核实",
-            horizons=CYCLES,
-        ))
+            horizons=CYCLES, route="目标基金指定日行情",
+        ), "target_fund": target})
     if profile.get("template") == "overseas":
         rows.append(row(
             "prediction_overseas_alignment", "四周期预测",

@@ -74,6 +74,9 @@ def us_close(raw, security, base):
     fields = match[1].split(",")
     # 只取已核准的普通收盘、昨收、涨幅和普通收盘时刻字段。尾部扩展字段
     # 不属于本次收盘取值契约，不能额外要求它们与普通收盘价完全相同。
+    # 供应商也会在原来的 36 列后追加两个开关值，前面的收盘字段位置保持一致。
+    if len(fields) == 38 and all(flag in {"0", "1"} for flag in fields[36:]):
+        fields = fields[:36]
     if len(fields) != 36 or fields[29] != base[:4]:
         raise ValueError("US_QUOTE_LAYOUT")
     stamp = re.fullmatch(r"([A-Za-z]{3}) +(\d{1,2}) (\d{2}:\d{2}[AP]M) (EST|EDT)", fields[25])
@@ -114,12 +117,19 @@ def jp_close(raw, security, base):
     if symbol not in soup.get_text(" ", strip=True):
         raise ValueError("JP_HISTORY_IDENTITY")
     rows = {}
+    split_days = set()
     for tr in soup.select("tr"):
         cells = [cell.get_text(" ", strip=True) for cell in tr.find_all(["td", "th"], recursive=False)]
         if not cells or not re.fullmatch(r"20\d{2}/\d{1,2}/\d{1,2}", cells[0]):
             continue
         day = datetime.strptime(cells[0], "%Y/%m/%d").date().isoformat()
         if day > base:
+            continue
+        # 除权提示和当天的行情分两行展示。只跳过可识别的拆股说明行。
+        if security != "TOPIX" and len(cells) == 2 and re.fullmatch(
+            r"分割\s*[：:]\s*[1-9]\d*株\s*→\s*[1-9]\d*株", cells[1]
+        ):
+            split_days.add(day)
             continue
         if len(cells) < 5 or day in rows:
             raise ValueError("JP_HISTORY_LAYOUT")
@@ -132,6 +142,9 @@ def jp_close(raw, security, base):
     if len(days) < 2 or days[-1] != base:
         raise ValueError("JP_HISTORY_BASE_MISSING")
     previous, last = rows[days[-2]], rows[base]
+    if any(previous["date"] < day <= base for day in split_days):
+        # 跨拆股的未复权收盘价不能直接算涨跌。
+        raise ValueError("JP_HISTORY_SPLIT_ADJUSTMENT_REQUIRED")
     close, prior = Decimal(last["close"]), Decimal(previous["close"])
     return {
         "date": base,
@@ -172,10 +185,13 @@ def official_fx(raw, base):
     }
 
 
-def refresh(material, base, root):
+def refresh(material, base, root, *, symbols=None, fetch_fx=True):
     evidence = material.get("calendar_evidence") or {}
     if evidence.get("policy") != "QDII_CNY_VERIFIED_SESSION_V1":
         return []
+    from app.services.fund_daily_profiles import profiles
+
+    market_references = profiles().get(material["fund_code"], {}).get("market_references", {})
     documents = {d["id"]: d for d in material["documents"]}
     results = []
 
@@ -201,6 +217,8 @@ def refresh(material, base, root):
     for security, container in [(c["code"], c) for c in material.get("companies", [])] + list(
         material.get("market", {}).items()
     ):
+        if symbols is not None and security not in symbols:
+            continue
         quote = (container.get("quote") or {}) if "code" in container else container
         if (
             "code" not in container
@@ -215,10 +233,13 @@ def refresh(material, base, root):
                 closed_at=base + "T15:00:00+08:00",
                 close_timestamp_kind="EXCHANGE_COMPLETION_BOUND",
             )
-        if quote.get("date") == base or security in material.get("market_quote_exceptions", {}):
+        if (symbols is None and quote.get("date") == base) or security in material.get("market_quote_exceptions", {}):
             continue
         original = documents.get(quote.get("source_ref"), {})
         url = original.get("url", "")
+        # 已核实的日本行情入口按基金档案优先取，避免反复请求旧交易日的固定链接。
+        if security.endswith(".JP") or security == "TOPIX":
+            url = market_references.get(security) or url
         parsed = urlparse(url)
         try:
             if (
@@ -260,25 +281,26 @@ def refresh(material, base, root):
             results.append({"security": security, "status": "ACTION_REQUIRED", "url": url,
                             "checked_at": now().isoformat(), "failure": str(error)[:250]})
     url = "https://www.safe.gov.cn/AppStructured/hlw/RMBQuery.do?startDate=" + base + "&endDate=" + base
-    try:
-        prior = documents[evidence["fx_ref"]]
-        if urlparse(prior["url"]).hostname != "www.safe.gov.cn":
-            raise ValueError("OFFICIAL_FX_SOURCE_REVIEW_REQUIRED")
-        raw, receipt = fetch(url, base, root, validator=lambda body: official_fx(body, base))
-        data = official_fx(raw, base)
-        ref = "official-fx:" + receipt["raw_sha256"]
-        append(
-            ref,
-            "FX_REFERENCE_DATA",
-            "国家外汇管理局本基准日人民币中间价",
-            json.dumps(data, ensure_ascii=False),
-            receipt,
-        )
-        evidence["fx_ref"] = ref
-        results.append({"kind": "OFFICIAL_FX", "status": "SUCCEEDED", "source": receipt})
-    except Exception as error:
-        results.append({"kind": "OFFICIAL_FX", "status": "ACTION_REQUIRED", "planned_url": url,
-                        "checked_at": now().isoformat(), "failure": str(error)[:250]})
+    if fetch_fx:
+        try:
+            prior = documents[evidence["fx_ref"]]
+            if urlparse(prior["url"]).hostname != "www.safe.gov.cn":
+                raise ValueError("OFFICIAL_FX_SOURCE_REVIEW_REQUIRED")
+            raw, receipt = fetch(url, base, root, validator=lambda body: official_fx(body, base))
+            data = official_fx(raw, base)
+            ref = "official-fx:" + receipt["raw_sha256"]
+            append(
+                ref,
+                "FX_REFERENCE_DATA",
+                "国家外汇管理局本基准日人民币中间价",
+                json.dumps(data, ensure_ascii=False),
+                receipt,
+            )
+            evidence["fx_ref"] = ref
+            results.append({"kind": "OFFICIAL_FX", "status": "SUCCEEDED", "source": receipt})
+        except Exception as error:
+            results.append({"kind": "OFFICIAL_FX", "status": "ACTION_REQUIRED", "planned_url": url,
+                            "checked_at": now().isoformat(), "failure": str(error)[:250]})
     for security, quote in [(c["code"], c.get("quote") or {}) for c in material.get("companies", [])] + list(
         material.get("market", {}).items()
     ):

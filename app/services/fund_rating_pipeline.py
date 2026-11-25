@@ -10,7 +10,6 @@ import re
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from time import monotonic
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
@@ -237,16 +236,9 @@ def update_new_rules(
     with Session(engine) as session:
         existing = current_inputs(session, codes)
     items, failures = [], []
-    started = monotonic()
     for index, code in enumerate(codes, 1):
         item = {"fundCode": code, "status": "WAITING_DATA", "published": False, "blockers": []}
         try:
-            # 本人30只的真实原件核验在现场超过三分钟，旧上限会让排序靠后
-            # 的基金每轮都没有执行机会。保留十分钟界限，不跳过原件重算。
-            if monotonic() - started > 600:
-                item["blockers"].append({"state": "TASK_LIMIT", "reason": "本次处理达到时限，下次继续核验"})
-                items.append(item)
-                continue
             previous = existing.get(code)
             pointer = root / "pipeline" / "updates" / f"{code}.json"
             dossier = None

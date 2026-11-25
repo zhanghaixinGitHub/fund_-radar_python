@@ -49,7 +49,7 @@ def verified_qdii_workday_valuation(material: dict, documents: dict) -> bool:
 
 def verified_gold_valuation_days(material: dict, documents: dict) -> bool:
     """黄金多周期必须另核本基金逐工作日估值条款，不能只延长一次报价窗口。"""
-    evidence = material.get("calendar_evidence", {})
+    evidence = material.get("calendar_evidence") or {}
     own = documents.get(evidence.get("valuation_contract_ref"), {})
     quotes = evidence.get("valuation_day_quotes", {})
     if (
@@ -72,7 +72,7 @@ def verified_gold_valuation_days(material: dict, documents: dict) -> bool:
     )
 
 
-def verified_domestic_window(profile: dict, material: dict, documents: dict, window: dict) -> bool:
+def verified_domestic_window(profile: dict, material: dict, documents: dict, window: dict, *, calendar_only=False) -> bool:
     """核对公开日历、投向和本期实际行情，不能凭名称放开QDII等跨境产品。
 
     日历证据只对冻结的比较基准日和目标日有效。港股通须取得港交所当年完整
@@ -91,7 +91,9 @@ def verified_domestic_window(profile: dict, material: dict, documents: dict, win
     ):
         return False
     evidence = material.get("calendar_evidence", {})
-    if evidence.get("base_date") != window["base_nav_date"] or evidence.get("target_date") != window["target_nav_date"]:
+    if not calendar_only and (
+        evidence.get("base_date") != window["base_nav_date"] or evidence.get("target_date") != window["target_nav_date"]
+    ):
         return False
     base, target = date.fromisoformat(window["base_nav_date"]), date.fromisoformat(window["target_nav_date"])
     if base.weekday() >= 5 or target.weekday() >= 5:
@@ -161,11 +163,11 @@ def verified_domestic_window(profile: dict, material: dict, documents: dict, win
             bool(codes)
             and all(code.endswith((".SH", ".SZ", ".BJ")) for code in company_codes)
             and codes <= company_codes
-            and all(
+            and (calendar_only or all(
                 company.get("quote", {}).get("date") == str(base)
                 and company.get("quote", {}).get("change_pct") is not None
                 for company in companies
-            )
+            ))
         )
     if mode == "CN_NAV_HK_CONNECT_WINDOW_V1":
         calendar_doc = documents.get(evidence.get("calendar_ref"), {})
@@ -216,7 +218,7 @@ def verified_domestic_window(profile: dict, material: dict, documents: dict, win
                 verified_hk_holiday_reference(material, documents, c["code"], c.get("quote") or {}, window)
                 for c in hong_kong
             )
-        return all(
+        return calendar_only or all(
             company.get("quote", {}).get("date") == str(base) and company.get("quote", {}).get("change_pct") is not None
             for company in hong_kong
         )
@@ -228,6 +230,8 @@ def verified_domestic_window(profile: dict, material: dict, documents: dict, win
         # 目标基金代码必须出现在本基金报告，并有对应的人民币场内ETF行情。
         if target_code not in report.get("body", "") or evidence.get("quote_currency") != "CNY":
             return False
+        if calendar_only:
+            return verified_gold_valuation_days(material, documents)
         market = material.get("market", {})
         return bool(market) and all(
             code.split(".")[0] == target_code and quote.get("date") == str(base) and quote.get("change_pct") is not None

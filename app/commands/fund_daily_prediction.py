@@ -3,20 +3,23 @@
 import argparse
 import json
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
+from sys import argv
+from time import monotonic, sleep
 
-from app.services.fund_daily_prediction import DailyPredictionRun
+from app.services.fund_daily_prediction import TERMINAL, DailyPredictionRun, supplement_run_id
 from app.services.fund_daily_runtime import PROJECT, LocalDailyBackend
 from app.services.fund_exposure_common import now
 from app.services.material_content import material_read_cache
 
 
 @contextmanager
-def run_lock():
-    """跨运行目录也只允许一个续办进程；非阻塞获取，锁忙不写成功或重复提交。"""
+def run_lock(path=None, *, wait=False):
+    """默认非阻塞获取共享业务锁；短提交可等待当前写入退出。"""
     import msvcrt
 
-    path = PROJECT / ".local-runs/daily-prediction.lock"
+    path = path or PROJECT / ".local-runs/daily-prediction.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as stream:
         if stream.tell() == 0:
@@ -24,7 +27,7 @@ def run_lock():
             stream.flush()
         stream.seek(0)
         try:
-            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK if wait else msvcrt.LK_NBLCK, 1)
         except OSError:
             raise ValueError("DAILY_PREDICTION_RUN_ALREADY_ACTIVE") from None
         try:
@@ -32,6 +35,12 @@ def run_lock():
         finally:
             stream.seek(0)
             msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def fund_execution_lock(directory, code):
+    if not code or len(code) != 6 or not code.isascii() or not code.isdecimal():
+        raise ValueError("DAILY_FUND_CODE_INVALID")
+    return run_lock(directory / "fund-business" / code / "execution.lock")
 
 
 @material_read_cache
@@ -43,18 +52,55 @@ def main():
     parser.add_argument("--reviews-file", type=Path, help="当前聊天实际阅读后的逐基金综合用途审阅映射")
     parser.add_argument("--blocked-file", type=Path, help="按基金/周期/目标绑定的真实外部阻断证据")
     parser.add_argument("--resume-batch", help="首次接管已经提交的纯资料jobId；后续一律使用台账内原jobId")
-    parser.add_argument("--resume-only", action="store_true", help="上午续办，只允许使用已有窗口和资料作业")
+    parser.add_argument("--resume-only", action="store_true", help="只允许人工续办已有运行和窗口")
     parser.add_argument("--publish-prepared", action="store_true",
                         help="实际阅读并写入审阅文件后续办；仍核当前资料版本，不重复采集已有候选")
     parser.add_argument("--refresh-checklist", metavar="基金代码", help="只用本轮台账和最新档案重画指定基金的补数清单")
+    parser.add_argument("--supplements-only", action="store_true", help="在已有运行中按原窗口逐项核查和补件")
+    parser.add_argument("--initialize-only", action="store_true", help="总指挥初始化真实持仓和今日清单后返回，不启动全量业务")
     args = parser.parse_args()
     from app.services.prediction_trial_v2 import storage_check
 
     instant = now()
     storage_check(instant.replace(hour=0, minute=0, second=0, microsecond=0).isoformat())
     directory = args.run_dir or PROJECT / ".local-runs" / ("daily-prediction-" + now().strftime("%Y%m%d"))
+    if args.supplements_only:
+        from app.services.fund_daily_services import ensure_services
+        from app.services.fund_daily_supplements import record_supplement_summary
+        from app.services.fund_exposure_common import read
+
+        directory = directory.resolve()
+        if directory.parent != (PROJECT / ".local-runs").resolve():
+            parser.error("逐项补件只接受本项目 .local-runs 下的原运行目录")
+        state = read(directory / "run.json")
+        job = supplement_run_id(state)
+        direct = bool(state.get("supplement_run_id"))
+        if not direct:
+            terminal = read(directory / "materials-status.json")
+            if not terminal["terminal"] or terminal["job"]["job_id"] != job:
+                raise ValueError("DAILY_SUPPLEMENT_ORIGINAL_JOB_NOT_TERMINAL")
+        ensure_services(directory)
+        backend = LocalDailyBackend(directory)
+        try:
+            at, owner, scope, live = backend.context()
+            if (owner != state["owner_user_id"] or state["window"] != live
+                    or set(scope) != set(state["scope"]) or at[:10] != state["created_at"][:10]):
+                raise ValueError("DAILY_SUPPLEMENT_ORIGINAL_SCOPE_OR_WINDOW_CHANGED")
+            current = {**state, "checked_at": at}
+            options = {"recover_materials": backend.recover_materials} if direct else {}
+            supplement = backend.supplements(current, backend.save_profiles(scope)).process(current, **options)
+            record_supplement_summary(directory, current, supplement)
+        finally:
+            backend.close()
+        print(json.dumps(supplement, ensure_ascii=False))
+        raise SystemExit(0 if supplement["status"] == "SUCCEEDED" else 2)
     if args.refresh_checklist:
-        from app.services.fund_daily_profiles import profiles, save_pending
+        from app.services.fund_daily_profiles import (
+            VERIFIED_SOURCE_RESULTS,
+            profiles,
+            save_fund_checklist,
+            save_pending,
+        )
         from app.services.fund_exposure_common import read
 
         directory = directory.resolve()
@@ -66,7 +112,17 @@ def main():
             parser.error("基金不在本轮持仓范围")
         profile = read(directory / "fund-profiles.json")[code]
         profile.update({k: v for k, v in profiles().get(code, {}).items() if v is not None})
-        tasks = save_pending(directory, state, records={code: profile}, fund_code=code, aggregate=False)
+        ledger = directory / "supplement-funds" / (code + ".json")
+        audit = read(ledger) if ledger.is_file() else {}
+        if (audit and audit.get("job_id") == supplement_run_id(state)
+                and audit.get("day") == instant.date().isoformat() and audit.get("window") == state["window"]):
+            rows = audit["items"]
+            verified = {row["field"]: row for row in rows if row["status"] in VERIFIED_SOURCE_RESULTS}
+            tasks = [{**row, "source_review": row} for row in rows if row["status"] not in VERIFIED_SOURCE_RESULTS]
+            save_fund_checklist(directory.parent / "fund-supplements", code, profile, state["window"],
+                                audit["day"], tasks, set(verified), verified=verified)
+        else:
+            tasks = save_pending(directory, state, records={code: profile}, fund_code=code, aggregate=False)
         print(json.dumps({"fund_code": code, "pending_count": len(tasks),
                           "checklist": str(directory.parent / "fund-supplements" / f"{code}.md")}, ensure_ascii=False))
         return
@@ -77,12 +133,12 @@ def main():
 
         state_path = directory / "run.json"
         original = read(state_path) if state_path.exists() else {}
-        if not (original.get("batch") or {}).get("job_id"):
+        if not supplement_run_id(original):
             parser.exit(2, "DAILY_RESUME_JOB_MISSING\n")
         resume_receipt = {
             "started_at": instant.isoformat(),
             "window": original["window"],
-            "job_id": original["batch"]["job_id"],
+            "job_id": supplement_run_id(original),
             "status_before": original.get("status"),
             "reviewed_before": original.get("reviewed_period_count"),
             "pending_before": original.get("pending_funds"),
@@ -101,8 +157,6 @@ def main():
         status = backend.batch_status(batch)
         started = status["job"].get("started_at") or ""
         if started[:10] != current["target_nav_date"]:
-            from datetime import datetime
-
             from app.services.direction_1d_protocol import ZONE
 
             if (
@@ -123,12 +177,30 @@ def main():
             },
         )
     try:
-        result = DailyPredictionRun(directory, backend).advance(
-            reviews=json.loads(args.reviews_file.read_text(encoding="utf-8")) if args.reviews_file else None,
-            blocked_file=args.blocked_file,
-            publish_prepared=args.publish_prepared,
-            resume_only=args.resume_only,
-        )
+        runner = DailyPredictionRun(directory, backend)
+        inputs = {
+            "reviews": json.loads(args.reviews_file.read_text(encoding="utf-8")) if args.reviews_file else None,
+            "blocked_file": args.blocked_file, "publish_prepared": args.publish_prepared, "resume_only": args.resume_only,
+        }
+        if args.initialize_only:
+            inputs["initialize_only"] = True
+        result = runner.advance(**inputs)
+        if result["status"] == "WAITING_MATERIALS":
+            print(json.dumps({"status": result["status"], "job_id": result["batch"]["job_id"]}), flush=True)
+        last_storage_check = monotonic()
+        while result["status"] == "WAITING_MATERIALS":
+            deadline = datetime.fromisoformat(result["window"]["deadline_at"])
+            if now() >= deadline:
+                result = runner.advance(**inputs)
+                break
+            # 只查原作业状态。等待期间不重复提交、回放原件或重新读完整预测档案。
+            sleep(min(10, max(0, (deadline - now()).total_seconds())))
+            if monotonic() - last_storage_check >= 25:
+                storage_check(instant.replace(hour=0, minute=0, second=0, microsecond=0).isoformat())
+                last_storage_check = monotonic()
+            job = backend.get(backend.base + "/" + result["batch"]["job_id"])
+            if job["status"] in TERMINAL:
+                result = runner.advance(**inputs)
     finally:
         backend.close()
     if resume_receipt is not None:
@@ -159,6 +231,8 @@ def main():
                 "monthly_compilation_pending": result.get("monthly_compilation", {}).get("pending"),
                 "advice": {key: value for key, value in result.get("advice", {}).items()
                            if key in {"status", "reports_read_back", "actionable_count", "counts"}},
+                "supplements": {key: value for key, value in result.get("supplements", {}).items()
+                                if key in {"status", "item_count", "pending_item_count", "counts"}},
                 "one_day_outcomes": {
                     k: v for k, v in result.get("one_day_outcomes", {}).items() if k in {"status", "summary", "reason"}
                 },
@@ -170,5 +244,6 @@ def main():
 
 
 if __name__ == "__main__":
-    with run_lock():
+    refresh = any(arg.split("=", 1)[0] == "--refresh-checklist" for arg in argv[1:])
+    with run_lock(wait=refresh):
         main()

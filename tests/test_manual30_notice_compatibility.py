@@ -57,6 +57,22 @@ def test_conditional_valuation_uses_independent_share_proof_and_restoration_term
     assert not identity._november_valuation_background("008164", product, proof, doc, body, title, "其他管理人")
 
 
+def test_chinaamc_november_20_valuation_is_only_a_holding_condition():
+    product = "亚债中国债券指数基金"
+    manager = "华夏基金管理有限公司"
+    proof = {"quote": product + " 001021 " + manager}
+    doc = {"kind": "REPORT", "body": proof["quote"]}
+    title = manager + "关于旗下证券投资基金估值调整情况的公告"
+    body = (
+        "经与基金托管人协商一致，自 2026 年 11 月 20 日起，对旗下基金持有的停牌股票"
+        "英力特（证券代码：000635）采用指数收益法估值，复牌后恢复当日收盘价估值。"
+    )
+    assert identity._november_valuation_background("001021", product, proof, doc, body, title, manager)
+    assert not identity._november_valuation_background(
+        "001021", product, proof, doc, body.replace("持有的", "列出的"), title, manager
+    )
+
+
 def test_missing_c_code_in_reprint_only_allows_product_identity_with_own_share_binding():
     product = "银华体育文化灵活配置混合型证券投资基金"
     short = "银华体育文化灵活配置混合"

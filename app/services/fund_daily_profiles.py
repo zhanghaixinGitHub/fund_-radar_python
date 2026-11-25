@@ -7,7 +7,7 @@
 
 import json
 import re
-from datetime import date, datetime, time, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -15,9 +15,15 @@ from app.services.direction_1d_protocol import ZONE
 from app.services.fund_exposure_common import _publish, now, read
 from app.services.fund_materials_store import versioned_save
 from app.services.fund_supplement_requirements import (
-    FX_SOURCE, SECTIONS, checklist_requirements, disclosure_directory, nav_sources, section_for,
+    FX_SOURCE,
+    SECTIONS,
+    checklist_requirements,
+    disclosure_directory,
+    nav_sources,
+    section_for,
 )
 from app.services.material_content import source_exists
+from app.services.prediction_window_v2 import is_midnight
 
 TEMPLATES = {
     "domestic": {
@@ -38,6 +44,12 @@ SOURCE_RESULTS = {
     "TEMPORARY_FAILURE": "本次暂未取得",
     "ACCESS_REQUIRED": "需要授权或原件",
     "MISMATCH": "返回数据与所需口径不符",
+    "REVIEW_REQUIRED": "已核对现有证据，仍需按本项取证或审阅",
+    "NOT_ATTEMPTED": "本项没有执行到取数",
+}
+VERIFIED_SOURCE_RESULTS = {
+    "REUSED_VERIFIED": "已核实并复用",
+    "NEW_VERIFIED": "已核实并补齐",
 }
 
 
@@ -71,9 +83,10 @@ def save_profiles(directory, rows):
             **TEMPLATES.get(saved.get("template"), {}),
             **saved,
             "name": row["fund_name"],
+            **{key: row.get(key) for key in ("fund_type", "source_fund_type", "invest_type")},
             "benchmark": row.get("benchmark"),
             "share_currency": saved.get("share_currency"),
-            "retry_time": "09:00 Asia/Shanghai",
+            "retry_time": "按各来源披露时间核定",
         }
         if not entry.get("valuation_policy") and domestic_calendar_supported(row):
             entry["valuation_policy"] = "现有沪深官方日历规则"
@@ -100,19 +113,22 @@ def save_profiles(directory, rows):
     return records
 
 
-def save_fund_checklist(folder, code, profile, window, day, tasks=(), ready=(), sources=None):
+def save_fund_checklist(folder, code, profile, window, day, tasks=(), ready=(), sources=None, *, verified=None):
     """只替换当天清单。每个勾都必须有本次核对结果。"""
     if not re.fullmatch(r"\d{6}", code):
         raise ValueError("INVALID_DAILY_FUND_CODE")
     folder.mkdir(parents=True, exist_ok=True)
     sources = sources or {}
-    pending = {task["field"]: task for task in tasks}
+    verified = verified or {}
+    pending = {}
+    for task in tasks:
+        pending.setdefault(task["field"], []).append(task)
     lines = [
         f"# {code} {profile['name']}补数清单",
         "",
         f"检查日期 {day} · 基准净值日 {window['base_nav_date']} · 目标净值日 {window['target_nav_date']}",
         "",
-        "勾选表示今天已核对所需时点、口径及实际资料。待核项目用于每日补数，达到验收条件才打勾。",
+        "勾选表示本轮已核对资料及其时点、口径。已有合用资料可复用，只补新增、变化或缺失部分。",
         "",
     ]
 
@@ -121,22 +137,29 @@ def save_fund_checklist(folder, code, profile, window, day, tasks=(), ready=(), 
         lines.append(f"- **{mark}**　{label}。来源 {source or '待核'}。")
         if requirement and requirement.get("verification"):
             lines.append(f"  - 时点或区间 {requirement['data_window']}。验收 {requirement['verification']}。")
-        if key in pending and pending[key].get("next_source"):
-            next_source = pending[key]["next_source"]
-            if next_source != source:
+        for task in pending.get(key, []):
+            if len(pending[key]) > 1:
+                lines.append(f"  - 所需日期 {task.get('required_date') or '按对应区间'}。")
+            if (next_source := task.get("next_source")) and next_source != source:
                 lines.append(f"  - 待核位置 {next_source}")
-        followup = pending.get(key, {}).get("source_review")
-        if followup:
-            lines.append(f"  - 本次取件 {SOURCE_RESULTS[followup['status']]}。{followup['summary']}。")
+            if followup := task.get("source_review"):
+                lines.append(f"  - 本次取件 {SOURCE_RESULTS[followup['status']]}。{followup['summary']}。")
+        if receipt := verified.get(key):
+            result = VERIFIED_SOURCE_RESULTS[receipt["status"]]
+            lines.append(f"  - 本次核对 {result}。{receipt['summary']}。证据 {receipt['evidence_ref']}。")
 
-    if profile.get("benchmark"):
-        lines.extend([f"合同基准 {profile['benchmark']}。", ""])
+    benchmark = profile.get("supplement_focus", {}).get("benchmark_timing") or profile.get("benchmark")
+    if benchmark:
+        lines.extend([f"合同基准 {benchmark}。", ""])
     if note := profile.get("supplement_focus", {}).get("scope_note"):
         lines.extend([note, ""])
     lines.extend(["## 共同资料", ""])
-    item("NAV", f"本份额正式净值（`{code}.OF`）", nav_sources(code))
-    if profile.get("nav_fallback"):
-        lines.append(f"  - 备用条件 {profile['nav_fallback']}。")
+    if is_midnight(window):
+        lines.append(f"- 基准日正式净值供到期核对。方向审阅可先进行。查询来源 {nav_sources(code)}。")
+    else:
+        item("NAV", f"本份额正式净值（`{code}.OF`）", nav_sources(code))
+        if profile.get("nav_fallback"):
+            lines.append(f"  - 备用条件 {profile['nav_fallback']}。")
     notices = disclosure_directory(code)
     item("MATERIALS", "本份额最新报告和披露持仓", "；".join(filter(None, (profile.get("report_source"), notices))))
     item("NOTICES", "本份额公告目录及适用公告", notices)
@@ -147,15 +170,15 @@ def save_fund_checklist(folder, code, profile, window, day, tasks=(), ready=(), 
                                  "核实际市场的交易所日历"))))
     if profile.get("template") != "domestic" or "FX" in pending or "FX:VND/USD" in pending:
         fx = profile.get("fx_clause") or profile.get("fx_source")
-        key = "FX:VND/USD" if "FX:VND/USD" in pending else "FX"
+        key = "FX:VND/USD" if "FX:VND/USD" in pending or "FX:VND/USD" in verified else "FX"
         item(key, "估值使用的汇率", f"{FX_SOURCE}；" + (" ".join(fx.split()) if fx else "核本份额合同指定渠道"))
     for target in profile.get("target_funds", []):
         item("TARGET:" + target, f"底层基金 `{target}` 最新报告及持仓",
              disclosure_directory(target))
     registered = profile.get("market_references", {})
     retired = profile.get("retired_market_references", {})
-    pending_symbols = {key.split(":", 1)[1] for key in pending if key.startswith("CLOSE:")}
-    symbols = set(registered) | set(retired) | set(sources) | pending_symbols
+    tracked_symbols = {key.split(":", 1)[1] for key in pending.keys() | verified.keys() if key.startswith("CLOSE:")}
+    symbols = set(registered) | set(retired) | set(sources) | tracked_symbols
     def quote_item(symbol):
         retirement = retired.get(symbol)
         if retirement and retirement["effective_date"] <= window["base_nav_date"]:
@@ -183,8 +206,10 @@ def save_fund_checklist(folder, code, profile, window, day, tasks=(), ready=(), 
                     label = use.split(" · ", 1)[1] + " · " + label
                 item(requirement.get("id", requirement["item"]), label, requirement["source"], requirement)
     if securities := sorted(symbols - set(registered) - set(retired)):
-        lines.extend(["", "## 逐证券行情", "",
-                      "这是资料包的行情取数范围。对勾核的是行情日期和来源。实际持仓及权重以对应日期的基金披露核对。", ""])
+        lines.extend([
+            "", "## 逐证券行情", "",
+            "这是资料包的行情取数范围。对勾核的是行情日期和来源。实际持仓及权重以对应日期的基金披露核对。", "",
+        ])
         for symbol in securities:
             quote_item(symbol)
     _publish(folder / f"{code}.md", ("\n".join(lines) + "\n").encode("utf-8"), replace=True)
@@ -208,31 +233,27 @@ def read_source_reviews(directory, day, window):
     ):
         return {}
     return {
-        (row["fund_code"], row["field"]): {
+        (row["fund_code"], row["field"], row.get("required_date"), "required_date" in row): {
             **row, "summary": " ".join(row["summary"].split()).rstrip("。"),
         }
         for row in value["items"]
-        if row.get("status") in SOURCE_RESULTS and row.get("summary")
+        if (row.get("status") in SOURCE_RESULTS
+            or (row.get("status") in VERIFIED_SOURCE_RESULTS and row.get("evidence_ref") and "required_date" in row))
+        and row.get("summary")
         and (row.get("attempted_at") or "")[:10] == day and row.get("attempted_source")
     }
 
 
-def save_pending(directory, state, *, records=None, fund_code=None, aggregate=True):
+def save_pending(directory, state, *, records=None, fund_code=None, aggregate=True, inventory=False):
     """用当天的取数核对结果重绘清单，原有业务回执仍供续办和校验使用。"""
     instant = now().astimezone(ZONE)
     window = state["window"]
-    cutoff = datetime.fromisoformat(window["deadline_at"])
-    retry = datetime.combine(date.fromisoformat(window["target_nav_date"]), time(9), ZONE)
-    if instant >= retry:
-        retry = instant + timedelta(minutes=30)
     current_profiles = read(directory / "fund-profiles.json") if records is None else records
     tasks = []
     folder = directory.parent / "fund-supplements"
     day = instant.date().isoformat()
     source_reviews = read_source_reviews(directory, day, window)
     month_end = (instant.date().replace(day=1) - timedelta(days=1)).isoformat()
-    ratings = state.get("ratings") or {}
-    by_rating = {r["fundCode"]: r for r in ratings.get("readback", [])}
     advice = {r["fund_code"]: r for r in (state.get("advice") or {}).get("items", [])}
 
     def add(code, field, attempt, fallback, **details):
@@ -243,19 +264,58 @@ def save_pending(directory, state, *, records=None, fund_code=None, aggregate=Tr
             "affects": HORIZONS,
             "attempt": attempt,
             "next_source": fallback,
-            "retry_at": retry.isoformat() if retry < cutoff else None,
+            "retry_at": None,
             **details,
         }
-        if followup := source_reviews.get((code, field)):
+        followup = source_reviews.get((code, field, task["required_date"], True))
+        if followup is None and not inventory:
+            # 旧版失败回执没有日期，保留旧清单的展示兼容；严格核验不借用旧失败。
+            followup = source_reviews.get((code, field, None, False))
+        if followup and followup["status"] in SOURCE_RESULTS:
             task["source_review"] = followup
             if followup.get("next_source"):
                 task["next_source"] = followup["next_source"]
+            if followup.get("retry_at"):
+                task["retry_at"] = followup["retry_at"]
         tasks.append(task)
+
+    def save_current_checklist(code, profile, first, ready, observed_sources=None):
+        if inventory:
+            # 清单已打勾的项目也要进入同一轮核对，程序的就绪标志只用来定位证据。
+            existing = {task["field"] for task in tasks[first:]}
+            fallback = disclosure_directory(code)
+            sources = {
+                "NAV": nav_sources(code), "MATERIALS": profile.get("report_source") or fallback,
+                "NOTICES": fallback, "VALUATION_CALENDAR": profile.get("contract_source") or fallback,
+                "FX": profile.get("fx_clause") or FX_SOURCE,
+                **{"TARGET:" + target: disclosure_directory(target) for target in profile.get("target_funds", [])},
+                **{"CLOSE:" + symbol: source for symbol, source in {
+                    **profile.get("market_references", {}), **(observed_sources or {}),
+                }.items()},
+                **{"CLOSE:" + symbol: rule["source"] for symbol, rule in
+                   profile.get("retired_market_references", {}).items()},
+            }
+            for field in sorted(ready - existing):
+                if field in sources:
+                    add(code, field, None, sources[field] or fallback)
+            return
+        verified, pending = {}, []
+        for task in tasks[first:]:
+            field = task["field"]
+            receipt = source_reviews.get((code, field, task["required_date"], True))
+            if (receipt and receipt["status"] in VERIFIED_SOURCE_RESULTS
+                    and receipt["required_date"] == task["required_date"]):
+                verified[field] = receipt
+            else:
+                pending.append(task)
+        tasks[first:] = pending
+        save_fund_checklist(folder, code, profile, window, day, pending,
+                            ready | verified.keys(), observed_sources, verified=verified)
 
     def add_requirements(code, requirements, ready):
         for requirement in requirements:
             key = requirement.get("id", requirement["item"])
-            if key in ready:
+            if key in ready and not inventory:
                 continue
             use = requirement["use"]
             section = section_for(use)
@@ -266,6 +326,8 @@ def save_pending(directory, state, *, records=None, fund_code=None, aggregate=Tr
                 required_date=required_day, data_window=requirement.get("data_window") or requirement["item"],
                 verification=requirement.get("verification") or "核对基金或证券身份、所需时点、数据口径及原件",
                 collection=requirement.get("collection", "按已登记取数入口或人工取证"),
+                reference_index=requirement.get("reference_index"),
+                check_key=requirement.get("check_key"), target_fund=requirement.get("target_fund"),
                 affects=requirement.get("horizons", HORIZONS if section == "四周期预测" else []))
 
     for code in [fund_code] if fund_code else state["scope"]:
@@ -277,10 +339,6 @@ def save_pending(directory, state, *, records=None, fund_code=None, aggregate=Tr
         notices = disclosure_directory(code)
         report_source = "；".join(filter(None, (profile.get("report_source"), notices)))
         first = len(tasks)
-        if ratings.get("checklist_day") == day and code in ratings.get("checklist_month_covered", []):
-            rated = {r["key"] for r in by_rating.get(code, {}).get("dimensions", [])
-                     if r.get("score") is not None and r.get("sources")}
-            ready.update(r["id"] for r in requirements if r.get("rating_dimension") in rated)
         decision = advice.get(code, {})
         if decision.get("read_back") and (decision.get("checked_at") or "").startswith(day):
             ready.update(decision.get("checklist_verified", []))
@@ -299,10 +357,17 @@ def save_pending(directory, state, *, records=None, fund_code=None, aggregate=Tr
 
         if nav.get("status") in {"AVAILABLE", "BASE_NAV_PRESENT"}:
             ready.add("NAV")
-        else:
+        elif not is_midnight(window):
             add(code, "NAV", nav, nav_sources(code))
         path = item.get("materials_path")
-        if not path or not source_exists(Path(path)):
+        material = {}
+        if path and source_exists(Path(path)):
+            try:
+                material = read(Path(path))
+            except (ValueError, KeyError, TypeError):
+                if not inventory:
+                    raise
+        if not material or (inventory and material.get("fund_code") != code):
             add(code, "MATERIALS", item.get("failure"), report_source)
             add(code, "NOTICES", None, notices)
             if "VALUATION_CALENDAR" not in ready:
@@ -314,9 +379,8 @@ def save_pending(directory, state, *, records=None, fund_code=None, aggregate=Tr
             for symbol, source in profile.get("market_references", {}).items():
                 add(code, "CLOSE:" + symbol, None, source)
             add_requirements(code, requirements, ready)
-            save_fund_checklist(folder, code, profile, window, day, tasks[first:], ready)
+            save_current_checklist(code, profile, first, ready)
             continue
-        material = read(Path(path))
         if material["fund_code"] != code:
             raise ValueError("DAILY_CHECKLIST_MATERIAL_FUND_MISMATCH")
         docs = {doc["id"]: doc for doc in material["documents"]}
@@ -405,8 +469,8 @@ def save_pending(directory, state, *, records=None, fund_code=None, aggregate=Tr
         if "VALUATION_CALENDAR" not in ready and profile.get("valuation_policy") != "QDII_CNY_VN_CONTRACT_SESSION_V1":
             add(code, "VALUATION_CALENDAR", None, profile.get("contract_source") or disclosure_directory(code))
         add_requirements(code, requirements, ready)
-        save_fund_checklist(folder, code, profile, window, day, tasks[first:], ready, observed_sources)
-    if aggregate:
+        save_current_checklist(code, profile, first, ready, observed_sources)
+    if aggregate and not inventory:
         versioned_save(
             directory / "supplement-tasks.json",
             {"window": window, "checked_at": instant.isoformat(), "tasks": tasks},

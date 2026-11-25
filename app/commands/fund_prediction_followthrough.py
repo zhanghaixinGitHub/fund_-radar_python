@@ -289,10 +289,10 @@ def main():
     binding = json.loads((project / ".local-runs/automation-owner/account.json").read_text(encoding="utf-8"))
     owner = binding["owner_user_id"]
     settings, at = get_settings(), now()
-    current_window = window(at)
     from app.services import fund_daily_prediction_v2 as v2
 
     active_v2 = v2.adoption() is not None
+    current_window = v2.planning_window(at) if active_v2 else window(at)
     # 同一次定时运行的目标窗口不可跨收市时间静默漂移；未做完必须保留原期失败。
     if args.output.exists():
         previous = read(args.output)

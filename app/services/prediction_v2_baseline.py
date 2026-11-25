@@ -7,7 +7,12 @@ def baseline_ready(data: dict) -> bool:
     仍要求真实本基金基准净值和已核对照行情。这里不产生方向，不把停牌
     当作零涨跌，也不允许用目标ETF净值替代本基金净值。
     """
+    from app.services.prediction_window_v2 import is_midnight
+
     context = data.get("time_context", {})
+    if is_midnight(data.get("window")):
+        # 此处只放行有已验日期的资料进入逐周期实质判断；缺行情仍由每周期说明影响。
+        return bool(data.get("forecast_calendar_verified") and not data.get("reference_nav_date"))
     if data.get("valuation_status") is not None and data["valuation_status"].get("ready") is not True:
         return False
     base = data.get("window", {}).get("base_nav_date")

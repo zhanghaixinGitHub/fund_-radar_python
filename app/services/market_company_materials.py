@@ -123,10 +123,11 @@ class MarketCompanyCollector:
             self._daily_cache = (key, rows, receipt)
         return rows, receipt
 
-    def company(self, code: str) -> dict:
+    def company(self, code: str, *, quote_date=None) -> dict:
         """行情和财务分别报告覆盖；未登记的财务权限不能被002112历史探针结果替代。"""
-        if code in self._companies:
-            return deepcopy(self._companies[code])
+        cache_key = (code, quote_date)
+        if cache_key in self._companies:
+            return deepcopy(self._companies[cache_key])
         value = {
             "stockCode": code,
             "quote": None,
@@ -139,11 +140,11 @@ class MarketCompanyCollector:
         if not re.fullmatch(r"[0-9]{6}\.(SH|SZ|BJ)", code):
             value["gaps"].append("该市场尚无已登记的公司行情与财务采集适配")
             return value
-        if self._quote_end is None:
+        if quote_date is None and self._quote_end is None:
             sessions, _ = calendar()
             self._quote_end = published_quote_end(sessions, self.checked_at)
-        end = self._quote_end
-        for api in _FIELDS:
+        end = quote_date or self._quote_end
+        for api in ("daily",) if quote_date else _FIELDS:
             try:
                 params = {"trade_date": end.strftime("%Y%m%d")} if api == "daily" else {"ts_code": code}
                 rows, receipt = self.query(api, params)
@@ -193,5 +194,5 @@ class MarketCompanyCollector:
                     }
                 )
         versioned_save(self.root / "companies" / (code + ".json"), value)
-        self._companies[code] = deepcopy(value)
+        self._companies[cache_key] = deepcopy(value)
         return value

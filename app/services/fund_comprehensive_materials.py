@@ -2,7 +2,7 @@
 
 import re
 from copy import deepcopy
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -79,6 +79,7 @@ def checked_documents(now: datetime, code: str, material: dict) -> list[dict]:
                 and not observed_public_notice(document, code, now)
                 and not verified_post_close_observation(document, code, now, price_responses)
                 and not verified_gold_close_observation(document, code, now)
+                and not verified_gold_overnight_observation(document, code, now)
             )
             or digest(document["body"]) != document["body_hash"]
         ):
@@ -156,7 +157,34 @@ def verified_gold_close_observation(document, code, as_of):
         return False
 
 
-def prepare(now, code: str, materials_path=None) -> dict:
+def verified_gold_overnight_observation(document, code, as_of):
+    """夜盘结束后的官方可见报价只作延时观察，保留取得时间及原始页面。"""
+    from app.services.fund_prediction_gold_recovery import overnight_observation
+
+    uri = urlparse(document.get("url", ""))
+    proof = document.get("gold_overnight_observation")
+    if (document.get("kind") != "MARKET_DATA" or document.get("codes") != [code]
+            or uri.scheme != "https" or uri.hostname not in {"www.sge.com.cn", "sge.com.cn"}
+            or uri.path != "/sjzx/yshqbg" or uri.query or not isinstance(proof, dict)):
+        return False
+    try:
+        day = date.fromisoformat(document["published_date"])
+        received = datetime.fromisoformat(document["available_at"])
+        reported = datetime.fromisoformat(proof["server_response_at"])
+        if received.tzinfo is None or reported.tzinfo is None:
+            return False
+        start, end = (datetime.combine(day, stamp, ZONE) for stamp in (time(2, 30), time(9)))
+        if not start <= reported <= received < end or received > as_of:
+            return False
+        raw = source_bytes(Path(document["raw_path"]))
+        if len(raw) > 3_000_000 or content_digest(raw) != document["raw_sha256"]:
+            return False
+        return overnight_observation(raw, day.isoformat()) == document["body"]
+    except (ArithmeticError, KeyError, OSError, TypeError, ValueError):
+        return False
+
+
+def prepare(now, code: str, materials_path=None, *, planning=None, valuations=None) -> dict:
     """冻结该基金的公开资料与真实数据库时钟；缺少投向/行情/公告时不生成方向。
 
     资料包使用既有 hash/payload 格式。正文、发布时间、关联投向及行情由本机采集
@@ -170,7 +198,10 @@ def prepare(now, code: str, materials_path=None) -> dict:
     material = read(path)
     if material.get("fund_code") != code:
         raise ValueError("COMPREHENSIVE_FUND_MISMATCH")
-    w = window(now)
+    from app.services.prediction_window_v2 import is_midnight
+
+    w = planning or window(now)
+    early = is_midnight(w)
     base = date.fromisoformat(w["base_nav_date"])
     report = material["report"]
     if (
@@ -219,13 +250,14 @@ def prepare(now, code: str, materials_path=None) -> dict:
             valuation_status = assess_vietnam_valuation(profile, material, by_id, w, as_of=now)
             if not valuation_status["supported"]:
                 raise ValueError("COMPREHENSIVE_VN_CONTRACT_CALENDAR_REQUIRED")
-        elif not verified_domestic_window(profile, material, by_id, w) and not verified_qdii_window(
-            profile, material, by_id, w, as_of=now
+        elif not verified_domestic_window(profile, material, by_id, w, calendar_only=early) and not verified_qdii_window(
+            profile, material, by_id, w, as_of=now, calendar_only=early
         ):
             raise ValueError("COMPREHENSIVE_CALENDAR_POLICY_REQUIRED")
         if "联接" in profile["fund_name"] and len(material.get("exposure_chain", [])) < 2:
             raise ValueError("COMPREHENSIVE_ETF_LOOKTHROUGH_REQUIRED")
-        rows = repo.navs(connection, code, source["source_id"], input_days(base)[0], base)
+        history_start = base - timedelta(days=120) if early else input_days(base)[0]
+        rows = repo.navs(connection, code, source["source_id"], history_start, base)
         # 来源可能提前返回估值日数据，但公告日期仍在未来；这类记录尚不可用。
         # 保留库内原记录与首次响应，只在本次冻结输入中排除，不能倒填公告时间。
         rows = [
@@ -236,7 +268,13 @@ def prepare(now, code: str, materials_path=None) -> dict:
         observed = repo.observe(connection, code, source, rows, now) if rows else []
     from app.services.fund_material_nav import supplement_nav
 
-    observed, nav_proof = supplement_nav(profile, material, by_id, observed, w)
+    try:
+        observed, nav_proof = supplement_nav(profile, material, by_id, observed, w)
+    except ValueError as error:
+        if not early or str(error) != "COMPREHENSIVE_NAV_BASE_REQUIRED":
+            raise
+        # 原件可能只覆盖较早的日期。本轮仍用其他证据审阅方向，不以那条净值补缺。
+        nav_proof = None
     data = {
         "fund_code": code,
         "fund_name": profile["fund_name"],
@@ -276,7 +314,7 @@ def prepare(now, code: str, materials_path=None) -> dict:
         data["valuation_status"] = valuation_status
     if len(data["inventory"]) != 16:
         raise ValueError("COMPREHENSIVE_INVENTORY_INVALID")
-    data["time_context"] = time_context(data)
+    data["time_context"] = time_context(data, [str(day) for day in valuations.sessions] if valuations else None)
     # 旧资料整理器把“非基准日行情”一律标缺。仅在正式时间核验已逐证券证明
     # 日本休市参考、且基准日净值等资料全部齐备时，派生本次用途覆盖；不改原包。
     # 来源引用仍须由后续原契约检查，任何缺价、开市停牌或旧净值均不能走此路径。

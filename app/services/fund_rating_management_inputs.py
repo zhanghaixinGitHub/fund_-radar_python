@@ -62,6 +62,31 @@ def _guotai_completed_table_remediation(manager_name: str, quote: str) -> bool:
     )
 
 
+def _verified_017437_interim_trustee(
+    fund_code, legal_name, manager_name, primary, interim, anchor, source_ref, statement, as_of
+) -> bool:
+    """同基金季报只复核报表时，以同托管人的最近有履职正文的中报补证。"""
+    if fund_code != "017437" or not legal_name or anchor.month != 6 or statement is None:
+        return False
+    period = rf"{anchor.year}年0?{anchor.month}月{anchor.day}日"
+    trustee = r"基金托管人[:：]?交通银行股份有限公司"
+    return bool(
+        statement["period_end"] == anchor.isoformat()
+        and source_ref.get("published_on") == statement["published_on"]
+        and anchor.isoformat() < statement["published_on"] <= as_of
+        and _plain(legal_name) in primary[:1600]
+        and _plain(legal_name) in interim[:1600]
+        and _plain(manager_name) in primary[:1600]
+        and _plain(manager_name) in interim[:1600]
+        and fund_code in primary[:18000]
+        and fund_code in interim[:18000]
+        and "中期报告" in interim[:1600]
+        and re.search(period, interim[:1600])
+        and re.search(trustee, primary[:1600])
+        and re.search(trustee, interim[:1600])
+    )
+
+
 def calculate(
     raw: dict,
     *,
@@ -263,10 +288,21 @@ def calculate(
         raise ValueError("RATING_MANAGEMENT_GOVERNANCE_HISTORY_MISSING")
     if len({s["source_hash"] for s in governance["statements"]}) < len(required):
         raise ValueError("RATING_MANAGEMENT_DISTINCT_PERIOD_ORIGINALS_REQUIRED")
-    quote = _plain(governance["trustee_execution"]["quote"])
-    source = governance["trustee_execution"]["source_hash"]
+    execution = governance["trustee_execution"]
+    quote = _plain(execution["quote"])
+    source = execution["source_hash"]
     if primary_report_hash is not None and source != primary_report_hash:
-        raise ValueError("RATING_MANAGEMENT_PRODUCT_TRUSTEE_IDENTITY")
+        statement = next((item for item in governance["statements"] if (
+            item["source_hash"] == source and item["period_end"] == anchor.isoformat()
+        )), None)
+        if not (
+            execution.get("same_fund_detailed_report") is True
+            and _verified_017437_interim_trustee(
+                fund_code, legal_name, manager_name, text.get(primary_report_hash, ""), text.get(source, ""),
+                anchor, sources.get(source, {}), statement, as_of,
+            )
+        ):
+            raise ValueError("RATING_MANAGEMENT_PRODUCT_TRUSTEE_IDENTITY")
     actual_review = ("监督" in quote and any(word in quote for word in ["对账", "复核"])) or (
         "投资运作" in quote and "净值计算" in quote and "托管人未发现损害基金份额持有人利益" in quote
     )

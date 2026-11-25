@@ -14,6 +14,32 @@ from app.services.fund_materials_store import versioned_save
 from app.services.material_content import content_digest, source_bytes
 
 
+def overnight_observation(raw, day):
+    """提取交易所夜盘延时页面实际可见的Au99.99报价。"""
+    soup = BeautifulSoup(raw, "html.parser")
+    session = date.fromisoformat(day)
+    title = f"上海黄金交易所{session.year}年{session.month}月{session.day}日延时行情"
+    if title not in [heading.get_text(strip=True) for heading in soup.find_all("h1")]:
+        raise ValueError("GOLD_OVERNIGHT_WRONG_SESSION")
+    header = ["合约", "最新价", "最高价", "最低价", "今开盘"]
+    quotes = []
+    for table in soup.find_all("table"):
+        rows = [[cell.get_text(strip=True) for cell in tr.find_all(["td", "th"], recursive=False)]
+                for tr in table.find_all("tr")]
+        if header in rows:
+            quotes.extend(row for row in rows if len(row) == 5 and row[0] == "Au99.99")
+    if len(quotes) != 1:
+        raise ValueError("GOLD_OVERNIGHT_MISSING_QUOTE")
+    _, last, high, low, opening = quotes[0]
+    values = [Decimal(value) for value in (last, high, low, opening)]
+    if not all(value.is_finite() and value > 0 for value in values):
+        raise ValueError("GOLD_OVERNIGHT_INVALID_QUOTE")
+    last_value, high_value, low_value, opening_value = values
+    if not low_value <= min(last_value, opening_value) <= max(last_value, opening_value) <= high_value:
+        raise ValueError("GOLD_OVERNIGHT_INVALID_RANGE")
+    return f"{day} 上金所Au99.99夜盘延时观察，最新{last}，最高{high}，最低{low}，开盘{opening}元/克。"
+
+
 def gold_rows(raw, base):
     """只接受本期Au99.99实际收盘行，其他合约或旧日不能冒充本期。"""
     soup = BeautifulSoup(raw, "html.parser")

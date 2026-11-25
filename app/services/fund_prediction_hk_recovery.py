@@ -43,12 +43,14 @@ def closed_rows(raw, base):
     return {day: rows[day] for day in expected}
 
 
-def refresh(material, base, root):
+def refresh(material, base, root, *, symbols=None):
     documents = {d["id"]: d for d in material["documents"]}
     results = []
     for company in material.get("companies", []):
         code = company["code"]
-        if not re.fullmatch(r"\d{5}\.HK", code) or (company.get("quote") or {}).get("date") == base:
+        if not re.fullmatch(r"\d{5}\.HK", code) or (symbols is not None and code not in symbols):
+            continue
+        if symbols is None and (company.get("quote") or {}).get("date") == base:
             continue
         old = documents.get((company.get("quote") or {}).get("source_ref"), {})
         parsed = urlparse(old.get("url", ""))

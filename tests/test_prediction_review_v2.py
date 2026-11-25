@@ -464,6 +464,20 @@ def test_trial_current_scope_immutable_readback_and_repeat_time(tmp_path, monkey
         trial.checked_input(run, manifest["selection"][0])
 
 
+@pytest.mark.parametrize("horizon", ["T1", "T5_V1", "T20_V1", "M6_V1"])
+def test_midnight_review_can_release_direction_with_pending_baseline_nav(horizon):
+    from app.services.prediction_window_v2 import POLICY
+
+    packet, data, review = sample(horizon)
+    data.update(window={"generation_policy": POLICY, "base_nav_date": "2026-11-12"},
+                forecast_calendar_verified=True, valuation_status={"ready": False},
+                time_context={"baseline_complete": False}, nav=[{"nav_date": "2026-11-11"}])
+    assert validate_review_v2(packet, data, review, at=AT).decision == "UP"
+    data["reference_nav_date"] = "2026-11-11"
+    with pytest.raises(ValueError, match="V2_TARGET_OR_SOURCE_UNVERIFIED"):
+        validate_review_v2(packet, data, review, at=AT)
+
+
 def test_noncritical_gap_keeps_direction_and_followup():
     packet, data, r = sample()
     r["checks"]["exposure"].update(status="LIMITED", gap_effect="QUALIFY", impact_reason=NOTE, follow_up=NOTE)

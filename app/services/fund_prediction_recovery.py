@@ -199,20 +199,27 @@ def public_financial_originals(code, output, window):
     return originals
 
 
-def recover(code, output, window, *, collector=None):
+def recover(code, output, window, *, collector=None, missing_fields=None):
     """先重试正常来源，再整理候选包；读过的新原文才由独立审阅入口批准。"""
     from app.services.fund_market_news import refresh_material_news_link
     from app.services.fund_market_preparation import MarketFundPreparation, market_scope
     from app.services.market_company_materials import MarketCompanyCollector
 
-    fund = next((f for f in market_scope() if f["fund_code"] == code), None)
-    if not fund:
-        raise ValueError("WATCHED_FUND_NOT_IN_ACTIVE_MARKET")
-    replay = replay_originals(fund, output)
+    legacy = missing_fields is None
+    missing_fields = missing_fields or set()
+    symbols = {field[6:] for field in missing_fields if field.startswith("CLOSE:")}
+    targets = {field[7:] for field in missing_fields if field.startswith("TARGET:")}
+    quote_scope = {} if legacy else {"symbols": symbols}
+    replay = []
+    if legacy:
+        fund = next((f for f in market_scope() if f["fund_code"] == code), None)
+        if not fund:
+            raise ValueError("WATCHED_FUND_NOT_IN_ACTIVE_MARKET")
+        replay = replay_originals(fund, output)
     root = workflow_root()
     news_path = root / "news/funds" / (code + ".json")
     news = read(news_path) if news_path.exists() else {}
-    if news.get("status") != "SUCCEEDED" or news.get("coverage", {}).get("end", "") < str(now().date()):
+    if legacy and (news.get("status") != "SUCCEEDED" or news.get("coverage", {}).get("end", "") < str(now().date())):
         prep = MarketFundPreparation()
         try:
             news_receipt = prep.sync_news(code)
@@ -248,21 +255,30 @@ def recover(code, output, window, *, collector=None):
         raise ValueError("RECOVERY_CROSS_FUND_MATERIALS")
     from app.services.fund_prediction_lookthrough import recover_target_reports
 
-    target_reports = recover_target_reports(material, output)
+    target_scope = {} if legacy else {"targets": targets}
+    target_reports = recover_target_reports(material, output, **target_scope) if legacy or targets else []
     candidate = normalized_materials(material)
     from app.services.fund_prediction_market_recovery import refresh as refresh_market
 
-    market_receipts = refresh_market(candidate, window["base_nav_date"])
+    market_receipts = (
+        refresh_market(candidate, window["base_nav_date"], **quote_scope) if legacy or symbols else []
+    )
     from app.services.fund_prediction_bond_recovery import refresh as refresh_bonds
 
-    bond_receipts = refresh_bonds(candidate, window["base_nav_date"], output.parents[1] / "public")
+    bond_receipts = refresh_bonds(candidate, window["base_nav_date"], output.parents[1] / "public") if legacy else []
     from app.services.fund_prediction_gold_recovery import refresh as refresh_gold
 
-    gold_receipt = refresh_gold(candidate, window["base_nav_date"], output / "gold")
+    gold_receipt = (refresh_gold(candidate, window["base_nav_date"], output / "gold")
+                    if legacy or "VALUATION_CALENDAR" in missing_fields else None)
     from app.services.fund_prediction_news_recovery import refresh as refresh_news
 
-    notice_receipt = refresh_news(candidate, root=root, checked_at=now())
-    if candidate.get("calendar_evidence"):
+    notice_receipt = None
+    if legacy or ("NOTICES" in missing_fields and news.get("status") == "SUCCEEDED" and news.get("catalog_complete")
+                  and news.get("coverage", {}).get("end", "") >= str(now().date())):
+        notice_receipt = refresh_news(candidate, root=root, checked_at=now())
+        if not legacy and (root / "materials" / (code + ".json")).is_file():
+            refresh_material_news_link(code)
+    if candidate.get("calendar_evidence") and (legacy or "VALUATION_CALENDAR" in missing_fields):
         # 重新绑定本次窗口；正式校验仍逐项核对本基金条款、官方日历与实际行情。
         candidate["calendar_evidence"].update(
             base_date=window["base_nav_date"], target_date=window["target_nav_date"]
@@ -271,20 +287,23 @@ def recover(code, output, window, *, collector=None):
     latest = max(reports, key=lambda r: (r["endDate"], r["publishedDate"])) if reports else {}
     from app.services.fund_prediction_report_recovery import bind_latest_partial
 
-    bind_latest_partial(candidate, latest)
+    if legacy or "MATERIALS" in missing_fields:
+        bind_latest_partial(candidate, latest)
     companies = {c["code"]: c for c in candidate.get("companies", [])}
     from app.services.fund_prediction_company_originals import refresh as refresh_company_originals
 
-    shared_company_receipt = refresh_company_originals(candidate, root=root, checked_at=now())
+    shared_company_receipt = refresh_company_originals(candidate, root=root, checked_at=now()) if legacy else None
     required = {h["stockCode"] for h in latest.get("holdings", [])} | set(companies)
     required |= {h["stockCode"] for r in target_reports for h in r.get("report", {}).get("holdings", [])}
+    if not legacy:
+        required &= symbols
     receipts = []
     own_collector = collector is None
     collector = collector or MarketCompanyCollector(root)
     try:
         for security in sorted(required):
             existing = companies.get(security, {})
-            if security.endswith(".JP"):
+            if security.endswith(".JP") and legacy:
                 # 当期报价齐备不代表财报仍是最新。先核真实原件目录，发现新半年报
                 # 就保留全文并追加未批准候选，不能只复用上期季度包或自动放行方向。
                 from app.services.fund_prediction_jp_financials import collect as collect_jp
@@ -312,11 +331,14 @@ def recover(code, output, window, *, collector=None):
                             "publishedDate": result["published_date"], "scope": "ORIGINAL_PARSED_READING_REQUIRED",
                         })
                 continue
-            if existing.get("financials") and (existing.get("quote") or {}).get("date") == window["base_nav_date"]:
+            if legacy and existing.get("financials") and (
+                existing.get("quote") or {}
+            ).get("date") == window["base_nav_date"]:
                 continue
             # 本基金原报告代码决定市场；不把港股代码猜成A股，也不借用别的基金权重。
             value = (
-                collector.company(security)
+                (collector.company(security) if legacy
+                 else collector.company(security, quote_date=date.fromisoformat(window["base_nav_date"])))
                 if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", security)
                 else {"code": security, "gaps": ["需按本证券真实市场补充行情及经营原文"], "sources": []}
             )
@@ -348,7 +370,7 @@ def recover(code, output, window, *, collector=None):
                         "change_pct": quote["pct_chg"],
                         "source_ref": ref,
                     }
-            if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", security) and not existing.get("financials"):
+            if legacy and re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", security) and not existing.get("financials"):
                 try:
                     value["public_originals"] = public_financial_originals(
                         security, output / "companies" / security, window
@@ -362,15 +384,24 @@ def recover(code, output, window, *, collector=None):
     candidate = normalized_materials(candidate)
     from app.services.fund_prediction_hk_recovery import refresh as refresh_hk
 
-    hk_receipts = refresh_hk(candidate, window["base_nav_date"], output.parents[1] / "public")
+    hk_receipts = (
+        refresh_hk(candidate, window["base_nav_date"], output.parents[1] / "public", **quote_scope)
+        if legacy or symbols else []
+    )
     from app.services.fund_prediction_overseas_recovery import refresh as refresh_overseas
 
-    overseas_receipts = refresh_overseas(candidate, window["base_nav_date"], output.parents[1] / "public")
+    fetch_fx = "FX" in missing_fields
+    overseas_scope = {} if legacy else {**quote_scope, "fetch_fx": fetch_fx}
+    overseas_receipts = (
+        refresh_overseas(candidate, window["base_nav_date"], output.parents[1] / "public", **overseas_scope)
+        if legacy or symbols or fetch_fx else []
+    )
     from app.services.fund_prediction_corporate_recovery import refresh as refresh_corporate
 
-    corporate_receipts = refresh_corporate(candidate, window)
+    corporate_receipts = refresh_corporate(candidate, window, **quote_scope) if legacy or symbols else []
     # 股票更新完成后重建当前事实及覆盖状态；此时已取得的对照报价不会重复请求。
-    refresh_market(candidate, window["base_nav_date"])
+    if legacy:
+        refresh_market(candidate, window["base_nav_date"])
     if candidate != material:
         path = output / "materials-normalized.json"
         versioned_save(path, candidate)

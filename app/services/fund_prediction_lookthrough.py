@@ -9,7 +9,7 @@ from app.services.fund_materials import snapshot
 from app.services.fund_materials_store import versioned_save
 
 
-def recover_target_reports(material: dict, output: Path) -> list[dict]:
+def recover_target_reports(material: dict, output: Path, *, targets=None) -> list[dict]:
     """只处理本包已由原文核准的穿透链，目录先行、原件按同版本复用。
 
     原发布入口保留报告ID和历史。取得/解析成功仍需聊天核对新增证券、财务、
@@ -33,6 +33,8 @@ def recover_target_reports(material: dict, output: Path) -> list[dict]:
             if not locked:
                 raise ValueError("SHARED_HOLDINGS_LOCK_BUSY")
             for target in chain[1:]:
+                if targets is not None and target not in targets:
+                    continue
                 row = {"owner_fund_code": code, "target_fund_code": target}
                 try:
                     if not re.fullmatch(r"\d{6}", target):

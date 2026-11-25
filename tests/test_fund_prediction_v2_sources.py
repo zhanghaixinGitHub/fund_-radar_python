@@ -10,12 +10,47 @@ import pytest
 from app.commands import fund_prediction_v2_sources as command
 from app.services import prediction_trial_v2 as trial
 from app.services.direction_1d_protocol import digest
+from app.services.fund_comprehensive_materials import checked_documents
 from app.services.fund_exposure_common import read
 from app.services.fund_materials_store import versioned_save
+from app.services.fund_prediction_gold_recovery import overnight_observation
 from app.services.prediction_contract import PredictionFailure
 
 AT = datetime.fromisoformat("2026-11-12T17:00:00+08:00")
 WINDOW = {"base_nav_date": "2026-11-12", "target_nav_date": "2026-11-13", "status": "OPEN"}
+
+
+def test_same_day_gold_overnight_quote_has_verified_date_time_and_raw_body(tmp_path):
+    code = "021740"
+    raw_path = tmp_path / "sge-night.html"
+    raw = (
+        '<h1>上海黄金交易所2026年11月25日延时行情</h1><table>'
+        '<tr><th>合约</th><th>最新价</th><th>最高价</th><th>最低价</th><th>今开盘</th></tr>'
+        '<tr><td>Au99.99</td><td>765.8</td><td>784.0</td><td>765.8</td><td>780.0</td></tr></table>'
+    ).encode()
+    raw_path.write_bytes(raw)
+    day, received = "2026-11-25", "2026-11-25T03:23:40+08:00"
+    body = overnight_observation(raw, day)
+    document = {
+        "id": "gold-night", "kind": "MARKET_DATA", "codes": [code],
+        "url": "https://www.sge.com.cn/sjzx/yshqbg", "published_date": day, "available_at": received,
+        "body": body, "body_hash": digest(body), "raw_path": str(raw_path),
+        "raw_sha256": hashlib.sha256(raw).hexdigest(),
+        "gold_overnight_observation": {"server_response_at": "2026-11-24T19:23:35+00:00"},
+    }
+    at = datetime.fromisoformat("2026-11-25T03:24:00+08:00")
+    assert checked_documents(at, code, {"fund_code": code, "documents": [document]})[0]["body"] == body
+
+    for invalid in (
+        {"published_date": "2026-11-26"},
+        {"url": "https://www.sge.com.cn.example.org/sjzx/yshqbg"},
+        {"gold_overnight_observation": {"server_response_at": "2026-11-24T18:20:00+00:00"}},
+        {"gold_overnight_observation": {"server_response_at": "2026-11-24T19:23:42+00:00"}},
+        {"body": body.replace("765.8", "765.0"), "body_hash": digest(body.replace("765.8", "765.0"))},
+        {"raw_sha256": "0" * 64},
+    ):
+        with pytest.raises(ValueError, match="COMPREHENSIVE_SOURCE_INVALID"):
+            checked_documents(at, code, {"fund_code": code, "documents": [{**document, **invalid}]})
 
 
 @pytest.fixture
@@ -103,6 +138,49 @@ def test_baseline_gap_is_not_promoted_to_source_ready(tmp_path, isolated):
     assert packet["periods"]["M6_V1"]["status"] == "RESOLVED"
     assert packet["periods"]["M6_V1"]["end_date"] == "2027-05-12"
     assert packet["periods"]["M6_V1"]["end_date_basis"] == "CALENDAR_MONTH"
+
+
+def test_midnight_freeze_keeps_actual_fund_dates_without_using_older_nav(tmp_path, isolated, monkeypatch):
+    from datetime import date, timedelta
+
+    from app.services import prediction_window_v2
+    from app.services.prediction_contract import ValuationCalendar, target_dates
+
+    inventory, data, _ = isolated
+    at = datetime.fromisoformat("2026-11-12T00:30:00+08:00")
+    start, end = date(2026, 11, 9), date(2026, 12, 31)
+    domestic = tuple(day for n in range((end - start).days + 1)
+                     if (day := start + timedelta(days=n)).weekday() < 5)
+    fund_days = tuple(day for day in domestic if day != date(2026, 11, 13))
+    calendar = ValuationCalendar("verified-product", fund_days, start, end, "verified")
+    monkeypatch.setattr(prediction_window_v2, "calendar", lambda: (domestic, "domestic"))
+    monkeypatch.setattr(command, "window", prediction_window_v2.window)
+    monkeypatch.setattr(command, "review_calendar", lambda *args: calendar)
+    monkeypatch.setattr(command, "target_dates", target_dates)
+    data.update(fund_name="测试QDII", nav=[{"nav_date": "2026-11-11"}],
+                time_context={"baseline_complete": False, "nav_status": "STALE"})
+    monkeypatch.setattr(command, "prepare", lambda at, code, path, *, planning, **kwargs:
+                        {**deepcopy(data), "window": planning, "as_of": at.isoformat()})
+
+    result = command.freeze_sources(tmp_path / "sources", holdings_provider=lambda: inventory, clock=at)
+    trial.prepare_trial(tmp_path / "trial", Path(result["selection_path"]), holdings=inventory, clock=at)
+    packet = read(tmp_path / "trial/inputs/002112.json")
+    frozen = read(Path(packet["source_path"]))["input"]
+    assert packet["source_ready"] is True
+    assert "reference_nav_date" not in frozen
+    assert frozen["planning_window"]["target_nav_date"] == "2026-11-13"
+    assert {p["base_date"] for p in packet["periods"].values()} == {"2026-11-12"}
+    assert {p["start_date"] for p in packet["periods"].values()} == {"2026-11-16"}
+    assert {h: p["end_date"] for h, p in packet["periods"].items()} == {
+        "T1": "2026-11-16", "T5_V1": "2026-11-20", "T20_V1": "2026-12-11", "M6_V1": "2027-05-12",
+    }
+
+    for hour in (10, 15, 22):
+        assert prediction_window_v2.window(at.replace(hour=hour)) == result["window"]
+    assert prediction_window_v2.window(at - timedelta(minutes=31))["target_nav_date"] == "2026-11-12"
+    saturday = at.replace(day=14)
+    assert prediction_window_v2.window(saturday)["target_nav_date"] == "2026-11-16"
+    assert prediction_window_v2.window(saturday)["base_nav_date"] == "2026-11-13"
 
 
 def test_qdii_prior_nav_keeps_forecast_window_and_anchors_half_year_target(tmp_path, isolated):
@@ -263,13 +341,16 @@ def _qdii_calendar_case(tmp_path, isolated, monkeypatch, error="COMPREHENSIVE_CA
     return inventory, handoff, material, raw
 
 
+@pytest.mark.parametrize('calendar_failure', [
+    'COMPREHENSIVE_CALENDAR_POLICY_REQUIRED', 'COMPREHENSIVE_VN_CONTRACT_CALENDAR_REQUIRED',
+])
 @pytest.mark.parametrize(('nav_day', 'identity_matches', 'expected_reference'), [
     (12, True, None), (11, True, '2026-11-11'), (11, False, None),
 ])
 def test_qdii_exact_calendar_failure_prepares_false_partial_with_real_nav_identity(
-    tmp_path, isolated, monkeypatch, nav_day, identity_matches, expected_reference
+    tmp_path, isolated, monkeypatch, nav_day, identity_matches, expected_reference, calendar_failure
 ):
-    inventory, handoff, material, _ = _qdii_calendar_case(tmp_path, isolated, monkeypatch)
+    inventory, handoff, material, _ = _qdii_calendar_case(tmp_path, isolated, monkeypatch, error=calendar_failure)
     statements = []
     from app.services.fund_prediction_nav_identity import nav_identity
 
@@ -298,10 +379,11 @@ def test_qdii_exact_calendar_failure_prepares_false_partial_with_real_nav_identi
     result = command.freeze_sources(tmp_path / "sources", holdings_provider=lambda: inventory, clock=AT)
     assert result["frozen_count"] == 1 and result["source_ready_count"] == 0
     assert result["funds"][0]["status"] == "FROZEN_WITH_CALENDAR_GAPS"
-    assert result["funds"][0]["failure"]["code"] == "COMPREHENSIVE_CALENDAR_POLICY_REQUIRED"
+    assert result["funds"][0]["failure"]["code"] == calendar_failure
     selection = json.loads(Path(result["selection_path"]).read_text())
     assert selection[0]["source_kind"] == "PARTIAL_MATERIALS"
     data = read(Path(selection[0]["source_path"]))
+    assert data["valuation_status"] == {"ready": False, "reason": calendar_failure}
     assert data["materials_path"] == handoff["materials_path"]
     assert data["materials_hash"] == digest(material)
     assert data["nav"][0]["source_id"] == "actual-source"

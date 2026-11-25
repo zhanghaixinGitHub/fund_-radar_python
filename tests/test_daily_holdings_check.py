@@ -151,12 +151,13 @@ def test_monthly_rating_publication_is_restricted_to_workflow_holdings(monkeypat
 
 def test_daily_continues_rating_after_material_barrier_and_cannot_close_failed_rating(tmp_path):
     from app.services.fund_daily_prediction import DailyPredictionRun
-    from tests.test_fund_daily_prediction import Backend, reviews
+    from tests.test_fund_daily_prediction import Backend, legacy_run, reviews
 
     backend = Backend(["123456"])
     called = []
     backend.ratings = lambda terminal: called.append(terminal["terminal"]) or {"status": "FAILED"}
     backend.terminal = False
+    legacy_run(tmp_path, backend)
     run = DailyPredictionRun(tmp_path, backend)
     assert run.advance()["status"] == "WAITING_MATERIALS" and called == []
     backend.terminal = True

@@ -15,6 +15,11 @@ def test_us_regular_close_does_not_use_after_hours_or_extension_prices():
     with pytest.raises(ValueError, match="CLOSE_DATE"):
         us_close(raw, "MU.US", "2026-11-11")
 
+    with_provider_flags = raw[:-2] + b',0,0";'
+    assert us_close(with_provider_flags, "MU.US", "2026-11-10") == value
+    with pytest.raises(ValueError, match="QUOTE_LAYOUT"):
+        us_close(raw[:-2] + b',0,unknown";', "MU.US", "2026-11-10")
+
 
 def test_japan_history_uses_past_closed_rows_and_not_live_header():
     raw = b"""<h1>8035.T live 99999</h1><table>
@@ -24,6 +29,18 @@ def test_japan_history_uses_past_closed_rows_and_not_live_header():
     quote, rows = jp_close(raw, "8035.JP", "2026-11-10")
     assert quote["close"] == "94" and quote["previous_close"] == "88"
     assert "2026-11-11" not in rows
+
+
+def test_japan_history_allows_split_notice_but_not_cross_split_raw_return():
+    raw = """<h1>6861.T</h1><table>
+    <tr><td>2026/11/20</td><td>14,390</td><td>14,485</td><td>13,810</td><td>14,025</td></tr>
+    <tr><td>2026/11/19</td><td>分割：1株→5株</td></tr>
+    <tr><td>2026/11/19</td><td>14,530</td><td>14,730</td><td>14,355</td><td>14,690</td></tr>
+    <tr><td>2026/11/18</td><td>73,200</td><td>73,680</td><td>72,050</td><td>73,610</td></tr></table>""".encode()
+    quote, _ = jp_close(raw, "6861.JP", "2026-11-20")
+    assert quote["close"] == "14025" and quote["previous_close"] == "14690"
+    with pytest.raises(ValueError, match="JP_HISTORY_SPLIT_ADJUSTMENT_REQUIRED"):
+        jp_close(raw, "6861.JP", "2026-11-19")
 
 
 def test_official_midpoint_keeps_units_and_rejects_changed_column_order():

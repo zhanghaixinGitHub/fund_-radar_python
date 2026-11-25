@@ -3,9 +3,36 @@
 import hashlib
 import json
 from copy import deepcopy
+from datetime import date
 
 import pytest
 from app.services.fund_rating_management_inputs import calculate
+
+
+@pytest.mark.parametrize("mismatch", [None, "fund", "trustee", "period", "future", "edition"])
+def test_017437_trustee_report_requires_same_fund_and_latest_verified_interim(mismatch):
+    from app.services.fund_rating_management_inputs import _verified_017437_interim_trustee
+
+    fund = "华宝纳斯达克精选股票型发起式证券投资基金(QDII)"
+    manager = "华宝基金管理有限公司"
+    trustee = "基金托管人交通银行股份有限公司"
+    primary = fund + "第三季度报告" + manager + trustee + "017437"
+    interim = fund + "2026年中期报告2026年06月30日" + manager + trustee + "017437"
+    reference = {"published_on": "2026-08-31"}
+    statement = {"period_end": "2026-06-30", "published_on": "2026-08-31"}
+    if mismatch == "fund":
+        interim = interim.replace("017437", "017436")
+    elif mismatch == "trustee":
+        interim = interim.replace("交通银行股份有限公司", "另一家托管银行")
+    elif mismatch == "period":
+        interim = interim.replace("2026年06月30日", "2025年06月30日")
+    elif mismatch == "future":
+        reference["published_on"] = statement["published_on"] = "2026-11-01"
+    elif mismatch == "edition":
+        interim = interim.replace("中期报告", "第三季度报告")
+    assert _verified_017437_interim_trustee(
+        "017437", fund, manager, primary, interim, date(2026, 6, 30), reference, statement, "2026-10-30"
+    ) is (mismatch is None)
 
 
 def test_pdf_business_kind_is_not_read_as_empty_json(tmp_path, monkeypatch):

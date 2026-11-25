@@ -85,14 +85,16 @@ def test_holdings_changed_during_reconcile_is_not_success(tmp_path, monkeypatch)
         service.reconcile(b)
 
 
-def test_daily_material_barrier_and_failure_receipt(tmp_path):
+def test_daily_material_barrier_and_failure_receipt(monkeypatch, tmp_path):
     from app.services.fund_daily_prediction import DailyPredictionRun
-    from tests.test_fund_daily_prediction import Backend, reviews
+    from tests.test_fund_daily_prediction import Backend, legacy_run, reviews
 
+    monkeypatch.setattr("app.services.prediction_review_v2_publication.adoption_status", lambda: None)
     b = Backend(["006038"])
     calls = []
     b.one_day_outcomes = lambda: calls.append(True) or {"status": "PARTIAL_SUCCESS"}
     b.terminal = False
+    legacy_run(tmp_path, b)
     run = DailyPredictionRun(tmp_path, b)
     assert run.advance()["status"] == "WAITING_MATERIALS" and calls == []
     b.terminal = True

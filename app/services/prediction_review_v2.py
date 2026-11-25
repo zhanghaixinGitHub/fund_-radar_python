@@ -218,6 +218,9 @@ def required_checks(classification, horizon):
 def validate_review_v2(packet, data, value, *, at=None):
     """校验单基金单周期；不把人工填写的实质说明当作机器证明的经济事实。"""
     r = Review.model_validate(value)
+    from app.services.prediction_window_v2 import is_midnight
+
+    early = is_midnight(data.get("window"))
     p = policy_v2()
     period_rule = p["horizons"][r.horizon]
     if r.period_assessment.rule_id != period_rule["id"]:
@@ -337,6 +340,9 @@ def validate_review_v2(packet, data, value, *, at=None):
             ):
                 raise ValueError("V2_NOT_APPLICABLE_EVIDENCE_REQUIRED")
     factors = {f.id: f for f in r.factors}
+    base_pending = early and not any(
+        nav["nav_date"] == data["window"]["base_nav_date"] for nav in data.get("nav", [])
+    )
     if len(factors) != len(r.factors):
         raise ValueError("V2_FACTOR_ID_DUPLICATE")
     for f in r.factors:
@@ -344,7 +350,9 @@ def validate_review_v2(packet, data, value, *, at=None):
             quote_check(q)
             if (
                 q.kind == "FACT"
-                and data["facts"][q.ref].get("direction_eligible") is False
+                and (data["facts"][q.ref].get("direction_eligible") is False or (
+                    base_pending and data["facts"][q.ref].get("category") in {"基金净值", "NAV"}
+                ))
                 and f.role not in {"BACKGROUND", "MIXED"}
             ):
                 raise ValueError("V2_INELIGIBLE_DIRECTION_FACT")
@@ -389,12 +397,12 @@ def validate_review_v2(packet, data, value, *, at=None):
         estimate = (data.get("valuation_status") or {}).get("prediction_reference_fx")
         if estimate and r.decision != estimate["directions"][r.horizon]:
             raise ValueError("VN_REFERENCE_FX_DIRECTION_CHANGED")
-        if data.get("reference_nav_date"):
+        if early or data.get("reference_nav_date"):
             from app.services.prediction_v2_baseline import baseline_ready
 
             if not baseline_ready(data):
                 raise ValueError("V2_TARGET_OR_SOURCE_UNVERIFIED")
-        if data.get("valuation_status") is not None and (
+        if not early and data.get("valuation_status") is not None and (
             data["valuation_status"].get("ready") is not True
             or data.get("time_context", {}).get("baseline_complete") is not True
         ):

@@ -67,7 +67,7 @@ class Provider:
 
     def query(self, api, params, fields):
         if (
-            api not in {"daily", "daily_basic", "index_daily", "fund_daily"}
+            api not in {"daily", "daily_basic", "index_daily", "fund_daily", "fund_nav", "fund_share"}
             or api not in self.source["authorized_api_names"]
         ):
             raise ValueError("EXPOSURE_API_NOT_AUTHORIZED")

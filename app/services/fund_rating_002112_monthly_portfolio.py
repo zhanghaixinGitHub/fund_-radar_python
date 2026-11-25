@@ -2,13 +2,15 @@
 
 import re
 from collections import defaultdict
-from decimal import Decimal as D, localcontext
-from pathlib import Path
 from datetime import date
+from decimal import Decimal as D
+from decimal import localcontext
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
-from app.services.fund_rating_thematic_source import RawArchive, plain, require, iso
-from app.services.fund_rating_active_portfolio_components import parse_stock_text, parse_wrapped_text, parse_classifier
+from app.services.fund_rating_active_portfolio_components import parse_classifier, parse_stock_text, parse_wrapped_text
 from app.services.fund_rating_monthly_r5 import rolling_window
+from app.services.fund_rating_thematic_source import RawArchive, iso, plain, require
 
 VERSION = "R5_002112_MONTHLY_PORTFOLIO_ORIGINALS_V1"
 
@@ -25,6 +27,36 @@ def _full_day_table(text, security, start, resume):
     ]
     return any(re.search(re.escape(security) + r"[^0-9]{1,30}A股复牌" + re.escape(a + b)
                          + r"(?=$|[^0-9/]|[0-9]{6}[^0-9/])", text) for a, b in formats)
+
+
+def _sse_suspension_status(source, digest, security, start, through):
+    ref = source.original(digest)
+    url = urlsplit(ref.get("url", ""))
+    query = parse_qs(url.query)
+    day = through.replace("-", "")
+    require(
+        url.scheme == "https" and url.netloc == "query.sse.com.cn" and url.path == "/commonSoaQuery.do"
+        and query.get("sqlId") == ["GW_PL_JYTS_TFPXX"] and query.get("productCode") == [security]
+        and query.get("startStopDate") == query.get("endStopDate") == [day]
+        and through <= source.asof,
+        "002112_SUSPENSION_EXCHANGE_REQUEST",
+    )
+    result = source.json(digest)
+    require(isinstance(result, dict), "002112_SUSPENSION_EXCHANGE_RESPONSE")
+    rows = result.get("result")
+    page = result.get("pageHelp")
+    require(
+        isinstance(rows, list) and len(rows) == 1
+        and isinstance(page, dict) and page.get("total") == 1
+        and not result.get("actionErrors")
+        and isinstance(rows[0], dict)
+        and rows[0].get("productCode") == security and rows[0].get("controlType") == "TR"
+        and rows[0].get("type") == "LXTP"
+        and rows[0].get("startStopDate") == start.replace("-", "")
+        and rows[0].get("endStopDate") == "" and rows[0].get("stopTime") == "",
+        "002112_SUSPENSION_EXCHANGE_RESPONSE",
+    )
+    return True
 
 
 def suspension_days(source, security, intervals, calendar_days):
@@ -66,8 +98,17 @@ def suspension_days(source, security, intervals, calendar_days):
             covered.update(day for day in calendar_days if start <= day < resume)
         else:
             through = iso(interval["through_date"])
-            require(through >= start and any(day == through and any(word in text for word in ["继续停牌", "仍处于停牌", "仍处停牌", "停牌状态"])
-                    for day, text in roles.get("SUSPENSION_STATUS", [])), "002112_SUSPENSION_ACTUAL_THROUGH_DATE")
+            sse_status = interval.get("sse_status_ref")
+            quoted = any(
+                day == through and any(word in text for word in ["继续停牌", "仍处于停牌", "仍处停牌", "停牌状态"])
+                for day, text in roles.get("SUSPENSION_STATUS", [])
+            )
+            require(
+                through >= start and (quoted or (
+                    sse_status and _sse_suspension_status(source, sse_status, security, start, through)
+                )),
+                "002112_SUSPENSION_ACTUAL_THROUGH_DATE",
+            )
             covered.update(day for day in calendar_days if start <= day <= through)
     return covered
 

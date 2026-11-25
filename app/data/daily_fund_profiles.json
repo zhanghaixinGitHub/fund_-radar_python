@@ -40,26 +40,30 @@
         "use": "预测 · 资金利率",
         "item": "基准日隔夜和七天银行间资金利率",
         "source": "中国货币网 https://www.chinamoney.com.cn/chinese/llshibor/ 或 Tushare shibor",
-        "base_fact_prefix": "shibor_"
+        "base_fact_prefix": "shibor_",
+        "collection": "中国货币网同业利率"
       },
       {
         "use": "预测 · 目标日资金",
         "item": "目标日 11:00 发布的隔夜和七天 Shibor，与基准日同口径比较",
         "source": "中国货币网 Shibor 历史数据 https://www.chinamoney.com.cn/ags/ms/cm-u-bk-shibor/ShiborHis",
         "base_fact_prefix": "cfets_target_shibor_",
-        "evidence_date": "target_nav_date"
+        "evidence_date": "target_nav_date",
+        "collection": "中国货币网同业利率"
       },
       {
         "use": "预测 · 目标日现券",
         "item": "目标日国债、国开债、进出口行债和农发债的同券盘中报价，与基准日同口径比较",
         "source": "中国货币网实时收益率曲线 https://www.chinamoney.com.cn/english/bmkycvrty/",
         "base_fact_prefix": "cfets_target_bond_",
-        "evidence_date": "target_nav_date"
+        "evidence_date": "target_nav_date",
+        "collection": "中国货币网同刻现券报价"
       },
       {
         "use": "预测 · 公开市场操作",
         "item": "央行公开市场操作量及到期量",
         "source": "中国人民银行公开市场业务交易公告 https://www.pbc.gov.cn/zhengcehuobisi/125207/125213/125431/125475/index.html",
+        "collection": "央行逆回购原公告",
         "base_fact_prefix": "pbc_open_market_"
       },
       {
@@ -165,7 +169,8 @@
         "item": "目标日可观察的银行间回购成交加权利率及实际期限，核对期限是否覆盖下月初，可用交易所同期限成交对照",
         "source": "中国货币网货币市场质押式回购 https://www.chinamoney.com.cn/chinese/mkdatapm/?tab=2；上交所协议回购 https://bond.sse.com.cn/data/quote/tradeinfo/Repomarket/",
         "base_fact_prefix": "cfets_cross_month_repo_trade_",
-        "evidence_date": "target_nav_date"
+        "evidence_date": "target_nav_date",
+        "collection": "中国货币网回购成交"
       },
       {
         "use": "预测 · 政策性金融债发行缴款对照",
@@ -227,7 +232,8 @@
     "market_references": {
       "000300.SH": "https://api.tushare.pro",
       "000905.SH": "https://api.tushare.pro",
-      "159736.SZ": "https://api.tushare.pro"
+      "159736.SZ": "https://api.tushare.pro",
+      "930653.CSI": "https://api.tushare.pro"
     },
     "valuation_policy": null,
     "contract_source": null,
@@ -236,7 +242,7 @@
     "share_currency": "CNY",
     "share_currency_evidence": "fund_peer_classifications_v1.json",
     "supplement_focus": {
-      "benchmark_source": "中证食品饮料 930653，中证指数 https://www.csindex.com.cn/；合同活期税后利率",
+      "benchmark_source": "中证食品饮料 930653：中证指数 https://www.csindex.com.cn/ ，授权 Tushare index_daily 按 930653.CSI 查日线；合同活期税后利率",
       "rating_data": "159736目标ETF及联接本C同日资产；穿透中证食品饮料成分、白酒集中度与跟踪误差",
       "market_source": "中证指数 https://www.csindex.com.cn/；深交所 https://www.szse.cn/ 159736；巨潮资讯 https://www.cninfo.com.cn/；国家统计局 https://www.stats.gov.cn/sj/",
       "cycles": {
@@ -264,7 +270,9 @@
     "target_funds": [],
     "market_references": {
       "000300.SH": "https://api.tushare.pro",
-      "000905.SH": "https://api.tushare.pro"
+      "000905.SH": "https://api.tushare.pro",
+      "000171.SH": "https://www.csindex.com.cn/csindex-home/perf/index-perf?indexCode=000171",
+      "CBA00203": "https://yield.chinabond.com.cn/cbweb-mn/indices/single_index_query"
     },
     "valuation_policy": null,
     "contract_source": null,
@@ -273,7 +281,7 @@
     "share_currency": "CNY",
     "share_currency_evidence": "fund_peer_classifications_v1.json",
     "supplement_focus": {
-      "benchmark_source": "中国战略新兴产业成份指数按德邦基金合同向发布方或授权供应商取数；中债综合全价总值，中债收益率与指数 https://yield.chinabond.com.cn/",
+      "benchmark_source": "中国战略新兴产业成份指数 000171，优先用中证指数 https://www.csindex.com.cn/csindex-home/perf/index-perf?indexCode=000171 ，按所需日期填写 startDate 和 endDate；中债综合全价总值 CBA00203，向中债 https://yield.chinabond.com.cn/cbweb-mn/indices/single_index_query 取所需日期的全价序列",
       "rating_data": "本C适用比较组的日/月末净值、真实权益仓位、集中度、组合换股摘牌及变现证据",
       "market_source": "巨潮资讯 https://www.cninfo.com.cn/；上交所 https://www.sse.com.cn/；深交所 https://www.szse.cn/；中债收益率与指数 https://yield.chinabond.com.cn/；德邦基金报告",
       "cycles": {
@@ -329,7 +337,8 @@
     "target_funds": [],
     "market_references": {
       "000300.SH": "https://api.tushare.pro",
-      "000905.SH": "https://api.tushare.pro"
+      "000905.SH": "https://api.tushare.pro",
+      "H11009.CSI": "https://www.csindex.com.cn/csindex-home/perf/index-perf?indexCode=H11009"
     },
     "valuation_policy": null,
     "contract_source": null,
@@ -338,14 +347,15 @@
     "share_currency": "CNY",
     "share_currency_evidence": "fund_peer_classifications_v1.json",
     "supplement_focus": {
-      "benchmark_source": "中证指数 https://www.csindex.com.cn/ 中证1000；中债收益率与指数 https://yield.chinabond.com.cn/ 国债总财富1至3年序列",
-      "rating_data": "按景恒合同与实际持仓核中小盘、行业分散、仓位调整和债券分项的执行",
+      "benchmark_timing": "2026年11月30日前适用沪深300指数收益率×80%+中证综合债券指数收益率×20%。2026年11月30日起适用中证1000指数收益率×90%+中债-国债总财富(1-3年)指数收益率×10%",
+      "benchmark_source": "大成基金2026年10月31日生效安排公告 https://epaper.cs.com.cn/zgzqb/html/2026-10/31/nw.D110000zgzqb_20261031_2-B029.htm。旧段用沪深300和中证综合债券 H11009，按日核中证指数 https://www.csindex.com.cn/csindex-home/perf/index-perf?indexCode=H11009 或授权 Tushare index_daily；新段查中证1000和中债收益率与指数 https://yield.chinabond.com.cn/ 国债总财富1至3年",
+      "rating_data": "按大成景恒评分期生效合同核实际股债权重、申报持仓行业分布及适用的股票和债券基准",
       "market_source": "中证指数 https://www.csindex.com.cn/；巨潮资讯 https://www.cninfo.com.cn/；中债收益率与指数 https://yield.chinabond.com.cn/；大成基金原报告",
       "cycles": {
-        "T1": "实际重仓及中证1000收盘、成交与涨跌家数，同时确认短期国债行情",
-        "T5_V1": "核小盘与组合主要行业多日成交变化、资金风格和近期成分公告",
-        "T20_V1": "重仓财报与组合仓位变化，检验小盘盈利和短债部分能否支撑",
-        "M6_V1": "中小市值盈利与估值、组合风格漂移和一年至三年国债利率情景"
+        "T1": "核实际重仓及基准日生效的股债指数收盘、成交与涨跌家数",
+        "T5_V1": "核组合主要行业多日成交、资金风格和基准生效日附近的实际变化",
+        "T20_V1": "核重仓财报、组合仓位和有效股债基准，涉及变更时分别保留原权重和新权重",
+        "M6_V1": "核实际持仓盈利、估值和组合风格，按生效日期核股债基准和相应利率"
       }
     }
   },
@@ -504,6 +514,7 @@
         "item": "2026-11-24越南新增休市和本份额暂停申赎，11月25日恢复",
         "use": "预测及建议",
         "source": "天弘基金公告 https://fund.eastmoney.com/gonggao/008764,AN202611201831877278.html 和越南证券登记结算公司 https://vsdc.vn/en/ad/202680",
+        "collection": "越南新增休市与申赎公告",
         "base_fact_prefix": "verified_vietnam_cultural_day_",
         "evidence_date": "target_nav_date"
       }
@@ -550,7 +561,7 @@
     "share_currency": "CNY",
     "share_currency_evidence": "fund_peer_classifications_v1.json",
     "supplement_focus": {
-      "benchmark_source": "国证半导体芯片（980017）国证指数 https://www.cnindex.com.cn/；合同活期税后利率",
+      "benchmark_source": "国证半导体芯片（980017）国证指数 https://www.cnindex.com.cn/ ，按日期核发布方正式日线 https://hq.cnindex.com.cn/market/market/getIndexDailyData?indexCode=980017 ；合同活期税后利率",
       "rating_data": "159995及国证芯片同日成分权重、联接仓位和主要股的真实暴露，核基金与目标指数跟踪差",
       "market_source": "国证指数 https://www.cnindex.com.cn/ 980017；深交所 https://www.szse.cn/ 159995；巨潮资讯 https://www.cninfo.com.cn/ 芯片成分发行人",
       "cycles": {
@@ -568,7 +579,9 @@
         "item": "801740.SI在2026-10-15的原始收盘点位",
         "use": "评分",
         "source": "向申万指数发布机构或授权终端按 801740.SI 与 2026-10-15 取原始日收盘。可到 Tushare 文档 https://tushare.pro/document/1?doc_id=108 核对申万日线权限和适用接口，仍缺行则走授权导出",
-        "required_date": "2026-10-15"
+        "required_date": "2026-10-15",
+        "collection": "登记指数日线",
+        "reference_index": "801740.SI"
       }
     ],
     "target_funds": [],
@@ -610,7 +623,7 @@
     "supplement_focus": {
       "benchmark_source": "中证指数 https://www.csindex.com.cn/ 中证医药卫生；恒生指数公司 https://www.hsi.com.hk/ 恒生医疗保健；中债收益率与指数 https://yield.chinabond.com.cn/ 中债总全价总值",
       "rating_data": "安信医药实际A股、港股和债券比例、持仓集中度、资金与受限资产及分市场合成基准",
-      "market_source": "巨潮资讯 https://www.cninfo.com.cn/；港交所披露易 https://www.hkexnews.hk/；国家药监局 https://www.nmpa.gov.cn/；国家医保局 https://www.nhsa.gov.cn/",
+      "market_source": "巨潮资讯 https://www.cninfo.com.cn/；港交所披露易 https://www.hkexnews.hk/；港股历史地址缺当日结果时，可用腾讯未复权日线 https://web.ifzq.gtimg.cn/appstock/app/fqkline/get 按五位港股代码取数并核对已收盘标记；国家药监局 https://www.nmpa.gov.cn/；国家医保局 https://www.nhsa.gov.cn/",
       "cycles": {
         "T1": "医药持仓实际A港行情，查批件、临床、招采和停牌公告",
         "T5_V1": "境内外医药分项多日轮动、主要重仓临床或审批窗口及资金承接",
@@ -627,7 +640,8 @@
     "market_references": {
       "000300.SH": "https://api.tushare.pro",
       "000905.SH": "https://api.tushare.pro",
-      "516150.SH": "https://api.tushare.pro"
+      "516150.SH": "https://api.tushare.pro",
+      "930598.CSI": "https://www.csindex.com.cn/csindex-home/perf/index-perf?indexCode=930598"
     },
     "valuation_policy": null,
     "contract_source": null,
@@ -636,7 +650,7 @@
     "share_currency": "CNY",
     "share_currency_evidence": "fund_peer_classifications_v1.json",
     "supplement_focus": {
-      "benchmark_source": "中证稀土产业 930598，中证指数 https://www.csindex.com.cn/；合同活期税后利率",
+      "benchmark_source": "中证稀土产业 930598，按所需日期查看中证指数日线 https://www.csindex.com.cn/csindex-home/perf/index-perf?indexCode=930598 ，填 startDate、endDate；合同活期税后利率",
       "rating_data": "516150定报穿透、稀土成分、权重和跟踪误差，区分采选冶炼和磁材应用",
       "market_source": "中证指数 https://www.csindex.com.cn/；上交所 https://www.sse.com.cn/ 516150；巨潮资讯 https://www.cninfo.com.cn/；工信部 https://www.miit.gov.cn/；商务部 https://www.mofcom.gov.cn/",
       "cycles": {
@@ -663,7 +677,7 @@
     "supplement_focus": {
       "benchmark_source": "中证指数 https://www.csindex.com.cn/ 中证800；恒生指数公司 https://www.hsi.com.hk/ 恒生指数；中证指数 https://www.csindex.com.cn/ 中证综合债指数",
       "rating_data": "大成高鑫实际A股、港股和债券权重、选股集中度及三组基准在相同估值期的合成",
-      "market_source": "中证指数 https://www.csindex.com.cn/；巨潮资讯 https://www.cninfo.com.cn/；港交所披露易 https://www.hkexnews.hk/；中债收益率与指数 https://yield.chinabond.com.cn/；大成基金报告",
+      "market_source": "中证指数 https://www.csindex.com.cn/；巨潮资讯 https://www.cninfo.com.cn/；港交所披露易 https://www.hkexnews.hk/；港股历史地址缺当日结果时，可用腾讯未复权日线 https://web.ifzq.gtimg.cn/appstock/app/fqkline/get 按五位港股代码取数并核对已收盘标记；中债收益率与指数 https://yield.chinabond.com.cn/；大成基金报告",
       "cycles": {
         "T1": "实际A股和港股重仓行情、重点盈利与交易公告及债券市场背景",
         "T5_V1": "组合主要行业多日走势、港股相对变化和个股现金回报或新增催化",
@@ -677,7 +691,8 @@
     "target_funds": [],
     "market_references": {
       "000300.SH": "https://api.tushare.pro",
-      "000905.SH": "https://api.tushare.pro"
+      "000905.SH": "https://api.tushare.pro",
+      "931151.CSI": "https://www.csindex.com.cn/csindex-home/perf/index-perf?indexCode=931151"
     },
     "valuation_policy": null,
     "contract_source": null,
@@ -686,7 +701,7 @@
     "share_currency": "CNY",
     "share_currency_evidence": "fund_peer_classifications_v1.json",
     "supplement_focus": {
-      "benchmark_source": "中证光伏产业 931151，中证指数 https://www.csindex.com.cn/；合同活期税后利率",
+      "benchmark_source": "中证光伏产业 931151，按所需日期核中证指数日线 https://www.csindex.com.cn/csindex-home/perf/index-perf?indexCode=931151 ，填 startDate、endDate；合同活期税后利率",
       "rating_data": "光伏指数成分和实际权重、跟踪误差、上下游集中度及受限流动性",
       "market_source": "中证指数 https://www.csindex.com.cn/；巨潮资讯 https://www.cninfo.com.cn/；国家能源局 https://www.nea.gov.cn/；国家统计局 https://www.stats.gov.cn/sj/",
       "cycles": {
@@ -705,7 +720,8 @@
     "market_references": {
       "000300.SH": "https://api.tushare.pro",
       "000905.SH": "https://api.tushare.pro",
-      "159755.SZ": "https://api.tushare.pro"
+      "159755.SZ": "https://api.tushare.pro",
+      "980032.SZ": "https://api.tushare.pro"
     },
     "valuation_policy": null,
     "contract_source": null,
@@ -714,7 +730,7 @@
     "share_currency": "CNY",
     "share_currency_evidence": "fund_peer_classifications_v1.json",
     "supplement_focus": {
-      "benchmark_source": "国证新能源车电池 980032，国证指数 https://www.cnindex.com.cn/；合同活期利率",
+      "benchmark_source": "国证新能源车电池 980032，授权 Tushare index_daily 按 980032.SZ 取所需日线，按日期对照国证指数正式日线 https://hq.cnindex.com.cn/market/market/getIndexDailyData?indexCode=980032 ；合同活期利率",
       "rating_data": "159755与联接仓位、实际持仓及同日指数样本、跟踪偏离，核配套申赎和成交承接",
       "market_source": "国证指数 https://www.cnindex.com.cn/；深交所 https://www.szse.cn/ 159755；巨潮资讯 https://www.cninfo.com.cn/；工信部 https://www.miit.gov.cn/",
       "cycles": {
@@ -1231,13 +1247,17 @@
       {
         "item": "6861.JP股价的1拆5除权口径",
         "use": "预测",
-        "source": "日本交易所 https://www.jpx.co.jp/news/2020/20261105-01.html 和基恩士 https://www.keyence.co.jp/pdf/PressRelease_20261105.pdf",
+        "source": "基恩士提交至日本交易所的公司公告 https://www2.jpx.co.jp/disc/68610/140120261028557317.pdf 及日本交易所权利调整表 https://www.jpx.co.jp/english/markets/equities/rights/index.html",
         "base_fact_prefix": "verified_keyence_split_",
         "max_source_age_days": 30
       }
     ],
     "target_funds": [],
     "market_references": {
+      "6861.JP": "https://finance.yahoo.co.jp/quote/6861.T/history",
+      "8111.JP": "https://finance.yahoo.co.jp/quote/8111.T/history",
+      "2726.JP": "https://finance.yahoo.co.jp/quote/2726.T/history",
+      "6088.JP": "https://finance.yahoo.co.jp/quote/6088.T/history",
       "TOPIX": "https://finance.yahoo.co.jp/quote/998405.T/history"
     },
     "valuation_policy": "QDII_CNY_VERIFIED_SESSION_V1",
@@ -1279,7 +1299,8 @@
         "item": "与基准净值日同日的Au99.99正式收盘和对照涨跌",
         "use": "四周期预测",
         "source": "上海黄金交易所每日交易行情 https://www.sge.com.cn/sjzx/quotation_daily_new ，逐日核对日期及现货合约",
-        "base_fact_prefix": "current_gold"
+        "base_fact_prefix": "current_gold",
+        "collection": "上金所现货收盘"
       },
       {
         "item": "新旧合同基准比例和11月30日正式生效日，供评分及二十日、半年使用",
@@ -1310,13 +1331,17 @@
         "item": "基准日底层ETF总份额与前一日变化，核对申赎方向",
         "use": "四周期预测",
         "source": "前海开源 159812 产品页 https://www.qhkyfund.com/osoa/qhkyfund/fund/info/159812.html ，按 159812.SZ 与基准日补查 Tushare fund_share https://tushare.pro/document/2?doc_id=207 和深交所披露",
-        "check_key": "gold_etf_base_shares"
+        "check_key": "gold_etf_base_shares",
+        "collection": "目标基金指定日行情",
+        "target_fund": "159812"
       },
       {
         "item": "基准日底层ETF正式单位净值，和同日场内收盘价比较折溢价",
         "use": "四周期预测",
         "source": "前海开源基金159812产品页 https://www.qhkyfund.com/osoa/qhkyfund/fund/info/159812.html 和深交所场内行情",
-        "check_key": "gold_etf_base_premium"
+        "check_key": "gold_etf_base_premium",
+        "collection": "目标基金指定日行情",
+        "target_fund": "159812"
       },
       {
         "item": "本期正式评分及持有诊断，包括经理、规模、同类排名、基准、回撤、费用、分红",

@@ -2,14 +2,15 @@
 
 import copy
 import json
-from datetime import date, datetime, time
+from datetime import date, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
 
 from app.db.session import get_engine
 from app.repositories import direction_1d as repo
-from app.services.direction_1d_protocol import ZONE, digest, window
+from app.services.direction_1d_protocol import digest
+from app.services.prediction_window_v2 import is_midnight, publication_deadline, window
 from app.services.fund_exposure_common import now
 from app.services.prediction_contract import PredictionFailure
 from app.services.prediction_review_v2 import policy_v2
@@ -29,6 +30,8 @@ def _readiness(codes, instant):
     from app.services.fund_prediction_nav_identity import available_prediction_nav
 
     planning = window(instant)
+    if is_midnight(planning):
+        return planning, dict.fromkeys(codes, False)
     base = date.fromisoformat(planning["base_nav_date"])
     found = dict.fromkeys(codes, False)
     with get_engine().connect() as connection:
@@ -52,13 +55,14 @@ def request_batch(codes, *, horizons=None, request_key=None, retry_items=None, m
         raise PredictionFailure("V2_FUND_NOT_HELD", "VALIDATION", "本轮仅更新本人当前持仓基金", retryable=False)
     instant = now()
     planning, ready = _readiness(codes, instant)
+    early = is_midnight(planning)
     items = [
         {
             "fundCode": code,
             "horizonId": horizon,
             "status": "PENDING",
             "attempts": 0,
-            "result": {"waitingFor": "ANALYSIS" if ready[code] else "NAV"},
+            "result": {"waitingFor": "ANALYSIS" if early or ready[code] else "NAV"},
         }
         for code in codes
         for horizon in selected
@@ -66,7 +70,7 @@ def request_batch(codes, *, horizons=None, request_key=None, retry_items=None, m
     ]
     if not items:
         raise PredictionFailure("BATCH_INPUT_INVALID", "VALIDATION", "没有需要更新的周期", retryable=False)
-    status = "PENDING_ANALYSIS" if all(ready.values()) else "WAITING_FOR_NAV"
+    status = "PENDING_ANALYSIS" if early or all(ready.values()) else "WAITING_FOR_NAV"
     summary = (
         "已登记按新规则更新，等待完成本期资料审阅；页面保留上次分析及日期。"
         if status == "PENDING_ANALYSIS"
@@ -122,7 +126,7 @@ def request_batch(codes, *, horizons=None, request_key=None, retry_items=None, m
             updated.update(status=status, summary=summary)
             for item in updated["items"]:
                 if item["status"] == "PENDING":
-                    item["result"]["waitingFor"] = "ANALYSIS" if ready[item["fundCode"]] else "NAV"
+                    item["result"]["waitingFor"] = "ANALYSIS" if early or ready[item["fundCode"]] else "NAV"
             if updated != result:
                 connection.execute(
                     text("UPDATE prediction_review_v2_request SET payload=CAST(:payload AS jsonb) "
@@ -181,8 +185,9 @@ def _completed_payload(payload, prepared, release_id, adopted_at):
                 or source.get("horizon") != item["horizonId"]
                 or not payload.get("_ownerHash")
                 or identity.get("owner_hash") != payload["_ownerHash"]
-                or identity.get("base_date") != planning.get("base_nav_date")
-                or identity.get("target_date") != planning.get("target_nav_date")
+                or identity.get("planning_base_date", identity.get("base_date")) != planning.get("base_nav_date")
+                or identity.get("planning_target_date", identity.get("target_date")) != planning.get("target_nav_date")
+                or (is_midnight(planning) and identity.get("deadline_at") != planning.get("deadline_at"))
                 or identity.get("snapshot_verified") is not True
                 or not identity.get("materials_input_hash")
                 or (payload.get("_materialsInputHash") is not None
@@ -192,7 +197,7 @@ def _completed_payload(payload, prepared, release_id, adopted_at):
             evaluated = record.get("evaluated_at")
             if not evaluated or not identity.get("target_date"):
                 continue
-            deadline = datetime.combine(date.fromisoformat(identity["target_date"]), time(15), ZONE)
+            deadline = publication_deadline(identity)
             decision = source.get("decision")
             if datetime.fromisoformat(evaluated) >= deadline and decision not in {"ABSTAIN", "BLOCKED"}:
                 continue
@@ -241,7 +246,7 @@ def complete_from_release(prepared, release_id, adopted_at):
     """正式发布提交后更新本新增队列进度，不写旧预测、订单或准确率。"""
     bases = sorted(
         {
-            item.get("workflow_identity", {}).get("base_date")
+            item["workflow_identity"].get("planning_base_date", item["workflow_identity"]["base_date"])
             for item in prepared["archive"].get("cases", [])
             if item.get("workflow_identity", {}).get("base_date")
         }

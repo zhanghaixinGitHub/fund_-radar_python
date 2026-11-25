@@ -1,7 +1,6 @@
 from decimal import Decimal as D
 
 import pytest
-
 from app.services.fund_rating_002112_monthly_portfolio import concentration, suspension_days
 
 
@@ -59,6 +58,43 @@ def test_infinite_order_does_not_invent_an_unquoted_through_date():
     proof["claims"] = proof["claims"][:1]
     with pytest.raises(ValueError, match="ACTUAL_THROUGH_DATE"):
         suspension_days(source, "600001", [proof], ["2026-09-02"])
+
+
+@pytest.mark.parametrize(
+    "query_day, row_code, halt_type, total, accepted",
+    [
+        ("20260902", "600001", "LXTP", 1, True),
+        ("20260901", "600001", "LXTP", 1, False),
+        ("20260902", "600002", "LXTP", 1, False),
+        ("20260902", "600001", "LSTP", 1, False),
+        ("20260902", "600001", "LXTP", 2, False),
+    ],
+)
+def test_official_exchange_status_confirms_only_matching_continuous_halt(
+    query_day, row_code, halt_type, total, accepted
+):
+    source, proof = interval()
+    proof.pop("resume_date")
+    proof.update(through_date="2026-09-02", sse_status_ref="exchange")
+    proof["claims"] = proof["claims"][:1]
+    source.asof = "2026-09-02"
+    source.original = lambda digest: {
+        "published_on": "2026-09-01",
+        "url": ("https://query.sse.com.cn/commonSoaQuery.do?sqlId=GW_PL_JYTS_TFPXX&productCode=600001"
+                f"&startStopDate={query_day}&endStopDate={query_day}"),
+    }
+    source.json = lambda digest: {
+        "pageHelp": {"total": total},
+        "result": [{"productCode": row_code, "controlType": "TR", "type": halt_type, "startStopDate": "20260901",
+                    "endStopDate": "", "stopTime": ""}],
+    }
+    if accepted:
+        assert suspension_days(source, "600001", [proof], ["2026-09-01", "2026-09-02", "2026-09-03"]) == {
+            "2026-09-01", "2026-09-02",
+        }
+    else:
+        with pytest.raises(ValueError, match="SUSPENSION_EXCHANGE"):
+            suspension_days(source, "600001", [proof], ["2026-09-02"])
 
 
 def test_intraday_halt_is_not_full_day_zero_turnover():

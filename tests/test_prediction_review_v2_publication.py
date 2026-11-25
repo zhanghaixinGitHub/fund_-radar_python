@@ -384,3 +384,14 @@ def test_research_adoption_requires_exactly_36_unique_cases(tmp_path, monkeypatc
     monkeypatch.setattr(service, "_load", lambda path, _: values[Path(path).name])
     with pytest.raises(ValueError, match="36_UNIQUE_CASES_REQUIRED"):
         service.prepare_release(tmp_path / "ledger")
+
+
+@pytest.mark.parametrize("stamp,expired", [("2026-11-25T23:59:59+08:00", False), ("2026-11-26T00:00:00+08:00", True)])
+def test_midnight_publication_checks_frozen_deadline_even_with_no_nav_reference(stamp, expired):
+    connection = SimpleNamespace(scalar=lambda query: datetime.fromisoformat(stamp))
+    cases = [{"workflow_identity": {"target_date": "2026-11-26", "deadline_at": "2026-11-26T00:00:00+08:00"}}]
+    if expired:
+        with pytest.raises(ValueError, match="V2_PUBLICATION_WINDOW_EXPIRED"):
+            service._check_live_reference_nav(connection, cases)
+    else:
+        service._check_live_reference_nav(connection, cases)

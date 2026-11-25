@@ -20,7 +20,7 @@ class Backend:
     def __init__(self, codes=None):
         self.codes = codes or [f"{i:06d}" for i in range(1, 8)]
         self.target, self.owner = "2026-10-29", "bound-owner"
-        self.submissions, self.recovers, self.saved = 0, [], set()
+        self.batch_reads, self.recovers, self.saved = [], [], set()
         self.terminal, self.outcomes = True, {"status": "SUCCEEDED", "summary": {"checked": 3}}
         self.fail_code, self.freeze_failure, self.archive = None, None, True
         self.actions, self.external = set(), set()
@@ -33,23 +33,17 @@ class Backend:
             {"target_nav_date": self.target, "base_nav_date": "2026-10-28"},
         )
 
-    def latest_batch(self):
-        return {"job_id": "old", "status": "SUCCEEDED"}
-
-    def start_or_reuse(self, previous):
-        self.submissions += 1
-        return {"job_id": "original"}
-
-    def recover_submission(self, intent):
-        return {"job_id": "original"}
-
     def batch_status(self, batch):
         assert batch["job_id"] == "original"
+        self.batch_reads.append(batch["job_id"])
         return {"terminal": self.terminal, "prediction_outcomes": self.outcomes}
 
     def one_day_outcomes(self):
-        assert self.terminal
         return {"status": "SUCCEEDED"}
+
+    def prediction_outcomes(self, scope):
+        assert scope == self.codes
+        return self.outcomes
 
     def guard(self, path, blocked):
         funds = [{"fund_code": c, "actions": ["fix"] if c in self.actions else [], "horizons": []} for c in self.codes]
@@ -111,22 +105,34 @@ def reviews(root, codes):
             versioned_save(root / "funds" / code / horizon / "review.json", {})
 
 
-def test_more_than_two_and_dynamic_new_fund_and_no_duplicate_submission(tmp_path):
+def test_new_run_reads_dynamic_holdings_without_using_any_sync_batch(tmp_path):
     b = Backend()
     reviews(tmp_path, b.codes)
     run = DailyPredictionRun(tmp_path, b)
-    assert run.advance()["status"] == "CLOSED"
+    first = run.advance()
+    assert first["status"] == "CLOSED"
+    assert first["supplement_run_id"] and "batch" not in first
     assert len(b.saved) == 14
     b.codes.append("999999")
     reviews(tmp_path, ["999999"])
-    assert run.advance()["status"] == "CLOSED"
+    resumed = run.advance()
+    assert resumed["status"] == "CLOSED"
+    assert resumed["supplement_run_id"] == first["supplement_run_id"]
     assert ("999999", "T5_V1") in b.saved
-    assert b.submissions == 1
+    assert not b.batch_reads and not (tmp_path / "submission-intent.json").exists()
+
+
+def legacy_run(root, backend, job_id="original"):
+    versioned_save(root / "run.json", {
+        "owner_user_id": backend.owner, "window": backend.context()[3], "funds": {},
+        "first_failures": [], "batch": {"job_id": job_id},
+    })
 
 
 def test_no_analysis_before_all_children_terminal(tmp_path):
     b = Backend()
     b.terminal = False
+    legacy_run(tmp_path, b)
     value = DailyPredictionRun(tmp_path, b).advance()
     assert value["status"] == "WAITING_MATERIALS"
     assert not b.recovers and not b.saved
@@ -144,12 +150,13 @@ def test_waiting_resume_polls_original_job_and_rechecks_materials_only_after_ter
 
     b = CountingBackend()
     b.terminal = False
+    legacy_run(tmp_path, b)
     run = DailyPredictionRun(tmp_path, b)
     assert run.advance()["status"] == "WAITING_MATERIALS"
-    assert b.guards == 1 and b.submissions == 1
+    assert b.guards == 1 and b.batch_reads == ["original"]
     b.codes.append("999999")
     assert run.advance()["scope"] == b.codes
-    assert b.guards == 1 and b.submissions == 1 and not b.recovers
+    assert b.guards == 1 and b.batch_reads == ["original"] * 2 and not b.recovers
     b.terminal = True
     result = run.advance()
     assert b.guards == 3  # 终态后的资料检查和正式结束检查均不能省略。
@@ -159,12 +166,13 @@ def test_waiting_resume_polls_original_job_and_rechecks_materials_only_after_ter
 def test_missing_initial_followthrough_is_rebuilt_even_while_waiting(tmp_path):
     b = Backend()
     b.terminal = False
+    legacy_run(tmp_path, b)
     run = DailyPredictionRun(tmp_path, b)
     run.advance()
     (tmp_path / "followthrough.json").unlink()
     assert run.advance()["status"] == "WAITING_MATERIALS"
     assert read(tmp_path / "followthrough.json")["funds"]
-    assert b.submissions == 1 and not b.recovers
+    assert b.batch_reads == ["original"] * 2 and not b.recovers
 
 
 def test_one_parser_failure_does_not_stop_other_funds_or_become_external(tmp_path):
@@ -229,7 +237,7 @@ def test_advice_runs_after_ratings_and_cannot_close_with_pending_dependencies(tm
     b = Backend(["123456"])
     reviews(tmp_path, b.codes)
     steps = []
-    b.ratings = lambda terminal: steps.append("ratings") or {"status": "SUCCEEDED"}
+    b.ratings = lambda terminal, state: steps.append("ratings") or {"status": "SUCCEEDED"}
 
     def advice(state, final):
         assert state["ratings"]["status"] == "SUCCEEDED"
@@ -283,7 +291,7 @@ def test_uncertain_submit_only_recovers_original(tmp_path):
     b = Backend(["123456"])
     versioned_save(tmp_path / "submission-intent.json", {"previous": {"job_id": "old"}})
     DailyPredictionRun(tmp_path, b).advance()
-    assert b.submissions == 0
+    assert not b.batch_reads
 
 
 def test_nul_normalization_preserves_original_and_character_offsets(tmp_path):
@@ -351,7 +359,7 @@ def test_failed_prepare_does_not_leave_empty_freeze_directory(tmp_path, monkeypa
     assert not folder.exists()
 
 
-def test_existing_non_materials_job_must_finish_then_submit_pure_batch(tmp_path):
+def test_legacy_predecessor_finishes_then_continues_without_new_batch(tmp_path):
     b = Backend(["123456"])
     original_status = b.batch_status
     b.batch_status = lambda batch: (
@@ -369,10 +377,10 @@ def test_existing_non_materials_job_must_finish_then_submit_pure_batch(tmp_path)
             "batch": {"job_id": "predecessor", "reused": True},
         },
     )
-    b.terminal = False
     result = DailyPredictionRun(tmp_path, b).advance()
-    assert result["status"] == "WAITING_MATERIALS" and not b.recovers
-    assert b.submissions == 1 and result["preceding_jobs"][0]["job_id"] == "predecessor"
+    assert result["status"] == "ACTION_REQUIRED" and b.recovers == ["123456"]
+    assert result["supplement_run_id"] and "batch" not in result
+    assert not b.batch_reads and result["preceding_jobs"][0]["job_id"] == "predecessor"
 
 
 def test_fund_checklist_pending_keeps_source_date_and_horizon_by_use(tmp_path, monkeypatch):
@@ -419,6 +427,7 @@ def test_source_recheck_updates_only_the_matching_daily_checklist(tmp_path, monk
             "fund_code": fund, "field": "NAV", "status": "NOT_PUBLISHED",
             "attempted_at": "2026-11-20T00:30:00+08:00", "attempted_source": "本份额原净值入口",
             "summary": "11月19日本份额同日净值尚未披露", "next_source": "基金管理人正式净值页面复查",
+            "retry_at": "2026-11-20T10:15:00+08:00",
         }],
     }
     versioned_save(root / "source-rechecks.json", source_review)
@@ -428,6 +437,7 @@ def test_source_recheck_updates_only_the_matching_daily_checklist(tmp_path, monk
     nav = next(task for task in tasks if task["field"] == "NAV")
     assert nav["source_review"]["status"] == "NOT_PUBLISHED"
     assert nav["next_source"] == "基金管理人正式净值页面复查"
+    assert nav["retry_at"] == "2026-11-20T10:15:00+08:00"
     assert "□ 待核实**　本份额正式净值" in document.read_text(encoding="utf-8")
     assert "本次取件 所需日期尚未披露" in document.read_text(encoding="utf-8")
     source_review["target_nav_date"] = "2026-11-23"
@@ -437,9 +447,62 @@ def test_source_recheck_updates_only_the_matching_daily_checklist(tmp_path, monk
     assert "本次取件" not in document.read_text(encoding="utf-8")
 
 
-def test_refresh_single_checklist_reads_latest_profile_without_entering_business_run(tmp_path, monkeypatch):
+def test_checklist_reuses_verified_evidence_but_not_an_old_rating_alone(tmp_path, monkeypatch):
     from datetime import datetime
+
+    from app.services import fund_daily_profiles as checklists
+
+    when = "2026-11-21T00:31:00+08:00"
+    monkeypatch.setattr(checklists, "now", lambda: datetime.fromisoformat(when))
+    fund = "008888"
+    root = tmp_path / "run"
+    window = {"base_nav_date": "2026-11-20", "target_nav_date": "2026-11-23",
+              "deadline_at": "2026-11-23T15:00:00+08:00"}
+    state = {
+        "scope": [fund], "window": window, "funds": {},
+        "ratings": {"checklist_day": when[:10], "checklist_month_covered": [fund], "readback": [
+            {"fundCode": fund, "dimensions": [{"key": "holdings", "score": "99.83", "sources": ["中报"]}]}
+        ]},
+    }
+    base = {"fund_code": fund, "attempted_at": when, "attempted_source": "本份额正式来源",
+            "summary": "核对日期、份额和口径", "evidence_ref": "材料归档回执"}
+    versioned_save(root / "source-rechecks.json", {
+        "day": when[:10], "base_nav_date": window["base_nav_date"], "target_nav_date": window["target_nav_date"],
+        "items": [
+            {**base, "field": "rating_liquidity", "status": "REUSED_VERIFIED", "required_date": "2026-10-31"},
+            {**base, "field": "NAV", "status": "NEW_VERIFIED", "required_date": "2026-11-20"},
+            {**base, "field": "rating_cost", "status": "REUSED_VERIFIED", "required_date": "2026-09-30"},
+            {**base, "field": "rating_management", "status": "REUSED_VERIFIED", "required_date": "2026-10-31",
+             "evidence_ref": ""},
+        ],
+    })
+    tasks = checklists.save_pending(root, state, records={fund: {"name": "半导体联接C", "template": "domestic"}})
+    fields = {task["field"] for task in tasks}
+    assert {"rating_holdings", "rating_cost", "rating_management"} <= fields
+    assert fields.isdisjoint({"rating_liquidity", "NAV"})
+    document = (tmp_path / "fund-supplements" / f"{fund}.md").read_text(encoding="utf-8")
+    assert "□ 待核实**　持仓结构" in document
+    assert "✓ 已核实**　规模与流动性" in document and "本次核对 已核实并复用" in document
+    assert "✓ 已核实**　本份额正式净值" in document and "本次核对 已核实并补齐" in document
+
+
+def test_checklist_does_not_use_morning_check_time_as_retry_time(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from app.services import fund_daily_profiles as checklists
+
+    monkeypatch.setattr(checklists, "now", lambda: datetime.fromisoformat("2026-11-21T00:31:00+08:00"))
+    fund = "021740"
+    state = {"scope": [fund], "window": {"base_nav_date": "2026-11-20", "target_nav_date": "2026-11-23",
+                                         "deadline_at": "2026-11-23T15:00:00+08:00"}, "funds": {}}
+    pending = checklists.save_pending(tmp_path / "daily-prediction-20261121", state,
+                                     records={fund: {"name": "黄金联接C", "template": "domestic"}})
+    assert next(task for task in pending if task["field"] == "NAV")["retry_at"] is None
+
+
+def test_refresh_single_checklist_reads_latest_profile_without_entering_business_run(tmp_path, monkeypatch):
     import sys
+    from datetime import datetime
 
     from app.commands import fund_daily_prediction as command
     from app.services import fund_daily_profiles as checklists
@@ -458,7 +521,9 @@ def test_refresh_single_checklist_reads_latest_profile_without_entering_business
     monkeypatch.setattr(checklists, "profiles", lambda: {fund: {"report_source": "已核验的新公告入口"}})
     monkeypatch.setattr("app.services.prediction_trial_v2.storage_check", lambda _: None)
     monkeypatch.setattr("app.services.fund_daily_services.ensure_services", lambda _: pytest.fail("误入业务续办"))
-    monkeypatch.setattr(sys, "argv", ["fund_daily_prediction", "--run-dir", str(directory), "--refresh-checklist", fund])
+    monkeypatch.setattr(
+        sys, "argv", ["fund_daily_prediction", "--run-dir", str(directory), "--refresh-checklist", fund]
+    )
 
     command.main()
 

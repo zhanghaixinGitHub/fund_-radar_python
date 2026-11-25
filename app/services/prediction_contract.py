@@ -143,13 +143,21 @@ def add_months(day: date, months: int) -> date:
     return date(year, month, min(day.day, month_calendar.monthrange(year, month)[1]))
 
 
-def target_dates(calendar: ValuationCalendar, generated_at: datetime, horizon_id: str, *, policy=None) -> dict:
+def target_dates(calendar: ValuationCalendar, generated_at: datetime, horizon_id: str, *, policy=None,
+                 valuation_window=None) -> dict:
     policy = policy or prediction_policy()
     horizon = next((h for h in policy["horizons"] if h["horizon_id"] == horizon_id), None)
     if horizon is None:
         raise PredictionFailure("HORIZON_NOT_CONFIGURED", "VALIDATION", "预测周期未开放", retryable=False)
-    start = calendar.start(generated_at)
-    base = calendar.required_base(generated_at) if nav_anchored(policy) else start
+    if valuation_window is None:
+        start = calendar.start(generated_at)
+        base = calendar.required_base(generated_at) if nav_anchored(policy) else start
+    else:
+        from app.services.prediction_window_v2 import fund_window
+
+        if fund_window(valuation_window, calendar) != valuation_window:
+            raise PredictionFailure("CALENDAR_POLICY_MISSING", "CALENDAR", "本基金的起始和基准估值日仍待核实")
+        base, start = (date.fromisoformat(valuation_window[k]) for k in ("base_nav_date", "target_nav_date"))
     nominal = None
     if horizon["unit"] == "TRADING_SESSION":
         index = bisect_left(calendar.sessions, base) + horizon["length"]
@@ -161,7 +169,9 @@ def target_dates(calendar: ValuationCalendar, generated_at: datetime, horizon_id
         index = bisect_left(calendar.sessions, nominal)
         end = calendar.sessions[index] if index < len(calendar.sessions) else None
     return {
-        **({"baseNavDate": str(base), "generationPolicy": policy["generation_policy"]} if nav_anchored(policy) else {}),
+        **({"baseNavDate": str(base), "generationPolicy": (
+            valuation_window["generation_policy"] if valuation_window else policy["generation_policy"]
+        )} if valuation_window or nav_anchored(policy) else {}),
         "startDate": str(start),
         "endDate": str(end) if end else None,
         "nominalEndDate": str(nominal) if nominal else None,

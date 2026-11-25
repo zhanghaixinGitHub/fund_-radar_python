@@ -14,7 +14,7 @@ LISTED_FOF_POLICY = "QDII_CNY_LISTED_FUND_SESSION_V1"
 
 
 def verified_qdii_window(
-    profile: dict, material: dict, documents: dict, window: dict, *, as_of: datetime | None = None
+    profile: dict, material: dict, documents: dict, window: dict, *, as_of: datetime | None = None, calendar_only=False
 ) -> bool:
     """只核验本次冻结的人民币股票QDII，不替代预测审阅，也不更改旧结果。
 
@@ -43,7 +43,7 @@ def verified_qdii_window(
     if listed_fof and not re.search("FOF|原油", description, re.I):
         return False
     base, target = window["base_nav_date"], window["target_nav_date"]
-    if evidence.get("base_date") != base or evidence.get("target_date") != target:
+    if not calendar_only and (evidence.get("base_date") != base or evidence.get("target_date") != target):
         return False
     if any(date.fromisoformat(day).weekday() >= 5 for day in (base, target)):
         return False
@@ -110,6 +110,10 @@ def verified_qdii_window(
             or "净值" not in target_clause
         ):
             return False
+    if calendar_only:
+        # 仅验证基金本身的估值条款及投向。适用交易日由 review_calendar
+        # 用官方日历独立核对；此路径不把缺少的收盘或汇率标成已取得。
+        return True
     fx = documents.get(evidence.get("fx_ref"), {})
     if fx.get("kind") != "FX_REFERENCE_DATA" or urlparse(fx.get("url", "")).hostname not in {
         "www.safe.gov.cn",
@@ -265,8 +269,13 @@ def verified_qdii_window(
                 parsed = json.loads(body)
                 if host != "www.jpx.co.jp" or parsed["year"] != date.fromisoformat(target).year:
                     return False
-                if len(parsed["closed_dates"]) < 20 or target in parsed["closed_dates"]:
+                if len(parsed["closed_dates"]) < 20:
                     return False
+                if target in parsed["closed_dates"]:
+                    from app.services.comprehensive_calendar import verified_qdii_workday_valuation
+
+                    if not verified_qdii_workday_valuation(material, documents):
+                        return False
                 if base in parsed["closed_dates"]:
                     # 上方已逐证券/指数核实真实参考日；不能只看日历便放行旧报价。
                     from app.services.fund_valuation_sessions import verified_jp_holiday_reference

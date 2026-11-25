@@ -1,19 +1,25 @@
 """外盘月末以本份额官方完整净值原件重放；不采用普通工作日推算。"""
 
+import json
 from datetime import date, timedelta
 from decimal import Decimal
+from urllib.parse import parse_qs, urlsplit
 
 from app.services.fund_rating_direct_index import Originals
 
+CSRC_NAV_PATH = "/fund/disclose/getPublicFundJZInfoMore.do"
+
 
 def official_month_end(bundle, observed, requested, *, root):
-    """当前核准摩根匿名净值完整列表；其他发行人必须另接实际原件格式。"""
+    """复核适用的管理人或证监会实际公开净值序列。"""
     proof = bundle.get("monthly_valuation_proof", {})
     code = bundle.get("fund_code")
     if proof.get("format") == "BOSERA_NAV_YEAR_RANGE_V1":
         return bosera_month_end(bundle, observed, requested, root=root)
     if proof.get("format") == "HUAAN_ISSUER_RETURN_CURVE_V1":
         return huaan_month_end(bundle, observed, requested, root=root)
+    if proof.get("format") == "CSRC_EID_SHARE_NAV_V1":
+        return csrc_month_end(bundle, observed, requested, root=root)
     if (
         proof.get("format") != "CIFM_PRODUCT_NAV_COMPLETE_V1"
         or proof.get("fund_code") != code
@@ -76,6 +82,55 @@ def official_month_end(bundle, observed, requested, *, root):
     before, after = [d for d in days if d <= requested], [d for d in days if d > requested]
     if not before or not after or max(before) != observed or proof.get("next_valuation_date") != str(min(after)):
         raise ValueError("MONTH_END_OFFICIAL_TERMINAL_OR_NEXT")
+    return True
+
+
+def csrc_month_end(bundle, observed, requested, *, root):
+    """复核证监会披露的同份额完整跨月净值和下一估值日。"""
+    proof = bundle["monthly_valuation_proof"]
+    ref = proof["official_nav_source_ref"]
+    code = bundle["fund_code"]
+    if (
+        proof.get("fund_code") != code
+        or proof.get("as_of_date") != str(observed)
+        or bundle.get("as_of_date") != str(observed)
+        or proof.get("month_end") != str(requested)
+        or (requested + timedelta(days=1)).day != 1
+        or observed.strftime("%Y-%m") != requested.strftime("%Y-%m")
+        or observed > requested
+        or ref.get("http_status") != 200
+    ):
+        raise ValueError("MONTH_END_CSRC_PROOF_SCOPE")
+    url = urlsplit(ref["url"])
+    if (url.scheme not in {"http", "https"} or url.netloc != "eid.csrc.gov.cn"
+            or url.path != CSRC_NAV_PATH or url.fragment):
+        raise ValueError("MONTH_END_CSRC_SOURCE")
+    query = parse_qs(url.query, strict_parsing=True)
+    if set(query) != {"aoData"} or len(query["aoData"]) != 1:
+        raise ValueError("MONTH_END_CSRC_QUERY")
+    fields = json.loads(query["aoData"][0])
+    params = {entry["name"]: entry["value"] for entry in fields}
+    start, end = date.fromisoformat(params["startDate"]), date.fromisoformat(params["endDate"])
+    if (len(params) != len(fields) or params["fundCode"] != code or params["iDisplayStart"] != "0"
+            or start > observed or end <= requested):
+        raise ValueError("MONTH_END_CSRC_QUERY_SCOPE")
+    source = Originals({"as_of_date": str(date.today()), "sources": {ref["sha256"]: ref}}, root, lazy=True)
+    raw = source.json(ref["sha256"])
+    rows = raw["aaData"]
+    if (not isinstance(rows, list) or not rows or int(raw["iTotalDisplayRecords"]) != len(rows)
+            or len(rows) > int(params["iDisplayLength"])):
+        raise ValueError("MONTH_END_CSRC_SEQUENCE_INCOMPLETE")
+    days = []
+    for row in rows:
+        day, value = date.fromisoformat(row["valuationDate"]), Decimal(str(row["shareNetValue"]))
+        if (row["code"] != code or not isinstance(row.get("shortName"), str) or not row["shortName"].strip()
+                or not start <= day <= end or not value.is_finite() or value <= 0):
+            raise ValueError("MONTH_END_CSRC_ROW")
+        days.append(day)
+    before, after = [d for d in days if d <= requested], [d for d in days if d > requested]
+    if (len(set(days)) != len(days) or not before or not after or max(before) != observed
+            or proof.get("next_valuation_date") != str(min(after))):
+        raise ValueError("MONTH_END_CSRC_TERMINAL_OR_NEXT")
     return True
 
 
